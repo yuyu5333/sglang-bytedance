@@ -82,6 +82,7 @@ class EAGLEWorker(TpModelWorker):
         moe_ep_rank: int,
         nccl_port: int,
         target_worker: TpModelWorker,
+        **kwargs,
     ):
         # Parse arguments
         self.server_args = server_args
@@ -190,6 +191,13 @@ class EAGLEWorker(TpModelWorker):
             (), dtype=torch.int64, device=self.device
         )
         self.extend_lens = torch.empty((), dtype=torch.int64, device=self.device)
+
+        self.relaxed_thinking = global_server_args_dict.get(
+            "speculative_relaxed_thinking", False
+        )
+        if self.relaxed_thinking:
+            self.think_start_token = kwargs["think_start_id"]
+            self.think_end_token = kwargs["think_end_id"]
 
     def init_attention_backend(self):
         # Create multi-step attn backends and cuda graph runners
@@ -351,6 +359,18 @@ class EAGLEWorker(TpModelWorker):
             batch_result.logits_output,
             batch_result.next_token_ids,
         )
+
+        if self.relaxed_thinking:
+            thinking_states = batch.thinking_states()
+            for i, tok in enumerate(next_token_ids):
+                if tok == self.think_start_token:
+                    thinking_states[i] = True
+                    logger.warning("thinking is started at the end of prefill!")
+                if tok == self.think_end_token:
+                    thinking_states[i] = False
+                    logger.warning("thinking is ended at the end of prefill!")
+            batch.update_thinking_states(thinking_states)
+
         return (
             logits_output,
             next_token_ids,
@@ -726,7 +746,7 @@ class EAGLEWorker(TpModelWorker):
             vocab_mask,
         )
         # Get verify result and update thinking status
-        if batch.relax_thinking:
+        if global_server_args_dict.get("speculative_relaxed_thinking", False):
             batch.update_thinking_states(res.thinking_states)
 
         # Post process based on verified outputs.
