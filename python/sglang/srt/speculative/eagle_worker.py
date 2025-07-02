@@ -365,10 +365,8 @@ class EAGLEWorker(TpModelWorker):
             for i, tok in enumerate(next_token_ids):
                 if tok == self.think_start_token:
                     thinking_states[i] = True
-                    logger.warning("thinking is started at the end of prefill!")
-                if tok == self.think_end_token:
+                elif tok == self.think_end_token:
                     thinking_states[i] = False
-                    logger.warning("thinking is ended at the end of prefill!")
             batch.update_thinking_states(thinking_states)
 
         return (
@@ -737,7 +735,6 @@ class EAGLEWorker(TpModelWorker):
 
         spec_info.hidden_states = logits_output.hidden_states
 
-        # Thinking status is in batch.
         res: EagleVerifyOutput = spec_info.verify(
             batch,
             logits_output,
@@ -745,8 +742,7 @@ class EAGLEWorker(TpModelWorker):
             self.page_size,
             vocab_mask,
         )
-        # Get verify result and update thinking status
-        if global_server_args_dict.get("speculative_relaxed_thinking", False):
+        if self.relaxed_thinking:
             batch.update_thinking_states(res.thinking_states)
 
         # Post process based on verified outputs.
