@@ -1375,6 +1375,8 @@ class Scheduler(
                 ),
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
+                think_start_token_id=self.think_start_token_id,
+                think_end_token_id=self.think_end_token_id,
             )
             req.tokenizer = self.tokenizer
 
