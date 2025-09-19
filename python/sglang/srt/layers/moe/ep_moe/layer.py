@@ -29,6 +29,7 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     is_fp8_fnuz,
     sglang_per_token_group_quant_fp8,
 )
+from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import ceil_div, dispose_tensor, get_bool_env_var, is_hip, is_npu
@@ -114,9 +115,6 @@ class EPMoE(FusedMoE):
             with_bias=with_bias,
         )
 
-        self.start_expert_id = self.moe_ep_rank * self.num_local_experts
-        self.end_expert_id = self.start_expert_id + self.num_local_experts - 1
-
         self.intermediate_size = intermediate_size
 
         if isinstance(quant_config, Fp8Config):
@@ -129,7 +127,15 @@ class EPMoE(FusedMoE):
             self.use_fp8_w8a8 = True
             self.fp8_dtype = torch.float8_e4m3fn
             self.activation_scheme = quant_config.activation_scheme
+            self.use_w4afp8 = False
+        elif isinstance(quant_config, W4AFp8Config):
+            self.use_w4afp8 = True
+            self.use_fp8_w8a8 = False
+            self.use_block_quant = False
+            self.block_shape = None
+            self.activation_scheme = None
         else:
+            self.use_w4afp8 = False
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
             self.block_shape = None
@@ -232,7 +238,7 @@ class EPMoE(FusedMoE):
             (
                 _cast_to_e8m0_with_rounding_up(gateup_input_scale)
                 if deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
-                else deep_gemm_wrapper.get_col_major_tma_aligned_tensor(
+                else deep_gemm_wrapper.get_mn_major_tma_aligned_tensor(
                     gateup_input_scale
                 )
             ),
@@ -290,9 +296,7 @@ class EPMoE(FusedMoE):
             (
                 down_input_scale
                 if deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
-                else deep_gemm_wrapper.get_col_major_tma_aligned_tensor(
-                    down_input_scale
-                )
+                else deep_gemm_wrapper.get_mn_major_tma_aligned_tensor(down_input_scale)
             ),
         )
         down_output = torch.empty(
@@ -407,8 +411,7 @@ class DeepEPMoE(EPMoE):
                 self.w13_weight,
                 (
                     self.w13_weight_scale_inv
-                    if self.use_block_quant
-                    or get_moe_runner_backend().is_cutlass_w4afp8()
+                    if self.use_block_quant or self.use_w4afp8
                     else self.w13_weight_scale
                 ),
             )
@@ -416,8 +419,7 @@ class DeepEPMoE(EPMoE):
                 self.w2_weight,
                 (
                     self.w2_weight_scale_inv
-                    if self.use_block_quant
-                    or get_moe_runner_backend().is_cutlass_w4afp8()
+                    if self.use_block_quant or self.use_w4afp8
                     else self.w2_weight_scale
                 ),
             )
@@ -452,6 +454,7 @@ class DeepEPMoE(EPMoE):
             hidden_states=hidden_states,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
+            static_scale=self.w13_input_scale.float(),
             forward_batch=forward_batch,
         )
 
@@ -466,13 +469,13 @@ class DeepEPMoE(EPMoE):
             assert DispatchOutputChecker.format_is_ascent_ll(dispatch_output)
             return self.forward_npu(dispatch_output)
         if DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
-            if get_moe_runner_backend().is_cutlass_w4afp8():
-                return self.forward_cutlass_w4a8(dispatch_output)
+            if self.use_w4afp8:
+                return self.forward_cutlass_w4afp8(dispatch_output)
             assert deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and self.use_fp8_w8a8
             return self.forward_deepgemm_contiguous(dispatch_output)
         elif DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
-            if get_moe_runner_backend().is_cutlass_w4afp8():
-                return self.forward_cutlass_w4a8_masked(dispatch_output)
+            if self.use_w4afp8:
+                return self.forward_cutlass_w4afp8_masked(dispatch_output)
             assert deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and self.use_fp8_w8a8
             return self.forward_deepgemm_masked(dispatch_output)
         else:
@@ -733,88 +736,27 @@ class DeepEPMoE(EPMoE):
 
         return down_output
 
-    def forward_cutlass_w4a8_masked(
-        self,
-        dispatch_output: DeepEPLLOutput,
-    ):
-        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe
-
-        hidden_states, _, _, masked_m, _ = dispatch_output
-        hidden_states_fp8, _ = hidden_states
-
-        output = cutlass_w4a8_moe(
-            self.start_expert_id,
-            self.end_expert_id,
-            self.num_experts,
-            hidden_states_fp8,
-            self.w13_weight,
-            self.w2_weight,
-            self.w13_weight_scale_inv,
-            self.w2_weight_scale_inv,
-            None,
-            None,
-            masked_m,
-            self.quant_method.a_strides1,
-            self.quant_method.b_strides1,
-            self.quant_method.c_strides1,
-            self.quant_method.a_strides2,
-            self.quant_method.b_strides2,
-            self.quant_method.c_strides2,
-            self.quant_method.s_strides13,
-            self.quant_method.s_strides2,
-            self.quant_method.expert_offsets,
-            self.quant_method.problem_sizes1,
-            self.quant_method.problem_sizes2,
-            self.w13_input_scale,
-            self.w2_input_scale,
-            deepep_mode=dispatch_output.format,
-        )
-
-        return output
-
-    def forward_cutlass_w4a8(
+    def forward_cutlass_w4afp8_masked(
         self,
         dispatch_output: DeepEPNormalOutput,
     ):
-        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe
-
-        hidden_states, topk_idx, topk_weights = (
-            dispatch_output.hidden_states,
-            dispatch_output.topk_idx,
-            dispatch_output.topk_weights,
+        assert self.moe_runner_config.activation == "silu"
+        assert isinstance(self.quant_method, W4AFp8MoEMethod)
+        return self.quant_method.apply_deepep_ll(
+            layer=self,
+            dispatch_output=dispatch_output,
         )
-        num_tokens = hidden_states.shape[0]
-        if num_tokens > 0:
-            output = cutlass_w4a8_moe(
-                self.start_expert_id,
-                self.end_expert_id,
-                self.num_experts,
-                hidden_states,
-                self.w13_weight,
-                self.w2_weight,
-                self.w13_weight_scale_inv,
-                self.w2_weight_scale_inv,
-                topk_weights,
-                topk_idx,
-                None,
-                self.quant_method.a_strides1,
-                self.quant_method.b_strides1,
-                self.quant_method.c_strides1,
-                self.quant_method.a_strides2,
-                self.quant_method.b_strides2,
-                self.quant_method.c_strides2,
-                self.quant_method.s_strides13,
-                self.quant_method.s_strides2,
-                self.quant_method.expert_offsets,
-                self.quant_method.problem_sizes1,
-                self.quant_method.problem_sizes2,
-                self.w13_input_scale,
-                self.w2_input_scale,
-                deepep_mode=dispatch_output.format,
-            )
-            return output
-        else:
-            return hidden_states
+
+    def forward_cutlass_w4afp8(
+        self,
+        dispatch_output: DeepEPNormalOutput,
+    ):
+        assert self.moe_runner_config.activation == "silu"
+        assert isinstance(self.quant_method, W4AFp8MoEMethod)
+        return self.quant_method.apply_deepep_normal(
+            layer=self,
+            dispatch_output=dispatch_output,
+        )
 
     def forward_npu(
         self,
