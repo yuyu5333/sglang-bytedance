@@ -158,7 +158,7 @@ RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/sour
       git clone https://github.com/fzyzcjy/DeepEP.git \
       && cd DeepEP && git checkout 1fd57b0276311d035d16176bb0076426166e52f3 && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && cd .. ; \
     else \
-      git clone https://github.com/deepseek-ai/DeepEP.git \
+      git clone https://github.com/bytedance-iaas/DeepEP.git \
       && cd DeepEP && git checkout ${DEEPEP_COMMIT} && sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && cd .. ; \
     fi \
     && tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz \
@@ -200,7 +200,7 @@ RUN cd /sgl-workspace/DeepEP && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="${CHOSEN_TORCH_CUDA_ARCH_LIST}" pip install --no-build-isolation .
 
 # Install flashmla
-RUN git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla && \
+RUN git clone https://github.com/bytedance-iaas/FlashMLA.git flash-mla && \
       cd flash-mla && \
       git checkout ${FLASHMLA_COMMIT} && \
       git submodule update --init --recursive && \
