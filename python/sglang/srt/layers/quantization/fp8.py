@@ -658,6 +658,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert self.quant_config.activation_scheme == "dynamic"
             if get_moe_runner_backend().is_cutlass():
                 self._ensure_cutlass_buffers_initialized(layer)
+
         else:
             # Allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
