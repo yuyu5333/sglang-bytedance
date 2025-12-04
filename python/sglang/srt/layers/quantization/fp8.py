@@ -543,7 +543,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        if get_moe_runner_backend().is_cutlass() or get_moe_runner_backend().is_cutlass_fp8():
+        if get_moe_runner_backend().is_cutlass():
             assert (
                 cutlass_fp8_supported()
             ), "cutlass_fp8 MoE requires CUDA 12.0+ with SM90 or CUDA 12.4+ with SM89"
@@ -658,59 +658,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert self.quant_config.activation_scheme == "dynamic"
             if get_moe_runner_backend().is_cutlass():
                 self._ensure_cutlass_buffers_initialized(layer)
-            if get_moe_runner_backend().is_cutlass_fp8():
-                self.ab_strides1 = torch.full(
-                    (num_experts,),
-                    hidden_size,
-                    device=w13_weight.device,
-                    dtype=torch.int64,
-                )
-                self.c_strides1 = torch.full(
-                    (num_experts,),
-                    2 * intermediate_size_per_partition,
-                    device=w13_weight.device,
-                    dtype=torch.int64,
-                )
-                self.ab_strides2 = torch.full(
-                    (num_experts,),
-                    intermediate_size_per_partition,
-                    device=w2_weight.device,
-                    dtype=torch.int64,
-                )
-                self.c_strides2 = torch.full(
-                    (num_experts,),
-                    hidden_size,
-                    device=w2_weight.device,
-                    dtype=torch.int64,
-                )
-                self.workspace = torch.empty(
-                    90000, device=w13_weight.device, dtype=torch.uint8
-                )
-                self.a_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.b_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.out_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.a_scales_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.b_scales_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.expert_offsets = torch.empty(
-                    num_experts + 1, device=w13_weight.device, dtype=torch.int32
-                )
-                self.problem_sizes1 = torch.empty(
-                    num_experts, 3, device=w13_weight.device, dtype=torch.int32
-                )
-                self.problem_sizes2 = torch.empty(
-                    num_experts, 3, device=w13_weight.device, dtype=torch.int32
-                )
-
         else:
             # Allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.

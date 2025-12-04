@@ -11,7 +11,6 @@ from sgl_kernel import (
 )
 
 from sglang.srt.distributed import get_moe_expert_parallel_world_size
-from sglang.srt.utils import get_bool_env_var
 from sglang.srt.layers.moe.ep_moe.kernels import (
     cutlass_w4_run_moe_ep_preproess,
     deepep_ll_get_cutlass_w4a8_moe_mm_data,
@@ -502,9 +501,7 @@ def cutlass_w4a8_moe_deepep_ll(
     )
 
     gateup_input = torch.empty(a.shape, dtype=torch.float8_e4m3fn, device=device)
-    if get_bool_env_var("SGLANG_DEEPEP_BF16_DISPATCH"):
-        sgl_per_tensor_quant_fp8(a, gateup_input, a1_scale.float(), True)
-    else:
+    sgl_per_tensor_quant_fp8(a, gateup_input, a1_scale.float(), True)
         gateup_input = a
     c1 = torch.empty((num_experts, m, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((num_experts, m, k), device=device, dtype=torch.bfloat16)
