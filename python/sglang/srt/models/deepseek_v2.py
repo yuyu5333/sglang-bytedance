@@ -747,18 +747,11 @@ class DeepseekV2MoE(nn.Module):
         self._fuse_shared_experts_inside_sbo = SboFlags.fuse_shared_experts_inside_sbo()
 
     def get_moe_weights(self):
-        if self.quant_config and self.quant_config.get_name() == "w4afp8":
-            return [
-                 x.data
-                 for name, x in self.experts.named_parameters()
-                 if name not in ["correction_bias"]
-             ][:-2]
-        else:
-             return [
-                 x.data
-                 for name, x in self.experts.named_parameters()
-                if name not in ["correction_bias"]
-             ]
+        return [
+            x.data
+            for name, x in self.experts.named_parameters()
+        if name not in ["correction_bias"]
+        ]
 
     def forward(
         self,
