@@ -502,7 +502,6 @@ def cutlass_w4a8_moe_deepep_ll(
 
     gateup_input = torch.empty(a.shape, dtype=torch.float8_e4m3fn, device=device)
     sgl_per_tensor_quant_fp8(a, gateup_input, a1_scale.float(), True)
-        gateup_input = a
     c1 = torch.empty((num_experts, m, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((num_experts, m, k), device=device, dtype=torch.bfloat16)
 
