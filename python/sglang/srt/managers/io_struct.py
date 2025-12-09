@@ -642,6 +642,9 @@ class TokenizedGenerateReqInput(BaseReq):
 
     # Whether to return entropy
     return_entropy: bool = False
+    
+    # For dp balance
+    dp_balance_id: int = -1
 
 
 @dataclass
@@ -694,6 +697,9 @@ class EmbeddingReqInput(BaseReq):
 
     # tracing context
     trace_context: Optional[Dict] = None
+    
+    # For dp balance
+    dp_balance_id: int = -1
 
     def normalize_batch_and_arguments(self):
         # at least one of text, input_ids, or image should be provided
