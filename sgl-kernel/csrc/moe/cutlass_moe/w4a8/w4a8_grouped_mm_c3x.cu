@@ -157,6 +157,20 @@ void dispatch_w4a8_moe_mm_sm90(
           d_strides,
           s_strides,
           chunk_size);
+    } else if (m <= 256) {
+      invoke_gemm<SM90_CO<128, 16, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
     } else if (m <= 512) {
       invoke_gemm<SM90_CO<128, 64, 512, 1, 2, 1>>(
           d_tensors,
@@ -172,7 +186,7 @@ void dispatch_w4a8_moe_mm_sm90(
           s_strides,
           chunk_size);
     } else if (m <= 1024) {
-      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+      invoke_gemm<SM90_CO<128, 32, 512, 2, 1, 1>>(
           d_tensors,
           a_tensors,
           b_tensors,
@@ -202,6 +216,93 @@ void dispatch_w4a8_moe_mm_sm90(
     }
   } else if (n == 7168 && k == 2048) {
     // group gemm 2
+    if (m <= 4) {
+      invoke_gemm<SM90_PP<64, 32, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 8) {
+      invoke_gemm<SM90_PP<64, 16, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 32) {
+      invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 64) {
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 512) {
+      invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else {
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    }
+  } else if (n == 512 && k == 7168) {
+    // group gemm 1 for tp
     if (m <= 4) {
       invoke_gemm<SM90_PP<64, 32, 512, 2, 1, 1>>(
           d_tensors,
@@ -272,8 +373,22 @@ void dispatch_w4a8_moe_mm_sm90(
           d_strides,
           s_strides,
           chunk_size);
-    } else if (m <= 512) {
-      invoke_gemm<SM90_CO<128, 64, 512, 1, 2, 1>>(
+    } else if (m <= 256) {
+      invoke_gemm<SM90_CO<128, 16, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 1024) {
+      invoke_gemm<SM90_CO<128, 32, 512, 2, 1, 1>>(
           d_tensors,
           a_tensors,
           b_tensors,
@@ -287,7 +402,296 @@ void dispatch_w4a8_moe_mm_sm90(
           s_strides,
           chunk_size);
     } else {
-      invoke_gemm<SM90_CO<128, 64, 512, 2, 1, 1>>(
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    }
+  } else if (n == 2048 && k == 7168) {
+    # group gemm 1 tp 2
+    if (m <= 4) {
+      invoke_gemm<SM90_PP<64, 32, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 8) {
+      invoke_gemm<SM90_PP<64, 16, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 16) {
+      invoke_gemm<SM90_CO<128, 16, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 32) {
+      invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 64) {
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 256) {
+      invoke_gemm<SM90_CO<128, 16, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 1024) {
+      invoke_gemm<SM90_CO<128, 32, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else {
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    }
+  } else if (n == 7168 && k == 256) {
+    // group gemm 2 for tp
+    if (m <= 8) {
+      invoke_gemm<SM90_PP<64, 16, 128, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 16) {
+      invoke_gemm<SM90_CO<128, 16, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 32) {
+      invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 64) {
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 512) {
+      invoke_gemm<SM90_PP<128, 32, 128, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else {
+      invoke_gemm<SM90_PP<128, 64, 128, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    }
+  } else if (n == 7168 && k == 1024) {
+    # group gemm 2 tp 2
+    if (m <= 8) {
+      invoke_gemm<SM90_PP<64, 16, 256, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 16) {
+      invoke_gemm<SM90_CO<128, 16, 512, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 32) {
+      invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 64) {
+      invoke_gemm<SM90_CO<128, 64, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else if (m <= 512) {
+      invoke_gemm<SM90_PP<128, 32, 256, 2, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else {
+      invoke_gemm<SM90_PP<128, 64, 256, 1, 1, 1>>(
           d_tensors,
           a_tensors,
           b_tensors,
@@ -302,19 +706,35 @@ void dispatch_w4a8_moe_mm_sm90(
           chunk_size);
     }
   } else {
-    invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
-        d_tensors,
-        a_tensors,
-        b_tensors,
-        a_scales,
-        b_scales,
-        expert_offsets,
-        problem_sizes,
-        a_strides,
-        b_strides,
-        d_strides,
-        s_strides,
-        chunk_size);
+    if (k % 512 == 0) {
+      invoke_gemm<SM90_CO<128, 32, 512, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    } else {
+      invoke_gemm<SM90_PP<128, 64, 128, 1, 1, 1>>(
+          d_tensors,
+          a_tensors,
+          b_tensors,
+          a_scales,
+          b_scales,
+          expert_offsets,
+          problem_sizes,
+          a_strides,
+          b_strides,
+          d_strides,
+          s_strides,
+          chunk_size);
+    }
   }
 }
 
