@@ -155,7 +155,7 @@ def cutlass_w4a8_moe(
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
-
+    expected_m_per_group = int(m / num_local_experts)
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -170,6 +170,7 @@ def cutlass_w4a8_moe(
         s_strides13,
         128,
         topk,
+        expected_m_per_group,
     )
 
     intermediate_q = torch.empty(
@@ -193,6 +194,7 @@ def cutlass_w4a8_moe(
         s_strides2,
         128,
         topk,
+        expected_m_per_group,
     )
 
     output = torch.empty_like(a)
@@ -329,6 +331,7 @@ def cutlass_w4a8_moe_deepep_normal(
     local_topk_ids = (
         torch.where(local_topk_ids == -1, num_experts, topk_ids_).to(torch.int32)
     ).contiguous()
+    expected_m_per_group = int(m / num_experts)
 
     a_map = torch.empty((local_topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((local_topk_ids.numel()), dtype=torch.int32, device=device)
@@ -360,6 +363,7 @@ def cutlass_w4a8_moe_deepep_normal(
         s_strides13,
         128,
         topk,
+        expected_m_per_group,
     )
     intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
     silu_and_mul(c1, intermediate)
@@ -383,6 +387,7 @@ def cutlass_w4a8_moe_deepep_normal(
         s_strides2,
         128,
         topk,
+        expected_m_per_group,
     )
     num_tokens = src2dst.shape[0] // topk
     output = torch.empty(
@@ -484,6 +489,7 @@ def cutlass_w4a8_moe_deepep_ll(
     topk = topk_ids_.size(1)
 
     device = a.device
+    expected_m_per_group = int(m / num_experts)
 
     problem_sizes1, problem_sizes2 = deepep_ll_get_cutlass_w4a8_moe_mm_data(
         masked_m,
@@ -513,6 +519,7 @@ def cutlass_w4a8_moe_deepep_ll(
         s_strides13,
         128,
         topk,
+        expected_m_per_group,
     )
 
     intermediate_q = torch.empty(
@@ -535,6 +542,7 @@ def cutlass_w4a8_moe_deepep_ll(
         s_strides2,
         128,
         topk,
+        expected_m_per_group,
     )
 
     return c2
