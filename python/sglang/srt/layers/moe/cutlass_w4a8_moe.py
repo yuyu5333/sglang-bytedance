@@ -21,6 +21,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     pre_reorder_for_cutlass_moe,
     silu_and_mul_masked_post_per_tensor_quant_fwd,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
+    silu_mul_and_per_tensor_static_quant_fwd,
 )
 
 
@@ -525,8 +526,8 @@ def cutlass_w4a8_moe_deepep_ll(
     intermediate_q = torch.empty(
         (num_experts, m, n), device=a.device, dtype=torch.float8_e4m3fn
     )
-    silu_and_mul_masked_post_per_tensor_quant_fwd(
-        c1, intermediate_q, masked_m, a2_scale
+    silu_mul_and_per_tensor_static_quant_fwd(
+        c1, intermediate_q, masked_m, a2_scale.float()
     )
     cutlass_w4a8_moe_mm(
         c2,
