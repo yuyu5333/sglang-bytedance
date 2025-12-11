@@ -417,7 +417,7 @@ void dispatch_w4a8_moe_mm_sm90(
           chunk_size);
     }
   } else if (n == 2048 && k == 7168) {
-    # group gemm 1 tp 2
+    // group gemm 1 tp 2
     if (m <= 4) {
       invoke_gemm<SM90_PP<64, 32, 512, 2, 1, 1>>(
           d_tensors,
@@ -619,7 +619,7 @@ void dispatch_w4a8_moe_mm_sm90(
           chunk_size);
     }
   } else if (n == 7168 && k == 1024) {
-    # group gemm 2 tp 2
+    // group gemm 2 tp 2
     if (m <= 8) {
       invoke_gemm<SM90_PP<64, 16, 256, 1, 1, 1>>(
           d_tensors,
