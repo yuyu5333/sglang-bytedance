@@ -466,7 +466,8 @@ void cutlass_w4a8_moe_mm_sm90(
     torch::Tensor const& d_strides,
     torch::Tensor const& s_strides,
     int64_t chunk_size,
-    int64_t topk) {
+    int64_t topk,
+    int64_t expected_m_per_group) {
   dispatch_w4a8_moe_mm_sm90(
       d_tensors,
       a_tensors,
@@ -480,5 +481,6 @@ void cutlass_w4a8_moe_mm_sm90(
       d_strides,
       s_strides,
       chunk_size,
-      topk);
+      topk,
+      expected_m_per_group);
 }
