@@ -165,6 +165,7 @@ MOE_RUNNER_BACKEND_CHOICES = [
     "flashinfer_cutedsl",
     "cutlass",
     "cutlass_w4afp8",
+    "sonicmoe",
 ]
 
 MAMBA_SSM_DTYPE_CHOICES = ["float32", "bfloat16"]
