@@ -585,4 +585,8 @@ def get_moe_impl_class(quant_config: Optional[QuantizationConfig]):
         return FlashInferFusedMoE
     if get_moe_runner_backend().is_flashinfer_cutlass():
         return FusedMoE
+    # SonicMoE backend (non-EP). Requires 'sonicmoe' package at runtime.
+    if get_moe_runner_backend().is_sonicmoe():
+        from sglang.srt.layers.moe.sonicmoe_moe import SonicMoEFusedMoE
+        return SonicMoEFusedMoE
     return FusedMoE
