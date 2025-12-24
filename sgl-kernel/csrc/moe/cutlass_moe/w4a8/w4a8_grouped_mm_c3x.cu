@@ -99,7 +99,7 @@ void dispatch_w4a8_moe_mm_sm90(
 
   // 临时用topk来选择kernel，线上代码中topk代表它原本的含义
   switch(topk) {
-    case 1110611: {
+        case 1110611: {
             using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,16,512,1,1,1)::Cutlass3xW4A8Gemm;
             cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
                 d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
@@ -341,6 +341,7 @@ void dispatch_w4a8_moe_mm_sm90(
             break;
         }
     }
+}
 }  // namespace
 
 void cutlass_w4a8_moe_mm_sm90(
