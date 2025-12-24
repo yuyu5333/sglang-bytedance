@@ -2,8 +2,6 @@
 #include <cudaTypedefs.h>
 #include <torch/all.h>
 
-#include <type_traits>
-
 #include "cutlass/cutlass.h"
 #include "w4a8_grouped_mm_c3x.cuh"
 
@@ -11,79 +9,71 @@ using namespace cute;
 
 namespace {
 
-enum class Sched { PP, CO };
+#define JOIN_STRUCT_NAME(m, n, k, a, b, c) sm90_fp8_config##_##m##_##n##_##k##_##a##_##b##_##c
 
-template <int M, int N, int K, int A, int B, int C, Sched S>
-struct SM90W4A8Config {
-  using KernelSchedule = std::conditional_t<
-      S == Sched::PP,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative>;
+#define JOIN_STRUCT_NAME_CO(m, n, k, a, b, c) sm90_fp8_co_config##_##m##_##n##_##k##_##a##_##b##_##c
 
-  using EpilogueSchedule = std::conditional_t<
-      S == Sched::PP,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative>;
+#define GENERATE_SM90_W4A8_PP_CONFIG(M, N, K, A, B, C)                                                               \
+  struct JOIN_STRUCT_NAME(M, N, K, A, B, C) {                                                                        \
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;                                  \
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;                                  \
+    using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;                                         \
+    using ClusterShape = cute::Shape<cute::Int<A>, cute::Int<B>, cute::Int<C>>;                                      \
+                                                                                                                     \
+    using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>; \
+  };
 
-  using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;
-  using ClusterShape = cute::Shape<cute::Int<A>, cute::Int<B>, cute::Int<C>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
-};
+#define GENERATE_SM90_W4A8_CO_CONFIG(M, N, K, A, B, C)                                                               \
+  struct JOIN_STRUCT_NAME_CO(M, N, K, A, B, C) {                                                                     \
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;                               \
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;                               \
+    using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;                                         \
+    using ClusterShape = cute::Shape<cute::Int<A>, cute::Int<B>, cute::Int<C>>;                                      \
+                                                                                                                     \
+    using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>; \
+  };
 
-template <int M, int N, int K, int A, int B, int C>
-using SM90_PP = SM90W4A8Config<M, N, K, A, B, C, Sched::PP>;
+GENERATE_SM90_W4A8_PP_CONFIG(64,16,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,16,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,16,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,16,512,2,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,32,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,32,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,32,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,32,512,2,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,64,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,64,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,64,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,64,512,2,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,128,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,128,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,128,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(64,128,512,2,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,16,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,16,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,16,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,16,512,2,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,32,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,32,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,32,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,32,512,2,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,64,512,1,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,64,512,1,2,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,64,512,2,1,1)
+GENERATE_SM90_W4A8_PP_CONFIG(128,64,512,2,2,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,16,512,1,1,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,16,512,1,2,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,16,512,2,1,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,16,512,2,2,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,32,512,1,1,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,32,512,1,2,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,32,512,2,1,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,32,512,2,2,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,64,512,1,1,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,64,512,1,2,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,64,512,2,1,1)
+GENERATE_SM90_W4A8_CO_CONFIG(128,64,512,2,2,1)
 
-template <int M, int N, int K, int A, int B, int C>
-using SM90_CO = SM90W4A8Config<M, N, K, A, B, C, Sched::CO>;
-
-template <typename Config>
-inline void invoke_gemm(
-    torch::Tensor& d_tensors,
-    torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors,
-    torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales,
-    torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes,
-    torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides,
-    torch::Tensor const& d_strides,
-    torch::Tensor const& s_strides,
-    int64_t chunk_size) {
-  using GemmT = typename Config::Cutlass3xW4A8Gemm;
-  cutlass_w4a8_group_gemm_caller<GemmT>(
-      d_tensors,
-      a_tensors,
-      b_tensors,
-      a_scales,
-      b_scales,
-      expert_offsets,
-      problem_sizes,
-      a_strides,
-      b_strides,
-      d_strides,
-      s_strides,
-      chunk_size);
-}
-
-// Helper macro to reduce code duplication
-// Note: Config must be wrapped in parentheses when it contains commas (e.g., template parameters)
-// This uses a helper macro to strip the parentheses from the template parameter
-#define INVOKE_GEMM_WITH_CONFIG_HELPER(...) \
-  invoke_gemm<__VA_ARGS__>(                 \
-      d_tensors,                            \
-      a_tensors,                            \
-      b_tensors,                            \
-      a_scales,                             \
-      b_scales,                             \
-      expert_offsets,                       \
-      problem_sizes,                        \
-      a_strides,                            \
-      b_strides,                            \
-      d_strides,                            \
-      s_strides,                            \
-      chunk_size)
-#define INVOKE_GEMM_WITH_CONFIG(Config) INVOKE_GEMM_WITH_CONFIG_HELPER Config
 
 void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,
@@ -98,98 +88,259 @@ void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor const& d_strides,
     torch::Tensor const& s_strides,
     int64_t chunk_size,
-    int64_t topk,
-    int64_t expected_m_per_group) {
-  uint32_t const m = expected_m_per_group;
-  uint32_t const n = d_tensors.size(-1);
-  uint32_t const k = a_tensors.size(-1);
+    int64_t topk) {
+  using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
+  using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
 
-   if (n == 4096 && k == 7168) {
-    // group gemm 1
-    if (m <= 4) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
-    } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 192, 1, 1, 1>));
-    } else if (m <= 64) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-    } else if (m <= 256) {
-      // update tune
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-    } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
-    } else if (m <= 4096) {
-      // Optimized for prefill: seq_len up to 4096 (m=4096 with topk=1)
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
-    } else {
-      // Optimized for prefill: seq_len up to 8192 (m=8192 with topk=1)
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-    }
-  } else if (n == 7168 && k == 2048) {
-    // group gemm 2
-    if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 16, 512, 1, 1, 1>));
-    } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 192, 1, 1, 1>));
-    } else if (m <= 64) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 64, 512, 2, 1, 1>));
-    } else if (m <= 512) {
-      // update tune
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-    } else if (m <= 4096) {
-      // Optimized for prefill: larger cluster for better throughput
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
-    } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-    }
-  } else if (n == 512 && k == 7168) {
-    // group gemm 1 for tp
-    if (m <= 4) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
-    } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 2, 1, 1>));
-    } else if (m <= 256) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
-    } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
-    } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-    }
-  } else if (n == 7168 && k == 256) {
-    // group gemm 2 for tp
-    if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 16, 128, 1, 1, 1>));
-    } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
-    } else if (m <= 512) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
-    } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
-    }
-  } else {
-    if (k % 512 == 0) {
-      // For large m (prefill), prefer larger cluster
-      if (m <= 32) {
-        // Decode: target batch size (16-32) - use cluster size 1 for better latency
-        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
-      } else if (m <= 1024) {
-        // Decode: large batch or small prefill
-        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
-      } else {
-        // Prefill: large sequence length - prefer larger cluster
-        INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
-      }
-    } else {
-      if (m <= 32) {
-        // Decode: target batch size (16-32) - use larger tile for better throughput
-        INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
-      } else {
-        // Prefill: larger sequence length
-        INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
-      }
-    }
-  }
-}
+  uint32_t const m = a_tensors.size(0) / 8;
+  uint32_t const n = d_tensors.size(1);
+  uint32_t const k = a_tensors.size(1);
 
+
+  // 临时用topk来选择kernel，线上代码中topk代表它原本的含义
+  switch(topk) {
+    case 1110611: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,16,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1110621: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,16,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1110711: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,16,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1110721: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,16,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1113111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,32,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1113121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,32,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1113211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,32,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1113221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,32,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1118111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,64,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1118121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,64,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1118211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,64,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1118221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,64,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1128111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,128,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1128121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,128,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1128211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,128,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1128221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(64,128,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1210611: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,16,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1210621: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,16,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1210711: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,16,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1210721: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,16,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1213111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,32,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1213121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,32,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1213211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,32,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1213221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,32,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1218111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,64,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1218121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,64,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1218211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,64,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 1218221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME(128,64,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2210611: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,16,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2210621: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,16,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2210711: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,16,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2210721: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,16,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2213111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,32,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2213121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,32,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2213211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,32,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2213221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,32,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2218111: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,64,512,1,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2218121: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,64,512,1,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2218211: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,64,512,2,1,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }    case 2218221: {
+            using Cutlass3xW4A8GemmKSelected = typename JOIN_STRUCT_NAME_CO(128,64,512,2,2,1)::Cutlass3xW4A8Gemm;
+            cutlass_w4a8_group_gemm_caller<Cutlass3xW4A8GemmKSelected>(
+                d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, d_strides, s_strides, chunk_size);
+            break;
+        }
+    }
 }  // namespace
 
 void cutlass_w4a8_moe_mm_sm90(
