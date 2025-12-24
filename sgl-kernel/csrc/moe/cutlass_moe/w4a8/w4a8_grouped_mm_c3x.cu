@@ -88,7 +88,8 @@ void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor const& d_strides,
     torch::Tensor const& s_strides,
     int64_t chunk_size,
-    int64_t topk) {
+    int64_t topk,
+    int64_t expected_m_per_group) {
   using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
   using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
 
