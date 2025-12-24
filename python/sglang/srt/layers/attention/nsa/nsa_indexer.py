@@ -8,6 +8,7 @@ from einops import rearrange
 
 from sglang.srt.layers.layernorm import LayerNorm
 from sglang.srt.layers.utils import MultiPlatformOp
+from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool
 from sglang.srt.utils import add_prefix, ceil_align, is_cuda, is_hip, is_npu
 
 global _use_multi_stream
@@ -526,11 +527,10 @@ class Indexer(MultiPlatformOp):
         key = self._get_k_bf16(x, positions, enable_dual_stream)
         k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
 
-        if not forward_batch.out_cache_loc.is_contiguous():
-            forward_batch.out_cache_loc = forward_batch.out_cache_loc.contiguous()
+        index_loc = self._get_index_out_cache_loc(forward_batch)
         forward_batch.token_to_kv_pool.set_index_k_scale_buffer(
             layer_id=layer_id,
-            loc=forward_batch.out_cache_loc,
+            loc=index_loc,
             index_k=k_fp8,
             index_k_scale=k_scale,
         )
@@ -854,11 +854,10 @@ class Indexer(MultiPlatformOp):
         # k_buffer: (num_total_tokens + page_size, head_dim) fp8_e4m3fn
         # k_scale: (seq_len, head_dim // block_size = 1) fp8_e4m3fn
         # k_scale_cache: (num_total_tokens + page_size, head_dim // block_size = 1) fp8_e4m3fn
-        if not forward_batch.out_cache_loc.is_contiguous():
-            forward_batch.out_cache_loc = forward_batch.out_cache_loc.contiguous()
+        index_loc = self._get_index_out_cache_loc(forward_batch)
         forward_batch.token_to_kv_pool.set_index_k_scale_buffer(
             layer_id=layer_id,
-            loc=forward_batch.out_cache_loc,
+            loc=index_loc,
             index_k=k_fp8,
             index_k_scale=k_scale,
         )
@@ -1034,9 +1033,8 @@ class Indexer(MultiPlatformOp):
                 torch.npu.current_stream(),
             )
 
-        forward_batch.token_to_kv_pool.set_index_k_buffer(
-            layer_id, forward_batch.out_cache_loc, k
-        )
+        index_loc = self._get_index_out_cache_loc(forward_batch)
+        forward_batch.token_to_kv_pool.set_index_k_buffer(layer_id, index_loc, k)
         if is_prefill:
             if self.nsa_enable_prefill_cp and forward_batch.nsa_cp_metadata is not None:
                 forward_batch.attn_backend.forward_metadata.actual_seq_lengths_q = (
@@ -1183,3 +1181,18 @@ class Indexer(MultiPlatformOp):
             sparse_mode=3,
         )
         return topk_indices_prev, topk_indices_next
+
+    def _get_index_out_cache_loc(self, forward_batch: ForwardBatch) -> torch.Tensor:
+        """Get index_k output cache location."""
+        pool = forward_batch.req_to_token_pool
+
+        if enable_nsa_hybrid_indexer_pool(req_to_token_pool=pool):
+            index_loc = pool.req_to_nsa_index_k[
+                forward_batch.req_pool_indices, forward_batch.seq_lens - 1
+            ].to(torch.int64)
+        else:
+            index_loc = forward_batch.out_cache_loc
+
+        if not index_loc.is_contiguous():
+            index_loc = index_loc.contiguous()
+        return index_loc
