@@ -3,6 +3,256 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import torch
+import sys
+import types
+
+def _torch_compile(*args, **kwargs):
+    def _decorator(f):
+        return f
+    return _decorator
+torch.compile = _torch_compile
+
+# Lightweight stubs to satisfy optional runtime deps when importing sglang
+sys.modules.setdefault("IPython", types.ModuleType("IPython"))
+_ip_disp = types.ModuleType("IPython.display")
+class _HTML:
+    def __init__(self, *args, **kwargs):
+        pass
+def _display(*args, **kwargs):
+    return None
+_ip_disp.HTML = _HTML
+_ip_disp.display = _display
+sys.modules.setdefault("IPython.display", _ip_disp)
+sys.modules.setdefault("pybase64", types.ModuleType("pybase64"))
+_triton = types.ModuleType("triton")
+_triton_language = types.ModuleType("triton.language")
+import importlib.machinery as _machinery
+_triton.__spec__ = _machinery.ModuleSpec("triton", loader=None)
+_triton_language.__spec__ = _machinery.ModuleSpec("triton.language", loader=None)
+_triton_language.constexpr = lambda v: v
+def _triton_jit(fn=None, **kwargs):
+    if fn is None:
+        def _decorator(f):
+            return f
+        return _decorator
+    return fn
+_triton.jit = _triton_jit
+def _triton_autotune(*args, **kwargs):
+    def _decorator(f):
+        return f
+    return _decorator
+_triton.autotune = _triton_autotune
+class _TritonConfig:
+    def __init__(self, *args, **kwargs):
+        pass
+_triton.Config = _TritonConfig
+sys.modules.setdefault("triton", _triton)
+sys.modules.setdefault("triton.language", _triton_language)
+_orjson = types.ModuleType("orjson")
+_orjson.dumps = lambda *args, **kwargs: b"{}"
+_orjson.loads = lambda *args, **kwargs: {}
+sys.modules.setdefault("orjson", _orjson)
+sys.modules.setdefault("zmq", types.ModuleType("zmq"))
+
+# Minimal stub for sglang.srt.layers.dp_attention to avoid heavy deps
+_dp_attn_stub = types.ModuleType("sglang.srt.layers.dp_attention")
+class _DummyTPGroup:
+    def cp_all_gather_into_tensor_async(self, *args, **kwargs):
+        return None
+_dp_attn_stub.get_attention_tp_group = lambda: _DummyTPGroup()
+_dp_attn_stub.get_attention_tp_rank = lambda: 0
+_dp_attn_stub.get_attention_tp_size = lambda: 1
+_dp_attn_stub.is_allocation_symmetric = lambda: True
+_dp_attn_stub.set_dp_buffer_len = lambda *args, **kwargs: None
+_dp_attn_stub.get_attention_dp_size = lambda: 1
+_dp_attn_stub.get_attention_dp_group = lambda: _DummyTPGroup()
+_dp_attn_stub.get_attention_dp_rank = lambda: 0
+_dp_attn_stub.is_dp_attention_enabled = lambda: False
+class _DpPaddingMode:
+    pass
+_dp_attn_stub.DpPaddingMode = _DpPaddingMode
+_dp_attn_stub.set_is_extend_in_batch = lambda *args, **kwargs: None
+sys.modules.setdefault("sglang.srt.layers.dp_attention", _dp_attn_stub)
+
+# Minimal stub for AttentionArch to avoid importing heavy configs
+_model_config_stub = types.ModuleType("sglang.srt.configs.model_config")
+import enum as _enum
+class _AttentionArch(_enum.Enum):
+    MLA = 1
+_model_config_stub.AttentionArch = _AttentionArch
+sys.modules.setdefault("sglang.srt.configs.model_config", _model_config_stub)
+
+# Minimal stub for fastapi responses
+_fastapi = types.ModuleType("fastapi")
+_fastapi_responses = types.ModuleType("fastapi.responses")
+_fastapi.__spec__ = _machinery.ModuleSpec("fastapi", loader=None)
+_fastapi_responses.__spec__ = _machinery.ModuleSpec("fastapi.responses", loader=None)
+class _ORJSONResponse:
+    pass
+_fastapi_responses.ORJSONResponse = _ORJSONResponse
+_fastapi.responses = _fastapi_responses
+sys.modules.setdefault("fastapi", _fastapi)
+sys.modules.setdefault("fastapi.responses", _fastapi_responses)
+
+# Minimal stub for starlette routing
+_starlette = types.ModuleType("starlette")
+_starlette_routing = types.ModuleType("starlette.routing")
+class _Mount:
+    pass
+_starlette_routing.Mount = _Mount
+_starlette.routing = _starlette_routing
+sys.modules.setdefault("starlette", _starlette)
+sys.modules.setdefault("starlette.routing", _starlette_routing)
+
+# Minimal stub for openai types
+_openai = types.ModuleType("openai")
+_openai_types = types.ModuleType("openai.types")
+_openai_types_responses = types.ModuleType("openai.types.responses")
+_openai.__spec__ = _machinery.ModuleSpec("openai", loader=None)
+_openai_types.__spec__ = _machinery.ModuleSpec("openai.types", loader=None)
+_openai_types_responses.__spec__ = _machinery.ModuleSpec("openai.types.responses", loader=None)
+class _ResponseFunctionToolCall: pass
+class _ResponseInputItemParam: pass
+class _ResponseOutputItem: pass
+class _ResponseOutputMessage: pass
+class _ResponseOutputText: pass
+class _ResponseReasoningItem: pass
+_openai_types_responses.ResponseFunctionToolCall = _ResponseFunctionToolCall
+_openai_types_responses.ResponseInputItemParam = _ResponseInputItemParam
+_openai_types_responses.ResponseOutputItem = _ResponseOutputItem
+_openai_types_responses.ResponseOutputMessage = _ResponseOutputMessage
+_openai_types_responses.ResponseOutputText = _ResponseOutputText
+_openai_types_responses.ResponseReasoningItem = _ResponseReasoningItem
+_openai_types_responses.response = types.ModuleType("openai.types.responses.response")
+class _ToolChoice: pass
+_openai_types_responses.response.ToolChoice = _ToolChoice
+_openai_types_responses.tool = types.ModuleType("openai.types.responses.tool")
+class _Tool: pass
+_openai_types_responses.tool.Tool = _Tool
+_openai.types = _openai_types
+sys.modules.setdefault("openai", _openai)
+sys.modules.setdefault("openai.types", _openai_types)
+sys.modules.setdefault("openai.types.responses", _openai_types_responses)
+sys.modules.setdefault("openai.types.responses.response", _openai_types_responses.response)
+sys.modules.setdefault("openai.types.responses.tool", _openai_types_responses.tool)
+
+# Minimal stub for sglang.srt.server_args to avoid deep imports
+_server_args_stub = types.ModuleType("sglang.srt.server_args")
+class _ServerArgs:
+    def __init__(self, model_path="dummy"):
+        self.enable_dp_attention = False
+        self.nsa_prefill_backend = "flashmla_sparse"
+        self.nsa_decode_backend = "flashmla_sparse"
+        self.device = "cuda"
+        self.enable_nsa_prefill_context_parallel = False
+def _get_global_server_args():
+    return _ServerArgs()
+def _set_global_server_args_for_scheduler(args):
+    return None
+_server_args_stub.ServerArgs = _ServerArgs
+_server_args_stub.get_global_server_args = _get_global_server_args
+_server_args_stub.set_global_server_args_for_scheduler = _set_global_server_args_for_scheduler
+sys.modules.setdefault("sglang.srt.server_args", _server_args_stub)
+
+# Minimal stub for vllm layernorm
+_vllm = types.ModuleType("vllm")
+_vllm_me = types.ModuleType("vllm.model_executor")
+_vllm_layers = types.ModuleType("vllm.model_executor.layers")
+_vllm_ln = types.ModuleType("vllm.model_executor.layers.layernorm")
+class _GemmaRMSNorm: pass
+class _RMSNorm: pass
+_vllm_ln.GemmaRMSNorm = _GemmaRMSNorm
+_vllm_ln.RMSNorm = _RMSNorm
+sys.modules.setdefault("vllm", _vllm)
+sys.modules.setdefault("vllm.model_executor", _vllm_me)
+sys.modules.setdefault("vllm.model_executor.layers", _vllm_layers)
+sys.modules.setdefault("vllm.model_executor.layers.layernorm", _vllm_ln)
+
+# Minimal stubs to avoid deep imports during nsa_indexer import
+_sg_ln = types.ModuleType("sglang.srt.layers.layernorm")
+class _LayerNorm:
+    def __init__(self, hidden, dtype=None):
+        pass
+    def __call__(self, x):
+        return x
+_sg_ln.LayerNorm = _LayerNorm
+sys.modules.setdefault("sglang.srt.layers.layernorm", _sg_ln)
+
+_sg_linear = types.ModuleType("sglang.srt.layers.linear")
+class _ReplicatedLinear:
+    def __init__(self, in_features, out_features, **kwargs):
+        self.in_features = in_features
+        self.out_features = out_features
+    def __call__(self, x):
+        l = x.shape[0]
+        y = torch.zeros(l, self.out_features, dtype=x.dtype, device=x.device)
+        return y, None
+class _LinearBase: pass
+_sg_linear.ReplicatedLinear = _ReplicatedLinear
+_sg_linear.LinearBase = _LinearBase
+sys.modules.setdefault("sglang.srt.layers.linear", _sg_linear)
+
+_sg_rope = types.ModuleType("sglang.srt.layers.rotary_embedding")
+def _get_rope_wrapper(*args, **kwargs):
+    def _rope(positions, q_rope, k_rope):
+        return q_rope, k_rope
+    return _rope
+_sg_rope.get_rope_wrapper = _get_rope_wrapper
+sys.modules.setdefault("sglang.srt.layers.rotary_embedding", _sg_rope)
+
+_sg_dgw = types.ModuleType("sglang.srt.layers.deep_gemm_wrapper")
+class _Cfg:
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+def _configure_deep_gemm_num_sms(*args, **kwargs):
+    return _Cfg()
+_sg_dgw.configure_deep_gemm_num_sms = _configure_deep_gemm_num_sms
+sys.modules.setdefault("sglang.srt.layers.deep_gemm_wrapper", _sg_dgw)
+
+_sg_qcfg = types.ModuleType("sglang.srt.layers.quantization.base_config")
+class _QuantizationConfig: pass
+_sg_qcfg.QuantizationConfig = _QuantizationConfig
+sys.modules.setdefault("sglang.srt.layers.quantization.base_config", _sg_qcfg)
+
+# Minimal stub for sgl_kernel
+_sgl_kernel = types.ModuleType("sgl_kernel")
+def _hadamard_transform(x, scale=1.0):
+    return x
+def _silu_and_mul(*args, **kwargs):
+    return None
+_sgl_kernel.hadamard_transform = _hadamard_transform
+_sgl_kernel.silu_and_mul = _silu_and_mul
+sys.modules.setdefault("sgl_kernel", _sgl_kernel)
+
+# Minimal stub for cuda graph runner
+_cgr_stub = types.ModuleType("sglang.srt.model_executor.cuda_graph_runner")
+_cgr_stub.get_is_capture_mode = lambda: False
+sys.modules.setdefault("sglang.srt.model_executor.cuda_graph_runner", _cgr_stub)
+
+# Minimal stub for forward_batch_info
+_fb_stub = types.ModuleType("sglang.srt.model_executor.forward_batch_info")
+class _ForwardMode:
+    def is_context_parallel_extend(self):
+        return False
+    def is_target_verify(self):
+        return False
+    def is_draft_extend(self):
+        return False
+_fb_stub.ForwardMode = _ForwardMode
+class _ForwardBatch:
+    pass
+_fb_stub.ForwardBatch = _ForwardBatch
+sys.modules.setdefault("sglang.srt.model_executor.forward_batch_info", _fb_stub)
+
+# Minimal stub for NSA backend
+_nsa_backend_stub = types.ModuleType("sglang.srt.layers.attention.nsa_backend")
+class _NativeSparseAttnBackend:
+    def __init__(self, *args, **kwargs):
+        pass
+_nsa_backend_stub.NativeSparseAttnBackend = _NativeSparseAttnBackend
+sys.modules.setdefault("sglang.srt.layers.attention.nsa_backend", _nsa_backend_stub)
 
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -25,7 +275,7 @@ from sglang.srt.layers.linear import LinearBase
 from sglang.srt.mem_cache.memory_pool import NSATokenToKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
-from sglang.test.test_utils import CustomTestCase
+# Use unittest.TestCase to avoid heavy sglang.test dependency chain
 
 # Global configuration for all indexer tests
 DEFAULT_CONFIG = {
@@ -189,7 +439,7 @@ class MockModelRunner:
 
 
 @unittest.skipIf(not torch.cuda.is_available(), "Test requires CUDA")
-class TestNSAIndexer(CustomTestCase):
+class TestNSAIndexer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up global server args for testing."""
@@ -589,6 +839,64 @@ class TestNSAIndexer(CustomTestCase):
         alt_stream = torch.cuda.Stream()
         indexer = self._create_indexer(alt_stream=alt_stream)
         self.assertEqual(indexer.alt_stream, alt_stream)
+
+    @patch("sglang.srt.layers.attention.nsa.nsa_indexer.deep_gemm_wrapper.configure_deep_gemm_num_sms")
+    @patch("torch.cuda.stream")
+    @patch("torch.cuda.current_stream")
+    @patch("sglang.srt.layers.attention.nsa.nsa_indexer.rotate_activation")
+    def test_dual_stream_branch_waits(self, mock_rotate, mock_current_stream, mock_cuda_stream, mock_cfg_num_sms):
+        """Verify dual-stream branch executes wait_stream on both streams and shapes are correct."""
+        if not torch.cuda.is_available():
+            self.skipTest("Test requires CUDA")
+
+        class DummyCtx:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_rotate.side_effect = lambda t: t
+        mock_current_stream.return_value = MagicMock()
+        mock_cuda_stream.return_value = DummyCtx()
+        mock_cfg_num_sms.return_value = DummyCtx()
+
+        self._init_model_runner()
+        alt_stream_mock = MagicMock()
+        indexer = self._create_indexer(alt_stream=alt_stream_mock)
+
+        n_heads = indexer.n_heads
+        head_dim = indexer.head_dim
+        l = 4
+
+        def mock_wq_b(inp):
+            return (
+                torch.randn(l, n_heads * head_dim, dtype=self.dtype, device=self.device),
+                None,
+            )
+
+        def mock_wk(inp):
+            return (
+                torch.randn(l, head_dim, dtype=self.dtype, device=self.device),
+                None,
+            )
+
+        indexer.wq_b = MagicMock(side_effect=mock_wq_b)
+        indexer.wk = MagicMock(side_effect=mock_wk)
+
+        q_lora = torch.randn(l, self.config["q_lora_rank"], dtype=self.dtype, device=self.device)
+        x = torch.randn(l, self.config["hidden_size"], dtype=self.dtype, device=self.device)
+        positions = torch.arange(l, device=self.device)
+
+        forward_batch = type("FB", (), {"nsa_cp_metadata": None})()
+
+        query, key = indexer._get_q_k_bf16(q_lora, x, positions, True, forward_batch)
+
+        self.assertEqual(query.shape, (l, n_heads, head_dim))
+        self.assertEqual(key.shape, (l, head_dim))
+
+        cs = mock_current_stream.return_value
+        alt_stream_mock.wait_stream.assert_called_with(cs)
+        cs.wait_stream.assert_called_with(alt_stream_mock)
 
     def test_shape_sanity_checks(self):
         """Test various shape combinations for consistency."""
