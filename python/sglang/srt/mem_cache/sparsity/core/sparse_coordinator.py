@@ -38,7 +38,45 @@ class RequestTrackers:
             max_pool_size, dtype=torch.int64, device=device
         )
 
-        # TODO: Add more trackers for hierarchical KVCache management
+        # Trackers for hierarchical NSA
+        # TODO: Refactor and reduce memory usage
+        self.full_host_indices = torch.full(
+            (max_pool_size, max_context_len),
+            -1,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.curr_device_indices = torch.full(
+            (max_pool_size, self.top_k),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self.should_load_device_indices = torch.full(
+            (max_pool_size, self.top_k),
+            -1,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.should_load_host_indices = torch.full(
+            (max_pool_size, self.top_k),
+            -1,
+            dtype=torch.int64,
+            device=device,
+        )
+
+        self.prev_top_k_result = torch.full(
+            (max_pool_size, num_layers, self.top_k),
+            -1,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.prev_device_indices = torch.full(
+            (max_pool_size, num_layers, self.top_k),
+            -1,
+            dtype=torch.int64,
+            device=device,
+        )
 
     def register(self, idx: int, prompt_len: int) -> None:
         self.repr_constructed[idx] = False
@@ -140,6 +178,29 @@ class SparseCoordinator:
         """
         if req.req_pool_idx is not None:
             self.states.register(req.req_pool_idx, len(req.origin_input_ids))
+
+    @nvtx.annotate("SparseCoordinator.on_request_prefill_end", color="yellow")
+    def on_request_prefill_end(self, req: "Req") -> None:
+        """Handle prefill end."""
+        if (
+            req.req_pool_idx is None
+            or self.sparse_kv_cache_manager is None
+            or len(req.origin_input_ids) < self.config.min_sparse_prompt_len
+        ):
+            return
+
+        # Offload full KV cache for prefill
+        self.sparse_kv_cache_manager.offload_prefill_full_kv_cache(req)
+        self.sparse_kv_cache_manager.check_prefill_offload_progress()
+
+        # Store previous device indices
+        indices_len = self.config.min_sparse_prompt_len
+        self.states.prev_device_indices[req.req_pool_idx] = (
+            self.req_to_token_pool.req_to_token[req.req_pool_idx, :indices_len]
+        )
+        self.states.prev_top_k_result[req.req_pool_idx, :] = torch.arange(
+            indices_len, device=self.device
+        )
 
     def on_request_end(self, req: "Req") -> None:
         """
