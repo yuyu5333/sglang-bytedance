@@ -776,6 +776,9 @@ class Req:
         extra_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
+        think_start_token_id: Optional[int] = None,
+        think_end_token_id: Optional[int] = None,
+        relaxed_thinking: bool = False,
     ):
         # Input and output info
         self.rid = rid
@@ -785,6 +788,19 @@ class Req:
             if origin_input_ids_unpadded
             else origin_input_ids  # Before image padding
         )
+        self.relaxed_thinking = relaxed_thinking
+        if self.relaxed_thinking:
+            assert think_start_token_id is not None
+            self.is_thinking = False
+            self.think_start_token_id = think_start_token_id
+            self.think_end_token_id = think_end_token_id
+            for i in range(len(self.origin_input_ids_unpadded) - 1, -1, -1):
+                if self.origin_input_ids_unpadded[i] == think_start_token_id:
+                    self.is_thinking = True
+                    break
+                if self.origin_input_ids_unpadded[i] == think_end_token_id:
+                    break
+
         self.origin_input_ids = origin_input_ids
         # Each decode stage's output ids
         self.output_ids = []
@@ -1000,6 +1016,7 @@ class Req:
         self.dllm_ids = []
         self.dllm_block_offset = 0
         self.dllm_config = dllm_config
+        self.is_thinking = False
 
     @property
     def seqlen(self) -> int:
@@ -1393,6 +1410,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # Sampling info
     sampling_info: SamplingBatchInfo = None
+    next_batch_sampling_info: SamplingBatchInfo = None
 
     # Batched arguments to model runner
     input_ids: torch.Tensor = None  # shape: [b], int64
@@ -1536,6 +1554,128 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def is_dllm(self):
         return self.dllm_config is not None
+    def thinking_states(self):
+        return [req.is_thinking for req in self.reqs]
+
+    def update_thinking_states(self, thinking_states: Optional[list[bool]]):
+        if thinking_states is None:
+            return
+        assert len(thinking_states) == len(self.reqs)
+        for req, s in zip(self.reqs, thinking_states):
+            req.is_thinking = s
+
+    def alloc_req_slots(self, num_reqs: int):
+        req_pool_indices = self.req_to_token_pool.alloc(num_reqs)
+        if req_pool_indices is None:
+            raise RuntimeError(
+                "alloc_req_slots runs out of memory. "
+                "Please set a smaller number for `--max-running-requests`. "
+                f"{self.req_to_token_pool.available_size()=}, "
+                f"{num_reqs=}, "
+            )
+        return req_pool_indices
+
+    def alloc_token_slots(self, num_tokens: int, backup_state: bool = False):
+        if self.token_to_kv_pool_allocator.available_size() < num_tokens:
+            if self.tree_cache is not None:
+                self.tree_cache.evict(num_tokens)
+
+        if backup_state:
+            state = self.token_to_kv_pool_allocator.backup_state()
+
+        out_cache_loc = self.token_to_kv_pool_allocator.alloc(num_tokens)
+        if out_cache_loc is None:
+            phase_str = "Prefill" if self.forward_mode.is_extend() else "Decode"
+            error_msg = (
+                f"{phase_str} out of memory. Try to lower your batch size.\n"
+                f"Try to allocate {num_tokens} tokens.\n"
+                f"Available tokens: {self.token_to_kv_pool_allocator.available_size() + self.tree_cache.evictable_size()}\n"
+            )
+            logger.error(error_msg)
+            if self.tree_cache is not None:
+                self.tree_cache.pretty_print()
+            raise RuntimeError(error_msg)
+
+        if backup_state:
+            return out_cache_loc, state
+        else:
+            return out_cache_loc
+
+    def alloc_paged_token_slots_extend(
+        self,
+        prefix_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        last_loc: torch.Tensor,
+        extend_num_tokens: int,
+        backup_state: bool = False,
+    ):
+        if (
+            self.token_to_kv_pool_allocator.available_size()
+            < extend_num_tokens
+            + len(seq_lens) * self.token_to_kv_pool_allocator.page_size
+        ):
+            if self.tree_cache is not None:
+                self.tree_cache.evict(
+                    extend_num_tokens
+                    + len(seq_lens) * self.token_to_kv_pool_allocator.page_size,
+                )
+
+        if backup_state:
+            state = self.token_to_kv_pool_allocator.backup_state()
+
+        out_cache_loc = self.token_to_kv_pool_allocator.alloc_extend(
+            prefix_lens, seq_lens, last_loc, extend_num_tokens
+        )
+        if out_cache_loc is None:
+            error_msg = (
+                f"Prefill out of memory. Try to lower your batch size.\n"
+                f"Try to allocate {extend_num_tokens} tokens.\n"
+                f"Available tokens: {self.token_to_kv_pool_allocator.available_size() + self.tree_cache.evictable_size()}\n"
+                f"{self.token_to_kv_pool_allocator.available_size()=}\n"
+                f"{self.tree_cache.evictable_size()=}\n"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        if backup_state:
+            return out_cache_loc, state
+        else:
+            return out_cache_loc
+
+    def alloc_paged_token_slots_decode(
+        self,
+        seq_lens: torch.Tensor,
+        last_loc: torch.Tensor,
+        backup_state: bool = False,
+    ):
+        if self.tree_cache is not None:
+            if (
+                self.token_to_kv_pool_allocator.available_size()
+                < len(seq_lens) * self.token_to_kv_pool_allocator.page_size
+            ):
+                self.tree_cache.evict(
+                    len(seq_lens) * self.token_to_kv_pool_allocator.page_size,
+                )
+
+        if backup_state:
+            state = self.token_to_kv_pool_allocator.backup_state()
+
+        out_cache_loc = self.token_to_kv_pool_allocator.alloc_decode(seq_lens, last_loc)
+        if out_cache_loc is None:
+            error_msg = (
+                f"Decode out of memory. Try to lower your batch size.\n"
+                f"Try to allocate {len(seq_lens)} tokens.\n"
+                f"Available tokens: {self.token_to_kv_pool_allocator.available_size() + self.tree_cache.evictable_size()}\n"
+                f"{self.token_to_kv_pool_allocator.available_size()=}\n"
+                f"{self.tree_cache.evictable_size()=}\n"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        if backup_state:
+            return out_cache_loc, state
+        else:
+            return out_cache_loc
 
     def prepare_encoder_info_extend(self, input_ids: List[int], seq_lens: List[int]):
         self.encoder_lens_cpu = []
