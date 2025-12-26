@@ -345,8 +345,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 uniform_samples_for_final_sampling=coins_for_final_sampling,
                 target_probs=target_probs,
                 draft_probs=draft_probs,
-                threshold_single=get_global_server_args().speculative_accept_threshold_single,
-                threshold_acc=get_global_server_args().speculative_accept_threshold_acc,
+                threshold_singles=get_global_server_args().speculative_accept_threshold_single,
+                threshold_accs=get_global_server_args().speculative_accept_threshold_acc,
                 deterministic=True,
             )
 
