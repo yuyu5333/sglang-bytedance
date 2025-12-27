@@ -333,6 +333,25 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             coins_for_final_sampling = torch.rand(
                 (bs,), dtype=torch.float32, device=batch.device
             )
+            
+            threshold_singles = torch.ones_like(
+                coins_for_final_sampling, dtype=torch.float32, device="cuda"
+            )
+            threshold_accs = torch.ones_like(
+                coins_for_final_sampling, dtype=torch.float32, device="cuda"
+            )
+            if relaxed_thinking:
+                thinking_states = batch.thinking_states()
+                thinking_states_ts = torch.tensor(thinking_states, device="cuda")
+            else:
+                thinking_states_ts = torch.ones(bs, dtype=torch.bool, device="cuda")
+            threshold_singles[thinking_states_ts] = global_server_args_dict[
+                "speculative_accept_threshold_single"
+            ]
+            threshold_accs[thinking_states_ts] = global_server_args_dict[
+                "speculative_accept_threshold_acc"
+            ]
+            
             tree_speculative_sampling_target_only(
                 predicts=predict,  # mutable
                 accept_index=accept_index,  # mutable
@@ -345,8 +364,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 uniform_samples_for_final_sampling=coins_for_final_sampling,
                 target_probs=target_probs,
                 draft_probs=draft_probs,
-                threshold_singles=get_global_server_args().speculative_accept_threshold_single,
-                threshold_accs=get_global_server_args().speculative_accept_threshold_acc,
+                threshold_singles=threshold_singles,
+                threshold_accs=threshold_accs,
                 deterministic=True,
             )
 
