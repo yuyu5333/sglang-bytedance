@@ -319,7 +319,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "Tensor candidates, Tensor retrive_index, Tensor retrive_next_token, Tensor retrive_next_sibling, "
       "Tensor uniform_samples, Tensor uniform_samples_for_final_sampling, Tensor target_probs, Tensor draft_probs, "
       "Tensor threshold_singles, Tensor threshold_accs, "
-      "bool deterministic, int cuda_stream) -> ()");
+      "bool deterministic) -> ()");
   m.impl("tree_speculative_sampling_target_only", torch::kCUDA, &tree_speculative_sampling_target_only);
 
   m.def(

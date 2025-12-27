@@ -350,6 +350,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 thinking_states_ts = torch.tensor(thinking_states, device="cuda")
             else:
                 thinking_states_ts = torch.ones(bs, dtype=torch.bool, device="cuda")
+                
             threshold_singles[thinking_states_ts] = get_global_server_args().speculative_accept_threshold_single
             threshold_accs[thinking_states_ts] = get_global_server_args().speculative_accept_threshold_acc
             
@@ -394,6 +395,11 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                     break
                 id = predict_cpu[idx]
                 req.output_ids.append(id)
+                if relaxed_thinking and thinking_states:
+                    if id == req.think_start_token_id:
+                        thinking_states[i] = True
+                    elif id == req.think_end_token_id:
+                        thinking_states[i] = False
                 req.check_finished()
                 if req.finished():
                     has_finished = True

@@ -44,8 +44,7 @@ void tree_speculative_sampling_target_only(
     at::Tensor draft_probs,
     at::Tensor threshold_singles,
     at::Tensor threshold_accs,
-    bool deterministic = true,
-    int64_t cuda_stream = 0) {
+    bool deterministic = true) {
   CHECK_INPUT(candidates);
   CHECK_INPUT(retrive_index);
   CHECK_INPUT(retrive_next_token);
