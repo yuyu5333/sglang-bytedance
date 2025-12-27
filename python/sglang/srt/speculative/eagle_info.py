@@ -224,6 +224,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                     dtype=torch.int32,
                     device=batch.device,
                 ),
+                # Tracking the contents if they are in thinking mode.
+                thinking_states=None,
             )
 
         bs = self.retrive_index.shape[0]
