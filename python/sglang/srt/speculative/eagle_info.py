@@ -530,6 +530,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 verified_id=verified_id,
                 accept_length_per_req_cpu=draft_input.accept_length_cpu,
                 accepted_indices=accept_index,
+                # Tracking the contents if they are in thinking mode.
+                thinking_states=thinking_states,
             )
         else:
             if page_size == 1 or self.topk == 1:
