@@ -740,6 +740,9 @@ class EAGLEWorker(TpModelWorker):
             self.page_size,
             vocab_mask,
         )
+        
+        if self.relaxed_thinking:
+            batch.update_thinking_states(res.thinking_states)
 
         # Post process based on verified outputs.
         # Pick indices that we care (accepted)

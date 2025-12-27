@@ -273,6 +273,9 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             self.grammar.apply_vocab_mask(
                 logits=logits_output.next_token_logits, vocab_mask=vocab_mask
             )
+            
+        relaxed_thinking = get_global_server_args().speculative_relaxed_thinking
+        thinking_states = None
 
         # Sample tokens. Force greedy sampling on AMD
         is_all_greedy = sampling_info.is_all_greedy
@@ -345,12 +348,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 thinking_states_ts = torch.tensor(thinking_states, device="cuda")
             else:
                 thinking_states_ts = torch.ones(bs, dtype=torch.bool, device="cuda")
-            threshold_singles[thinking_states_ts] = global_server_args_dict[
-                "speculative_accept_threshold_single"
-            ]
-            threshold_accs[thinking_states_ts] = global_server_args_dict[
-                "speculative_accept_threshold_acc"
-            ]
+            threshold_singles[thinking_states_ts] = get_global_server_args().speculative_accept_threshold_single
+            threshold_accs[thinking_states_ts] = get_global_server_args().speculative_accept_threshold_acc
             
             tree_speculative_sampling_target_only(
                 predicts=predict,  # mutable
@@ -813,3 +812,5 @@ class EagleVerifyOutput:
     accept_length_per_req_cpu: List[int]
     # Accepted indices from logits_output.next_token_logits
     accepted_indices: torch.Tensor
+    # Tracking the contents if they are in thinking mode.
+    thinking_states: Optional[List[bool]]
