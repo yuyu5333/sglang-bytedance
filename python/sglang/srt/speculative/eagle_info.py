@@ -607,6 +607,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 verified_id=verified_id,
                 accept_length_per_req_cpu=accept_length_list,
                 accepted_indices=accept_index,
+                # Tracking the contents if they are in thinking mode.
+                thinking_states=thinking_states,
             )
 
 
