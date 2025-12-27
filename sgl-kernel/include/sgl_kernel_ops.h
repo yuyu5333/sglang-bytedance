@@ -501,8 +501,7 @@ void tree_speculative_sampling_target_only(
     at::Tensor draft_probs,
     at::Tensor threshold_singles,
     at::Tensor threshold_accs,
-    bool deterministic = true,
-    int64_t cuda_stream = 0);
+    bool deterministic = true);
 
 void verify_tree_greedy(
     at::Tensor predicts,          // mutable
