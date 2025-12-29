@@ -1273,10 +1273,8 @@ def normal_get_cutlass_w4a8_moe_mm_data_triton(
     k,
 ):
     counts = torch.zeros((num_experts,), dtype=torch.int32, device=topk_ids.device)
-    BUCKET_SIZE = 256 if num_experts <= 256 else 128
     BLOCK_SIZE = 1024
-    num_buckets = (num_experts + BUCKET_SIZE - 1) // BUCKET_SIZE
-    grid = lambda meta: (num_buckets,)
+    grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
     count_tokens_from_topk_kernel[grid](
         topk_ids,
         counts,
