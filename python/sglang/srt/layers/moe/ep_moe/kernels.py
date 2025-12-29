@@ -1322,7 +1322,8 @@ def count_tokens_binned_kernel(
 ):
     bucket_id = tl.program_id(0)
     bucket_base = bucket_id * BUCKET_SIZE
-    bucket_limit = tl.minimum(BUCKET_SIZE, num_experts - bucket_base)
+    rem = num_experts - bucket_base
+    bucket_limit = tl.where(rem > 0, tl.minimum(BUCKET_SIZE, rem), 0)
     hist = tl.zeros([BUCKET_SIZE], dtype=tl.int32)
     for start in tl.range(0, topk_length, BLOCK_SIZE):
         idx = start + tl.arange(0, BLOCK_SIZE)
@@ -1330,13 +1331,13 @@ def count_tokens_binned_kernel(
         vals = tl.load(topk_ptr + idx, mask=mask, other=-1)
         local_idx = vals - bucket_base
         valid = (vals >= 0) & (vals < num_experts) & (local_idx >= 0) & (local_idx < bucket_limit)
-        for b in tl.range(0, BUCKET_SIZE):
-            inc = tl.sum(valid & (local_idx == b), axis=0)
-            hist[b] += inc
-    for b in tl.range(0, BUCKET_SIZE):
-        gidx = bucket_base + b
-        gmask = gidx < (bucket_base + bucket_limit)
-        tl.atomic_add(counts_ptr + gidx, hist[b], mask=gmask)
+        b_vec = tl.arange(0, BUCKET_SIZE)[:, None]
+        cmp_mat = (local_idx[None, :] == b_vec) & valid[None, :]
+        contrib = tl.sum(cmp_mat.to(tl.int32), axis=1)
+        hist += contrib
+    gidx = bucket_base + tl.arange(0, BUCKET_SIZE)
+    gmask = tl.arange(0, BUCKET_SIZE) < bucket_limit
+    tl.atomic_add(counts_ptr + gidx, hist, mask=gmask)
 
 
 @triton.jit
