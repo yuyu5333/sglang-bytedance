@@ -1287,14 +1287,17 @@ def normal_get_cutlass_w4a8_moe_mm_data_triton(
     k,
 ):
     counts = torch.zeros((num_experts,), dtype=torch.int32, device=topk_ids.device)
-    BLOCK_SIZE = 512
-    grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
-    count_tokens_from_topk_kernel[grid](
+    BUCKET_SIZE = 128
+    BLOCK_SIZE = 1024
+    num_buckets = (num_experts + BUCKET_SIZE - 1) // BUCKET_SIZE
+    grid = lambda meta: (num_buckets,)
+    count_tokens_binned_kernel[grid](
         topk_ids,
         counts,
         topk_ids.numel(),
         num_experts,
         BLOCK_SIZE=BLOCK_SIZE,
+        BUCKET_SIZE=BUCKET_SIZE,
     )
     problem_sizes1, problem_sizes2 = compute_problem_sizes_w4a8(
         counts, problem_sizes1, problem_sizes2, n, k, num_experts
@@ -1306,6 +1309,34 @@ def normal_get_cutlass_w4a8_moe_mm_data_triton(
         problem_sizes2.to(torch.int32),
         expert_offsets.to(torch.int32),
     )
+
+
+@triton.jit
+def count_tokens_binned_kernel(
+    topk_ptr,
+    counts_ptr,
+    topk_length,
+    num_experts,
+    BLOCK_SIZE: tl.constexpr,
+    BUCKET_SIZE: tl.constexpr,
+):
+    bucket_id = tl.program_id(0)
+    bucket_base = bucket_id * BUCKET_SIZE
+    bucket_limit = tl.minimum(BUCKET_SIZE, num_experts - bucket_base)
+    hist = tl.zeros([BUCKET_SIZE], dtype=tl.int32)
+    for start in tl.range(0, topk_length, BLOCK_SIZE):
+        idx = start + tl.arange(0, BLOCK_SIZE)
+        mask = idx < topk_length
+        vals = tl.load(topk_ptr + idx, mask=mask, other=-1)
+        local_idx = vals - bucket_base
+        valid = (vals >= 0) & (vals < num_experts) & (local_idx >= 0) & (local_idx < bucket_limit)
+        for b in tl.range(0, BUCKET_SIZE):
+            inc = tl.sum(valid & (local_idx == b), axis=0)
+            hist[b] += inc
+    for b in tl.range(0, BUCKET_SIZE):
+        gidx = bucket_base + b
+        gmask = gidx < (bucket_base + bucket_limit)
+        tl.atomic_add(counts_ptr + gidx, hist[b], mask=gmask)
 
 
 @triton.jit
