@@ -1295,7 +1295,6 @@ def normal_get_cutlass_w4a8_moe_mm_data_triton(
         expert_offsets.to(torch.int32),
     )
 
-
 @triton.jit
 def count_tokens_binned_kernel(
     topk_ptr,
@@ -1336,7 +1335,7 @@ def count_tokens_from_topk_kernel(
     mask = pid < topk_length
     val = tl.load(topk_ptr + pid, mask=mask, other=-1)
     valid = (val >= 0) & (val < num_experts)
-    one = tl.ones([BLOCK_SIZE], dtype=tl.int32)
+    one = tl.full([BLOCK_SIZE], 1, dtype=tl.int32)
     tl.atomic_add(counts_ptr + val, one, mask=mask & valid)
 
 @triton.jit
