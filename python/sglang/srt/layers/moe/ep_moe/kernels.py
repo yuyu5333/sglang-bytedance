@@ -1261,20 +1261,6 @@ def deepep_ll_get_cutlass_w4a8_moe_mm_data(
     )
 
 
-@triton.jit
-def count_tokens_from_topk_kernel(
-    topk_ptr,
-    counts_ptr,
-    topk_length,
-    num_experts,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = pid < topk_length
-    val = tl.load(topk_ptr + pid, mask=mask, other=-1)
-    valid = (val >= 0) & (val < num_experts)
-    one = tl.ones([BLOCK_SIZE], dtype=tl.int32)
-    tl.atomic_add(counts_ptr + val, one, mask=mask & valid)
 
 
 def normal_get_cutlass_w4a8_moe_mm_data_triton(
@@ -1291,13 +1277,12 @@ def normal_get_cutlass_w4a8_moe_mm_data_triton(
     BLOCK_SIZE = 1024
     num_buckets = (num_experts + BUCKET_SIZE - 1) // BUCKET_SIZE
     grid = lambda meta: (num_buckets,)
-    count_tokens_binned_kernel[grid](
+    count_tokens_from_topk_kernel[grid](
         topk_ids,
         counts,
         topk_ids.numel(),
         num_experts,
         BLOCK_SIZE=BLOCK_SIZE,
-        BUCKET_SIZE=BUCKET_SIZE,
     )
     problem_sizes1, problem_sizes2 = compute_problem_sizes_w4a8(
         counts, problem_sizes1, problem_sizes2, n, k, num_experts
@@ -1339,6 +1324,20 @@ def count_tokens_binned_kernel(
     gmask = tl.arange(0, BUCKET_SIZE) < bucket_limit
     tl.atomic_add(counts_ptr + gidx, hist, mask=gmask)
 
+@triton.jit
+def count_tokens_from_topk_kernel(
+    topk_ptr,
+    counts_ptr,
+    topk_length,
+    num_experts,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = pid < topk_length
+    val = tl.load(topk_ptr + pid, mask=mask, other=-1)
+    valid = (val >= 0) & (val < num_experts)
+    one = tl.ones([BLOCK_SIZE], dtype=tl.int32)
+    tl.atomic_add(counts_ptr + val, one, mask=mask & valid)
 
 @triton.jit
 def _silu_and_mul_post_per_tensor_quant_kernel(
