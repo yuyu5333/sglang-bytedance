@@ -1262,6 +1262,53 @@ def deepep_ll_get_cutlass_w4a8_moe_mm_data(
 
 
 @triton.jit
+def count_tokens_from_topk_kernel(
+    topk_ptr,
+    counts_ptr,
+    topk_length,
+    num_experts,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = pid < topk_length
+    val = tl.load(topk_ptr + pid, mask=mask, other=-1)
+    valid = (val >= 0) & (val < num_experts)
+    one = tl.ones([BLOCK_SIZE], dtype=tl.int32)
+    tl.atomic_add(counts_ptr + val, one, mask=mask & valid)
+
+
+def normal_get_cutlass_w4a8_moe_mm_data_triton(
+    topk_ids,
+    expert_offsets,
+    problem_sizes1,
+    problem_sizes2,
+    num_experts,
+    n,
+    k,
+):
+    counts = torch.zeros((num_experts,), dtype=torch.int32, device=topk_ids.device)
+    BLOCK_SIZE = 512
+    grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
+    count_tokens_from_topk_kernel[grid](
+        topk_ids,
+        counts,
+        topk_ids.numel(),
+        num_experts,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    problem_sizes1, problem_sizes2 = compute_problem_sizes_w4a8(
+        counts, problem_sizes1, problem_sizes2, n, k, num_experts
+    )
+    expert_offsets.zero_()
+    expert_offsets[1:] = torch.cumsum(counts, dim=0)
+    return (
+        problem_sizes1.to(torch.int32),
+        problem_sizes2.to(torch.int32),
+        expert_offsets.to(torch.int32),
+    )
+
+
+@triton.jit
 def _silu_and_mul_post_per_tensor_quant_kernel(
     input_ptr,
     stride_input_expert,
