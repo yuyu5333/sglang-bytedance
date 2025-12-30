@@ -254,6 +254,50 @@ def pre_reorder_triton_kernel_for_cutlass_moe(
                 tl.store(dst_ptr_offs + dst_idx * hidden_size, out_data, mask=mask)
 
 
+@triton.jit
+def pre_reorder_triton_kernel_for_cutlass_moe_masked(
+    input_ptr,
+    gateup_input_ptr,
+    src2dst_ptr,
+    a1_scales_ptr,
+    topk,
+    num_tokens,
+    hidden_size,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
+    OutDtype = gateup_input_ptr.dtype.element_ty
+
+    if a1_scales_ptr is not None:
+        a1_scale = 1.0 / tl.load(a1_scales_ptr)
+    else:
+        a1_scale = 1.0
+
+    offset = BLOCK_SIZE * tl.program_id(1) + tl.arange(0, BLOCK_SIZE)
+    mask = offset < hidden_size
+
+    start_src_idx = tl.program_id(0)
+    step = tl.num_programs(0)
+
+    for src_idx_int32 in tl.range(
+        start_src_idx, num_tokens, step, num_stages=NUM_STAGES
+    ):
+        src_idx = src_idx_int32.to(tl.int64)
+        token_src2dst_ptr = src2dst_ptr + src_idx * topk
+
+        src_ptr_offs = input_ptr + src_idx * hidden_size + offset
+        dst_ptr_offs = gateup_input_ptr + offset
+        in_data = tl.load(src_ptr_offs, mask=mask).to(tl.float32)
+        out_data = (in_data * a1_scale).to(OutDtype)
+        for idx in range(topk):
+            dst_idx = tl.load(token_src2dst_ptr + idx)
+            if dst_idx >= 0:
+                tl.store(
+                    dst_ptr_offs + dst_idx.to(tl.int64) * hidden_size,
+                    out_data,
+                    mask=mask,
+                )
+
 def pre_reorder_for_cutlass_moe(
     input,
     gateup_input,
@@ -279,6 +323,33 @@ def pre_reorder_for_cutlass_moe(
         hidden_size=hidden_size,
         BLOCK_SIZE=block_dim,
         NUM_STAGES=3,
+    )
+
+
+def pre_reorder_for_cutlass_moe_masked(
+    input,
+    gateup_input,
+    src2dst,
+    a1_scales,
+    topk,
+    num_tokens,
+    hidden_size,
+    num_warps: int = 4,
+    num_stages: int = 4,
+):
+    grid, block_dim = _get_launch_config_2d(input.device, num_tokens, hidden_size)
+
+    pre_reorder_triton_kernel_for_cutlass_moe_masked[grid](
+        input_ptr=input,
+        gateup_input_ptr=gateup_input,
+        src2dst_ptr=src2dst,
+        a1_scales_ptr=a1_scales,
+        topk=topk,
+        num_tokens=num_tokens,
+        hidden_size=hidden_size,
+        BLOCK_SIZE=block_dim,
+        NUM_STAGES=num_stages,
+        num_warps=num_warps,
     )
 
 

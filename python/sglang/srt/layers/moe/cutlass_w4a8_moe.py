@@ -21,6 +21,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     deepep_run_moe_deep_preprocess,
     post_reorder_for_cutlass_moe,
     pre_reorder_for_cutlass_moe,
+    pre_reorder_for_cutlass_moe_masked,
     silu_and_mul_masked_post_per_tensor_quant_fwd,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
@@ -126,13 +127,15 @@ def cutlass_w4a8_moe(
         dtype=torch.float8_e4m3fn,
     )
 
-    pre_reorder_for_cutlass_moe(
+    src2dst_masked = src2dst.clone()
+    mask_invalid = (topk_ids.view(-1) == num_local_experts)
+    src2dst_masked[mask_invalid] = -1
+
+    pre_reorder_for_cutlass_moe_masked(
         a,
         gateup_input,
-        src2dst,
-        topk_ids,
+        src2dst_masked,
         a1_scale,
-        num_local_experts,
         topk,
         m,
         k,
