@@ -142,19 +142,20 @@ def cutlass_w4a8_moe(
     # NOTE: a_map and c_map are not used in the get_cutlass_w4a8_moe_mm_data kernel,
     # they are kept to allow for a quick switch of the permutation logic
     # from the current triton kernel implementation to the cutlass-based one if needed.
-    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-    get_cutlass_w4a8_moe_mm_data(
-        topk_ids,
-        expert_offsets,
-        problem_sizes1,
-        problem_sizes2,
-        a_map,
-        c_map,
-        num_local_experts,
-        n,
-        k,
-    ) if not get_bool_env_var("SGLANG_USE_TRITON_PREP_NORMAL") else None
+    if not get_bool_env_var("SGLANG_USE_TRITON_PREP_NORMAL"):
+        a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+        c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+        get_cutlass_w4a8_moe_mm_data(
+            topk_ids,
+            expert_offsets,
+            problem_sizes1,
+            problem_sizes2,
+            a_map,
+            c_map,
+            num_local_experts,
+            n,
+            k,
+        )
     
     if get_bool_env_var("SGLANG_USE_TRITON_PREP_NORMAL"):
         problem_sizes1, problem_sizes2, expert_offsets = normal_get_cutlass_w4a8_moe_mm_data_triton(
