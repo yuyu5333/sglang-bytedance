@@ -1272,30 +1272,9 @@ def normal_get_cutlass_w4a8_moe_mm_data_triton(
     n,
     k,
 ):
-    counts = torch.zeros((num_experts,), dtype=torch.int32, device=topk_ids.device)
-    BLOCK_SIZE = 1024
-    use_binned = (num_experts >= 512) or (topk_ids.numel() >= 8192)
-    if use_binned:
-        BUCKET_SIZE = 256 if num_experts <= 256 else 128
-        num_buckets = (num_experts + BUCKET_SIZE - 1) // BUCKET_SIZE
-        grid = lambda meta: (num_buckets,)
-        count_tokens_binned_kernel[grid](
-            topk_ids,
-            counts,
-            topk_ids.numel(),
-            num_experts,
-            BLOCK_SIZE=BLOCK_SIZE,
-            BUCKET_SIZE=BUCKET_SIZE,
-        )
-    else:
-        grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
-        count_tokens_from_topk_kernel[grid](
-            topk_ids,
-            counts,
-            topk_ids.numel(),
-            num_experts,
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
+    ids = topk_ids.view(-1).to(torch.int64)
+    valid = (ids >= 0) & (ids < num_experts)
+    counts = torch.bincount(ids[valid], minlength=num_experts).to(torch.int32)
     problem_sizes1, problem_sizes2 = compute_problem_sizes_w4a8(
         counts, problem_sizes1, problem_sizes2, n, k, num_experts
     )
