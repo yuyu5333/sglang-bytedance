@@ -3,8 +3,6 @@
 from typing import Optional
 
 import torch
-from sglang.srt.utils import get_bool_env_var
-from sglang.srt.layers.moe.ep_moe.kernels import normal_get_cutlass_w4a8_moe_mm_data_triton
 from sgl_kernel import (
     cutlass_w4a8_moe_mm,
     get_cutlass_w4a8_moe_mm_data,
@@ -16,6 +14,7 @@ from sglang.srt.distributed import get_moe_expert_parallel_world_size
 from sglang.srt.utils import get_bool_env_var
 from sglang.srt.layers.moe.ep_moe.kernels import (
     cutlass_w4_run_moe_ep_preproess,
+    get_cutlass_w4a8_moe_mm_data_triton_kernel,
     deepep_ll_get_cutlass_w4a8_moe_mm_data,
     deepep_permute_triton_kernel,
     deepep_post_reorder_triton_kernel,
@@ -156,9 +155,9 @@ def cutlass_w4a8_moe(
             n,
             k,
         )
-    
-    if get_bool_env_var("SGLANG_USE_TRITON_PREP_NORMAL"):
-        problem_sizes1, problem_sizes2, expert_offsets = normal_get_cutlass_w4a8_moe_mm_data_triton(
+    else:
+        # use triton kernel to get problem sizes and expert offsets
+        problem_sizes1, problem_sizes2, expert_offsets = get_cutlass_w4a8_moe_mm_data_triton_kernel(
             topk_ids,
             expert_offsets,
             problem_sizes1,
