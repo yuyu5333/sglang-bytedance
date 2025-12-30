@@ -1261,6 +1261,74 @@ def deepep_ll_get_cutlass_w4a8_moe_mm_data(
     )
 
 
+
+
+def normal_get_cutlass_w4a8_moe_mm_data_triton(
+    topk_ids,
+    expert_offsets,
+    problem_sizes1,
+    problem_sizes2,
+    num_experts,
+    n,
+    k,
+):
+    ids = topk_ids.view(-1).to(torch.int64)
+    valid = (ids >= 0) & (ids < num_experts)
+    counts = torch.bincount(ids[valid], minlength=num_experts).to(torch.int32)
+    problem_sizes1, problem_sizes2 = compute_problem_sizes_w4a8(
+        counts, problem_sizes1, problem_sizes2, n, k, num_experts
+    )
+    expert_offsets.zero_()
+    expert_offsets[1:].copy_(torch.cumsum(counts, dim=0))
+    return (
+        problem_sizes1.to(torch.int32),
+        problem_sizes2.to(torch.int32),
+        expert_offsets.to(torch.int32),
+    )
+    
+@triton.jit
+def count_tokens_from_topk_kernel(
+    topk_ptr,
+    counts_ptr,
+    topk_length,
+    num_experts,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = pid < topk_length
+    val = tl.load(topk_ptr + pid, mask=mask, other=-1)
+    valid = (val >= 0) & (val < num_experts)
+    one = tl.full([BLOCK_SIZE], 1, dtype=tl.int32)
+    tl.atomic_add(counts_ptr + val, one, mask=mask & valid)
+
+@triton.jit
+def count_tokens_binned_kernel(
+    topk_ptr,
+    counts_ptr,
+    topk_length,
+    num_experts,
+    BLOCK_SIZE: tl.constexpr,
+    BUCKET_SIZE: tl.constexpr,
+):
+    bucket_id = tl.program_id(0)
+    bucket_base = bucket_id * BUCKET_SIZE
+    rem = num_experts - bucket_base
+    bucket_limit = tl.where(rem > 0, tl.minimum(BUCKET_SIZE, rem), 0)
+    hist = tl.zeros([BUCKET_SIZE], dtype=tl.int32)
+    for start in tl.range(0, topk_length, BLOCK_SIZE):
+        idx = start + tl.arange(0, BLOCK_SIZE)
+        mask = idx < topk_length
+        vals = tl.load(topk_ptr + idx, mask=mask, other=-1)
+        local_idx = vals - bucket_base
+        valid = (vals >= 0) & (vals < num_experts) & (local_idx >= 0) & (local_idx < bucket_limit)
+        b_vec = tl.arange(0, BUCKET_SIZE)[:, None]
+        cmp_mat = (local_idx[None, :] == b_vec) & valid[None, :]
+        contrib = tl.sum(cmp_mat.to(tl.int32), axis=1)
+        hist += contrib
+    gidx = bucket_base + tl.arange(0, BUCKET_SIZE)
+    gmask = tl.arange(0, BUCKET_SIZE) < bucket_limit
+    tl.atomic_add(counts_ptr + gidx, hist, mask=gmask)
+
 @triton.jit
 def _silu_and_mul_post_per_tensor_quant_kernel(
     input_ptr,
