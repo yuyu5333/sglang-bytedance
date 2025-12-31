@@ -17,8 +17,8 @@ template <int M, int N, int K, int A, int B, int C, Sched S>
 struct SM90W4A8Config {
   using KernelSchedule = std::conditional_t<
       S == Sched::PP,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative>;
+      cutlass::gemm::KernelTmaWarpSpecializedPingpong,
+      cutlass::gemm::KernelTmaWarpSpecializedCooperative>;
 
   using EpilogueSchedule = std::conditional_t<
       S == Sched::PP,
@@ -51,7 +51,7 @@ inline void invoke_gemm(
     torch::Tensor const& s_strides,
     int64_t chunk_size) {
   using GemmT = typename Config::Cutlass3xW4A8Gemm;
-  cutlass_w4a8_group_gemm_caller_parallel<GemmT>(
+  cutlass_w4a8_group_gemm_caller<GemmT>(
       d_tensors,
       a_tensors,
       b_tensors,
@@ -129,7 +129,7 @@ inline void invoke_gemm_parallel(
       d_strides,                                     \
       s_strides,                                     \
       chunk_size)
-#define INVOKE_GEMM_PARALLEL(Config) INVOKE_GEMM_PARALLEL_WITH_CONFIG_HELPER Config
+#define INVOKE_GEMM_PARALLEL(Config) INVOKE_GEMM_WITH_CONFIG_HELPER Config
 
 void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,
