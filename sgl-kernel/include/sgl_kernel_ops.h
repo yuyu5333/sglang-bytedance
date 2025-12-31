@@ -453,6 +453,24 @@ void cutlass_w4a8_moe_mm(
     int64_t chunk_size,
     int64_t topk,
     int64_t expected_m_per_group);
+
+void cutlass_w4a8_moe_mm_fused_first(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& topk_ids,
+    torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t chunk_size,
+    int64_t topk,
+    int64_t expected_m_per_group);
 /*
  * From csrc/moe/marlin_moe_wna16
  */
