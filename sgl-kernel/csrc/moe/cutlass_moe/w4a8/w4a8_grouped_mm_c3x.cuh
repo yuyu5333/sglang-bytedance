@@ -48,9 +48,9 @@ using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int, int, int>>;
 // Architecture-specific configurations
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
-// constexpr int TileShapeK = 512;
-// using TileShape = Shape<_128, _32, cute::Int<TileShapeK>>;
-// using ClusterShape = Shape<_1, _1, _1>;
+constexpr int TileShapeK_Default = 512;
+using TileShapeDefault = Shape<_128, _32, cute::Int<TileShapeK_Default>>;
+using ClusterShapeDefault = Shape<_1, _1, _1>;
 
 // Layout configurations
 using LayoutA = cutlass::layout::RowMajor;
@@ -109,6 +109,56 @@ struct cutlass_3x_w4a8_group_gemm {
       KernelSchedule>::CollectiveOp;
 
   // Define the final kernel and GEMM operation types
+  using GemmKernelScaleOnly =
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>;
+
+  using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+
+  using StrideA = cute::remove_pointer_t<cutlass::detail::TagToStrideA_t<LayoutA*>>;
+  using StrideB = cute::remove_pointer_t<cutlass::detail::TagToStrideB_t<LayoutB*>>;
+  using StrideC = typename GemmKernelScaleOnly::InternalStrideC;
+  using StrideD = typename GemmKernelScaleOnly::InternalStrideD;
+  using StrideS = typename CollectiveMainloopScaleOnly::StrideScale;
+};
+
+template <typename EpilogueSchedule>
+struct cutlass_3x_w4a8_group_gemm_parallel {
+  static constexpr int GroupSize = 128;
+  static constexpr int PackedScalesNum = get<2>(TileShapeDefault{}) / GroupSize;
+  using ElementScalePacked = cutlass::Array<ElementScale, PackedScalesNum>;
+
+  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+      ArchTag,
+      OperatorClass,
+      TileShapeDefault,
+      ClusterShapeDefault,
+      cutlass::epilogue::collective::EpilogueTileAuto,
+      ElementAccumulator,
+      ElementAccumulator,
+      ElementC,
+      LayoutC_Transpose*,
+      AlignmentC,
+      ElementD,
+      LayoutD_Transpose*,
+      AlignmentD,
+      EpilogueSchedule>::CollectiveOp;
+
+  using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
+      ArchTag,
+      OperatorClass,
+      cute::tuple<QuantType, ElementScalePacked>,
+      LayoutB_Transpose*,
+      AlignmentB,
+      MmaType,
+      LayoutA_Transpose*,
+      AlignmentA,
+      ElementAccumulator,
+      TileShapeDefault,
+      ClusterShapeDefault,
+      cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+          sizeof(typename CollectiveEpilogue::SharedStorage))>,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative>::CollectiveOp;
+
   using GemmKernelScaleOnly =
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>;
 
@@ -274,6 +324,36 @@ void cutlass_w4a8_group_gemm_caller(
   if (status != cutlass::Status::kSuccess) {
     TORCH_CHECK(false, "GEMM execution failed");
   }
+}
+
+template <typename EpilogueSchedule>
+void cutlass_w4a8_group_gemm_caller_parallel(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t chunk_size) {
+  using Gemm = cutlass_3x_w4a8_group_gemm_parallel<EpilogueSchedule>;
+  cutlass_w4a8_group_gemm_caller<Gemm>(
+      d_tensors,
+      a_tensors,
+      b_tensors,
+      a_scales,
+      b_scales,
+      expert_offsets,
+      problem_sizes,
+      a_strides,
+      b_strides,
+      d_strides,
+      s_strides,
+      chunk_size);
 }
 
 }  // namespace
