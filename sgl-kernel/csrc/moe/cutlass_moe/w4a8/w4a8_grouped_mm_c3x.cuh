@@ -157,7 +157,7 @@ struct cutlass_3x_w4a8_group_gemm_parallel {
       ClusterShapeDefault,
       cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
           sizeof(typename CollectiveEpilogue::SharedStorage))>,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative>::CollectiveOp;
+      cutlass::gemm::KernelTmaWarpSpecializedCooperative>::CollectiveOp;
 
   using GemmKernelScaleOnly =
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>;
@@ -326,7 +326,7 @@ void cutlass_w4a8_group_gemm_caller(
   }
 }
 
-template <typename EpilogueSchedule>
+template <typename Gemm>
 void cutlass_w4a8_group_gemm_caller_parallel(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -340,7 +340,6 @@ void cutlass_w4a8_group_gemm_caller_parallel(
     torch::Tensor const& d_strides,
     torch::Tensor const& s_strides,
     int64_t chunk_size) {
-  using Gemm = cutlass_3x_w4a8_group_gemm_parallel<EpilogueSchedule>;
   cutlass_w4a8_group_gemm_caller<Gemm>(
       d_tensors,
       a_tensors,

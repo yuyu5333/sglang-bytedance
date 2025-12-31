@@ -51,7 +51,7 @@ inline void invoke_gemm(
     torch::Tensor const& s_strides,
     int64_t chunk_size) {
   using GemmT = typename Config::Cutlass3xW4A8Gemm;
-  cutlass_w4a8_group_gemm_caller<GemmT>(
+  cutlass_w4a8_group_gemm_caller_parallel<GemmT>(
       d_tensors,
       a_tensors,
       b_tensors,

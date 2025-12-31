@@ -112,3 +112,41 @@ def cutlass_w4a8_moe_mm(
         topk,
         expected_m_per_group,
     )
+
+
+def cutlass_w4a8_moe_mm_fused_first(
+    d: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    a_strides: torch.Tensor,
+    b_strides: torch.Tensor,
+    d_strides: torch.Tensor,
+    s_strides: torch.Tensor,
+    chunk_size: int = 128,
+    topk: int = 8,
+    expected_m_per_group: int = 64,
+):
+    torch.ops.sgl_kernel.cutlass_w4a8_moe_mm_fused_first.default(
+        d,
+        a,
+        b,
+        a_scales,
+        b_scales,
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        a_strides,
+        b_strides,
+        d_strides,
+        s_strides,
+        chunk_size,
+        topk,
+        expected_m_per_group,
+    )

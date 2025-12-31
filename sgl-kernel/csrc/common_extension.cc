@@ -294,6 +294,14 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "               int chunk_size, int topk, int expected_m_per_group) -> ()");
   m.impl("cutlass_w4a8_moe_mm", torch::kCUDA, &cutlass_w4a8_moe_mm);
 
+  m.def(
+      "cutlass_w4a8_moe_mm_fused_first(Tensor! d, Tensor a, Tensor b, "
+      "               Tensor a_scales, Tensor b_scales, Tensor topk_ids, "
+      "               Tensor! expert_offsets, Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "               Tensor a_strides, Tensor b_strides, Tensor d_strides, Tensor s_strides,"
+      "               int chunk_size, int topk, int expected_m_per_group) -> ()");
+  m.impl("cutlass_w4a8_moe_mm_fused_first", torch::kCUDA, &cutlass_w4a8_moe_mm_fused_first);
+
   /*
    * From csrc/moe/marlin_moe_wna16
    */

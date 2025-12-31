@@ -70,6 +70,56 @@ void cutlass_w4a8_moe_mm(
   return;
 }
 
+void cutlass_w4a8_moe_mm_fused_first(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& topk_ids,
+    torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t chunk_size,
+    int64_t topk,
+    int64_t expected_m_per_group) {
+  const int64_t num_experts = b_tensors.size(0);
+  const int64_t n = d_tensors.size(-1);
+  const int64_t k = a_tensors.size(-1);
+  torch::Tensor dummy_perm_in = torch::empty(0, a_tensors.options().dtype(torch::kInt32));
+  torch::Tensor dummy_perm_out = torch::empty(0, a_tensors.options().dtype(torch::kInt32));
+  get_cutlass_w4a8_moe_mm_data_caller(
+      topk_ids,
+      expert_offsets,
+      problem_sizes1,
+      problem_sizes2,
+      dummy_perm_in,
+      dummy_perm_out,
+      num_experts,
+      n,
+      k);
+
+  cutlass_w4a8_moe_mm_sm90(
+      d_tensors,
+      a_tensors,
+      b_tensors,
+      a_scales,
+      b_scales,
+      expert_offsets,
+      problem_sizes1,
+      a_strides,
+      b_strides,
+      d_strides,
+      s_strides,
+      chunk_size,
+      topk,
+      expected_m_per_group);
+}
+
 void get_cutlass_w4a8_moe_mm_data(
     const torch::Tensor& topk_ids,
     torch::Tensor& expert_offsets,

@@ -144,51 +144,72 @@ def cutlass_w4a8_moe(
     # NOTE: a_map and c_map are not used in the get_cutlass_w4a8_moe_mm_data kernel,
     # they are kept to allow for a quick switch of the permutation logic
     # from the current triton kernel implementation to the cutlass-based one if needed.
-    if not get_bool_env_var("SGLANG_USE_TRITON_PREP_NORMAL"):
-        a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-        c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-        get_cutlass_w4a8_moe_mm_data(
-            topk_ids,
-            expert_offsets,
-            problem_sizes1,
-            problem_sizes2,
-            a_map,
-            c_map,
-            num_local_experts,
-            n,
-            k,
-        )
-    else:
-        # use triton kernel to get problem sizes and expert offsets
-        problem_sizes1, problem_sizes2, expert_offsets = get_cutlass_w4a8_moe_mm_data_triton_kernel(
-            topk_ids,
-            expert_offsets,
-            problem_sizes1,
-            problem_sizes2,
-            num_local_experts,
-            n,
-            k,
-        )
+    use_fused = get_bool_env_var("SGLANG_USE_FUSED_MOE_PREP_GEMM")
+    if not use_fused:
+        if not get_bool_env_var("SGLANG_USE_TRITON_PREP_NORMAL"):
+            a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+            c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+            get_cutlass_w4a8_moe_mm_data(
+                topk_ids,
+                expert_offsets,
+                problem_sizes1,
+                problem_sizes2,
+                a_map,
+                c_map,
+                num_local_experts,
+                n,
+                k,
+            )
+        else:
+            problem_sizes1, problem_sizes2, expert_offsets = get_cutlass_w4a8_moe_mm_data_triton_kernel(
+                topk_ids,
+                expert_offsets,
+                problem_sizes1,
+                problem_sizes2,
+                num_local_experts,
+                n,
+                k,
+            )
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
     expected_m_per_group = int(m / num_local_experts * topk)
-    cutlass_w4a8_moe_mm(
-        c1,
-        gateup_input,
-        w1_q,
-        a1_scale.float(),
-        w1_scale,
-        expert_offsets[:-1],
-        problem_sizes1,
-        a_strides1,
-        b_strides1,
-        c_strides1,
-        s_strides13,
-        128,
-        topk,
-        expected_m_per_group,
-    )
+    if use_fused:
+        cutlass_w4a8_moe_mm_fused_first(
+            c1,
+            gateup_input,
+            w1_q,
+            a1_scale.float(),
+            w1_scale,
+            topk_ids,
+            expert_offsets,
+            problem_sizes1,
+            problem_sizes2,
+            a_strides1,
+            b_strides1,
+            c_strides1,
+            s_strides13,
+            128,
+            topk,
+            expected_m_per_group,
+        )
+    else:
+        cutlass_w4a8_moe_mm(
+            c1,
+            gateup_input,
+            w1_q,
+            a1_scale.float(),
+            w1_scale,
+            expert_offsets[:-1],
+            problem_sizes1,
+            a_strides1,
+            b_strides1,
+            c_strides1,
+            s_strides13,
+            128,
+            topk,
+            expected_m_per_group,
+        )
 
     intermediate_q = torch.empty(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
