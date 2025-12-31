@@ -38,6 +38,36 @@ __global__ void compute_problem_sizes(
   }
 }
 
+__global__ void count_expert_occurrences(
+    const int32_t* __restrict__ topk_ids,
+    int32_t* __restrict__ counts,
+    const int64_t topk_length) {
+  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t stride = blockDim.x * gridDim.x;
+  for (int64_t i = idx; i < topk_length; i += stride) {
+    int32_t e = topk_ids[i];
+    atomicAdd(&counts[e], 1);
+  }
+}
+
+__global__ void fill_problem_sizes_from_counts(
+    const int32_t* __restrict__ counts,
+    int32_t* problem_sizes1,
+    int32_t* problem_sizes2,
+    const int64_t num_experts,
+    const int64_t n,
+    const int64_t k) {
+  int64_t e = blockIdx.x * blockDim.x + threadIdx.x;
+  if (e >= num_experts) return;
+  int32_t c = counts[e];
+  problem_sizes1[e * 3] = c;
+  problem_sizes1[e * 3 + 1] = static_cast<int32_t>(2 * n);
+  problem_sizes1[e * 3 + 2] = static_cast<int32_t>(k);
+  problem_sizes2[e * 3] = c;
+  problem_sizes2[e * 3 + 1] = static_cast<int32_t>(k);
+  problem_sizes2[e * 3 + 2] = static_cast<int32_t>(n);
+}
+
 __global__ void compute_expert_offsets(
     const int32_t* __restrict__ problem_sizes1,
     int32_t* expert_offsets,
@@ -91,6 +121,23 @@ __global__ void compute_arg_sorts(
   }
 }
 
+__global__ void compute_arg_sorts_single_pass(
+    const int32_t* __restrict__ topk_ids,
+    int32_t* input_permutation,
+    int32_t* output_permutation,
+    int32_t* atomic_buffer,
+    const int64_t topk_length,
+    const int32_t topk) {
+  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t stride = blockDim.x * gridDim.x;
+  for (int64_t i = idx; i < topk_length; i += stride) {
+    int32_t expert = topk_ids[i];
+    int32_t pos = atomicAdd(&atomic_buffer[expert], 1);
+    input_permutation[pos] = static_cast<int32_t>(i / topk);
+    output_permutation[i] = pos;
+  }
+}
+
 void get_moe_prepare_input_caller(
     const torch::Tensor& topk_ids,
     torch::Tensor& expert_offsets,
@@ -106,15 +153,22 @@ void get_moe_prepare_input_caller(
   auto options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
   torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
 
-  uint32_t num_threads = static_cast<uint32_t>(min(THREADS_PER_EXPERT, topk_ids.numel()));
-  uint32_t num_blocks = static_cast<uint32_t>(num_experts);
+  uint32_t threads_ids = 256;
+  uint32_t blocks_ids = static_cast<uint32_t>((topk_ids.numel() + threads_ids - 1) / threads_ids);
 
-  compute_problem_sizes<<<num_blocks, num_threads, 0, stream>>>(
+  count_expert_occurrences<<<blocks_ids, threads_ids, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
+      static_cast<int32_t*>(atomic_buffer.data_ptr()),
+      topk_ids.numel());
+
+  uint32_t threads_experts = 256;
+  uint32_t blocks_experts = static_cast<uint32_t>((num_experts + threads_experts - 1) / threads_experts);
+
+  fill_problem_sizes_from_counts<<<blocks_experts, threads_experts, 0, stream>>>(
+      static_cast<const int32_t*>(atomic_buffer.data_ptr()),
       static_cast<int32_t*>(problem_sizes1.data_ptr()),
       static_cast<int32_t*>(problem_sizes2.data_ptr()),
-      static_cast<int32_t*>(atomic_buffer.data_ptr()),
-      topk_ids.numel(),
+      num_experts,
       n,
       k);
   if (blockscale_offsets.has_value()) {
@@ -131,13 +185,13 @@ void get_moe_prepare_input_caller(
         static_cast<int32_t*>(atomic_buffer.data_ptr()),
         num_experts);
   }
-  compute_arg_sorts<<<num_blocks, num_threads, 0, stream>>>(
+  compute_arg_sorts_single_pass<<<blocks_ids, threads_ids, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
       static_cast<int32_t*>(input_permutation.data_ptr()),
       static_cast<int32_t*>(output_permutation.data_ptr()),
       static_cast<int32_t*>(atomic_buffer.data_ptr()),
       topk_ids.numel(),
-      topk_ids.size(1));
+      static_cast<int32_t>(topk_ids.size(1)));
 }
 
 void prepare_moe_input(
