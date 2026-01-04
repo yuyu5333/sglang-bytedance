@@ -1849,6 +1849,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        index_k_max_size: Optional[int] = None,
     ):
         assert (
             kv_lora_rank % self.quant_block_size == 0
