@@ -752,13 +752,6 @@ class DecodePreallocQueue:
         # Write KV indices to req_to_token
         self.req_to_token_pool.write((req.req_pool_idx, slice(0, len(kv_loc))), kv_loc)
 
-        # Write index_k indices for NSA
-        if index_k_loc is not None:
-            self.req_to_token_pool.write_index_token(
-                (req.req_pool_idx, slice(0, len(index_k_loc))),
-                index_k_loc.to(torch.int32),
-            )
-
         # populate metadata
         req.fill_ids = req.origin_input_ids + req.output_ids
         req.set_extend_input_len(len(req.fill_ids))
