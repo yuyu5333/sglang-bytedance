@@ -10,6 +10,8 @@ from sgl_kernel import (
     silu_and_mul,
 )
 
+from sglang.srt.utils import get_bool_env_var
+
 from sglang.srt.distributed import get_moe_expert_parallel_world_size
 from sglang.srt.utils import get_bool_env_var
 from sglang.srt.layers.moe.ep_moe.kernels import (
