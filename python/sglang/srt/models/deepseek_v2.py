@@ -131,6 +131,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from sglang.srt.mem_cache.sparsity import get_sparse_coordinator
+
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.utils import (
     maybe_executor_submit,
@@ -2018,13 +2020,31 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
         topk_indices = None
         if q_lora is not None:
-            topk_indices = self.indexer(
-                x=hidden_states,
-                q_lora=q_lora,
-                positions=positions,
-                forward_batch=forward_batch,
-                layer_id=self.layer_id,
-            )
+            sparse_coordinator = get_sparse_coordinator()
+            if (
+                forward_batch.forward_mode.is_decode()
+                and sparse_coordinator is not None
+            ):
+                topk_indices = sparse_coordinator.attention_begin(
+                    query=q_nope_out,
+                    key=k_nope,
+                    value=k_nope,
+                    layer=self,
+                    forward_batch=forward_batch,
+                    attn_metadata=None,
+                    indexer=self.indexer,
+                    x=hidden_states,
+                    q_lora=q_lora,
+                    positions=positions,
+                )
+            else:
+                topk_indices = self.indexer(
+                    x=hidden_states,
+                    q_lora=q_lora,
+                    positions=positions,
+                    forward_batch=forward_batch,
+                    layer_id=self.layer_id,
+                )
 
         return (
             q_pe,
