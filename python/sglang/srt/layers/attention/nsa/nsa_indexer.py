@@ -853,7 +853,7 @@ class Indexer(MultiPlatformOp):
         # k_buffer: (num_total_tokens + page_size, head_dim) fp8_e4m3fn
         # k_scale: (seq_len, head_dim // block_size = 1) fp8_e4m3fn
         # k_scale_cache: (num_total_tokens + page_size, head_dim // block_size = 1) fp8_e4m3fn
-        index_loc = self._get_indexer_out_cache_loc(forward_batch)
+        index_loc = self._get_index_cache_loc(forward_batch)
         forward_batch.token_to_kv_pool.set_index_k_scale_buffer(
             layer_id=layer_id,
             loc=index_loc,
@@ -936,6 +936,23 @@ class Indexer(MultiPlatformOp):
                 layer_id=layer_id,
             )
         return topk_result
+
+    def _get_index_cache_loc(self, forward_batch: ForwardBatch) -> torch.Tensor:
+        pool = forward_batch.req_to_token_pool
+
+        if (
+            forward_batch.forward_mode.is_decode()
+            and hasattr(pool, "req_to_nsa_index_k")
+        ):
+            index_loc = pool.req_to_nsa_index_k[
+                forward_batch.req_pool_indices, forward_batch.seq_lens - 1
+            ].to(torch.int64)
+        else:
+            index_loc = forward_batch.out_cache_loc
+
+        if not index_loc.is_contiguous():
+            index_loc = index_loc.contiguous()
+        return index_loc
 
     def forward_npu(
         self,
