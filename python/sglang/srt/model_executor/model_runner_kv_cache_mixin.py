@@ -385,14 +385,15 @@ class ModelRunnerKVCacheMixin:
                             enable_memory_saver=self.server_args.enable_memory_saver,
                             pre_alloc_size=pre_alloc_size,
                         )
-                    self.req_to_token_pool = DecodeReqToTokenPool(
-                        size=max_num_reqs,
-                        max_context_len=self.model_config.context_len
-                        + extra_max_context_len,
-                        device=self.device,
-                        enable_memory_saver=self.server_args.enable_memory_saver,
-                        pre_alloc_size=pre_alloc_size,
-                    )
+                    else:
+                        self.req_to_token_pool = DecodeReqToTokenPool(
+                            size=max_num_reqs,
+                            max_context_len=self.model_config.context_len
+                            + extra_max_context_len,
+                            device=self.device,
+                            enable_memory_saver=self.server_args.enable_memory_saver,
+                            pre_alloc_size=pre_alloc_size,
+                        )
             elif config := self.mambaish_config:
                 self.req_to_token_pool = HybridReqToTokenPool(
                     size=max_num_reqs,
