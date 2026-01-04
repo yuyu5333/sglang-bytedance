@@ -139,7 +139,6 @@ def act_quant(
         round_scale=round_scale,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        num_stages=0 if round_scale else 2,
     )
 
     return y, s
@@ -174,7 +173,6 @@ def act_quant_many(
         round_scale=round_scale,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        num_stages=0 if round_scale else 2,
     )
     ys = []
     ss = []
