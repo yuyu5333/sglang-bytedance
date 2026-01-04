@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
-from sglang.srt.mem_cache.allocator import NSAHybridTokenToKVPoolAllocator
 from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool
 from sglang.srt.mem_cache.mamba_radix_cache import MambaRadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
