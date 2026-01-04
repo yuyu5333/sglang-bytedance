@@ -50,7 +50,6 @@ from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, RequestStage, ScheduleBatch
 from sglang.srt.mem_cache.allocator import (
     BaseTokenToKVPoolAllocator,
-    is_enable_hierarchical_nsa,
 )
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
@@ -746,12 +745,6 @@ class DecodePreallocQueue:
         assert (
             alloc_result is not None
         ), "KV cache is full! There is a bug in memory estimation."
-
-        if is_enable_hierarchical_nsa(self.token_to_kv_pool_allocator):
-            kv_loc, index_k_loc = alloc_result
-        else:
-            kv_loc = alloc_result
-            index_k_loc = None
 
         if enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator):
             kv_loc, index_k_loc = kv_loc
