@@ -726,10 +726,10 @@ class DecodePreallocQueue:
         req.kv_allocated_len = fill_len
         req.kv_committed_len = fill_len
         if self.token_to_kv_pool_allocator.page_size == 1:
-            alloc_result = self.token_to_kv_pool_allocator.alloc(fill_len)
+            kv_loc = self.token_to_kv_pool_allocator.alloc(fill_len)
         else:
             device = self.token_to_kv_pool_allocator.device
-            alloc_result = self.token_to_kv_pool_allocator.alloc_extend(
+            kv_loc = self.token_to_kv_pool_allocator.alloc_extend(
                 prefix_lens=torch.tensor([0], dtype=torch.int64, device=device),
                 prefix_lens_cpu=torch.tensor([0], dtype=torch.int64),
                 seq_lens=torch.tensor([fill_len], dtype=torch.int64, device=device),
@@ -739,7 +739,7 @@ class DecodePreallocQueue:
             )
 
         assert (
-            alloc_result is not None
+            kv_loc is not None
         ), "KV cache is full! There is a bug in memory estimation."
 
         if enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator):
