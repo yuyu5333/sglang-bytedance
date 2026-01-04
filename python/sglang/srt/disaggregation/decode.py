@@ -48,12 +48,10 @@ from sglang.srt.disaggregation.utils import (
 )
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, RequestStage, ScheduleBatch
-from sglang.srt.mem_cache.allocator import (
-    BaseTokenToKVPoolAllocator,
-)
+from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
-from sglang.srt.mem_cache.common import release_kv_cache, enable_nsa_hybrid_indexer_pool
+from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool, release_kv_cache
 from sglang.srt.mem_cache.memory_pool import (
     HybridLinearKVPool,
     HybridReqToTokenPool,
@@ -62,7 +60,6 @@ from sglang.srt.mem_cache.memory_pool import (
     ReqToTokenPool,
     SWAKVPool,
 )
-from sglang.srt.mem_cache.sparsity import get_sparse_coordinator
 from sglang.srt.tracing.trace import trace_event_batch, trace_slice_end
 from sglang.srt.utils import get_int_env_var
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
@@ -595,14 +592,6 @@ class DecodePreallocQueue:
                         window_kv_indices_full
                     )
                 )
-                if isinstance(self.req_to_token_pool, NSADecodeReqToTokenPool):
-                    kv_indices_full = self.req_to_token_pool.req_to_nsa_index_k[
-                        decode_req.req.req_pool_idx, :seq_len
-                    ]
-                else:
-                    kv_indices_full = self.req_to_token_pool.req_to_token[
-                        decode_req.req.req_pool_idx, :seq_len
-                    ]
                 state_indices = window_kv_indices_swa.cpu().numpy()
                 state_indices = kv_to_page_indices(state_indices, page_size)
             elif isinstance(self.token_to_kv_pool, NSATokenToKVPool):
