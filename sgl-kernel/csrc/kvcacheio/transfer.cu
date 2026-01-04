@@ -140,16 +140,19 @@ __global__ void transfer_page_head_kernel_impl(
   int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   int32_t lane_id = tid % WARP_SIZE;
   int32_t warp_id = tid / WARP_SIZE;
+  int32_t warp_num = gridDim.x * blockDim.x / WARP_SIZE;
   const int64_t head_size_bytes = item_size_bytes / head_num;
 
   for (int i = 0; i < items_per_warp; ++i) {
-    int64_t item_id = warp_id * items_per_warp + i;
+    int64_t item_id = i * warp_num + warp_id;
     if (item_id >= num_items) {
       break;
     }
     const int64_t src_page_id = src_indices[item_id];
     const int64_t dst_page_id = dst_indices[item_id];
-
+    if (src_page_id < 0 || dst_page_id < 0) {
+      continue;
+    }
     // Loop over layers if necessary
     for (int64_t layer_id = start_layer_id; layer_id < start_layer_id + num_layers_to_process; ++layer_id) {
       // For page head layout, the cache of each head in the token is discontinuous, need to loop
