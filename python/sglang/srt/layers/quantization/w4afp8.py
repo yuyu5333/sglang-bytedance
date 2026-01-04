@@ -283,7 +283,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             [w2_input_scale_max], dtype=torch.float32, device=device
         )
         layer.w2_input_scale = Parameter(new_w2_input_scale, requires_grad=False)
-        self.quant_config.set_quant_config({"dispatch_weight_scale": (layer.w13_weight_scale_inv)})
+        # Set dispatch_weight_scale for mtp
+        layer.dispatcher.set_quant_config({"dispatch_weight_scale": layer.w13_weight_scale_inv})
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
