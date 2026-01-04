@@ -6,6 +6,15 @@ import triton.language as tl
 
 
 # Triton implementation
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=1),
+        triton.Config({}, num_warps=2, num_stages=2),
+    ],
+    key=["M", "N"],
+)
 @triton.jit
 def _act_quant_kernel(
     X_ptr,
@@ -115,7 +124,7 @@ def act_quant(
     s_flat = s.view(-1, N // block_size)
 
     # Launch kernel
-    BLOCK_M = 32
+    BLOCK_M = 64 if M >= 64 else 32
     BLOCK_N = block_size
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, block_size))
     round_scale = scale_fmt is not None
@@ -134,3 +143,47 @@ def act_quant(
     )
 
     return y, s
+
+
+def act_quant_many(
+    tensors: list[torch.Tensor], block_size: int = 128, scale_fmt: Optional[str] = None
+) -> Tuple[list[torch.Tensor], list[torch.Tensor]]:
+    assert len(tensors) > 0
+    N = tensors[0].size(-1)
+    for t in tensors:
+        assert t.is_contiguous()
+        assert t.size(-1) == N
+        assert N % block_size == 0
+    flats = [t.view(-1, N) for t in tensors]
+    Ms = [f.size(0) for f in flats]
+    M_total = sum(Ms)
+    x_cat = torch.cat(flats, dim=0)
+    y_cat = torch.empty_like(x_cat, dtype=torch.float8_e4m3fn)
+    s_cat = x_cat.new_empty(M_total, N // block_size, dtype=torch.float32)
+    BLOCK_M = 64 if M_total >= 64 else 32
+    BLOCK_N = block_size
+    grid = (triton.cdiv(M_total, BLOCK_M), triton.cdiv(N, block_size))
+    round_scale = scale_fmt is not None
+    _act_quant_kernel[grid](
+        x_cat,
+        y_cat,
+        s_cat,
+        M_total,
+        N,
+        group_size=block_size,
+        round_scale=round_scale,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        num_stages=0 if round_scale else 2,
+    )
+    ys = []
+    ss = []
+    start = 0
+    for i, t in enumerate(tensors):
+        m = Ms[i]
+        y_i = y_cat[start : start + m].view_as(t)
+        s_i = s_cat[start : start + m].view(*t.size()[:-1], N // block_size)
+        ys.append(y_i)
+        ss.append(s_i)
+        start += m
+    return ys, ss

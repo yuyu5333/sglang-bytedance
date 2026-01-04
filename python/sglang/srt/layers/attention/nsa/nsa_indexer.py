@@ -792,7 +792,7 @@ class Indexer(MultiPlatformOp):
         if is_hip():
             from sglang.srt.layers.attention.nsa.tilelang_kernel import act_quant
         elif not is_npu():
-            from sglang.srt.layers.attention.nsa.triton_kernel import act_quant
+            from sglang.srt.layers.attention.nsa.triton_kernel import act_quant, act_quant_many
 
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
@@ -847,8 +847,9 @@ class Indexer(MultiPlatformOp):
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
             current_stream.wait_stream(self.alt_stream)
         else:
-            q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
-            k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
+            (q_fp8, k_fp8), (q_scale, k_scale) = act_quant_many(
+                [query, key], self.block_size, self.scale_fmt
+            )
 
         # k_fp8: (seq_len, head_dim) fp8_e4m3fn
         # k_buffer: (num_total_tokens + page_size, head_dim) fp8_e4m3fn
