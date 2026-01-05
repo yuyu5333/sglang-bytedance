@@ -2021,6 +2021,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         topk_indices = None
         if q_lora is not None:
             sparse_coordinator = get_sparse_coordinator()
+            print(f"[DEBUG] 3 at deepseek_v2.py, sparse_coordinator is {sparse_coordinator}")
             if (
                 forward_batch.forward_mode.is_decode()
                 and sparse_coordinator is not None

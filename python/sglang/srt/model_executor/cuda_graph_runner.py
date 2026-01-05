@@ -269,6 +269,16 @@ class CudaGraphRunner:
 
         # Batch sizes to capture
         self.capture_bs, self.compile_bs = get_batch_sizes_to_capture(model_runner)
+        
+        # DeepGEMM attention backend requires capture-time batch size to match
+        # the initialized cuda graph state. Restrict to max bs and rely on padding.
+        print(f"[DEBUG] 1 at cuda_graph_runner.py, self.capture_bs={self.capture_bs}, self.compile_bs={self.compile_bs}")
+        # self.capture_bs = [max(self.capture_bs)]
+        # self.compile_bs = [bs for bs in self.compile_bs if bs == self.capture_bs[0]]
+        print(f"[DEBUG] 2 at cuda_graph_runner.py, self.capture_bs={self.capture_bs}, self.compile_bs={self.compile_bs}")
+        # [DEBUG] 1 at cuda_graph_runner.py, self.capture_bs=[1, 2, 4, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32], self.compile_bs=[]
+        # [DEBUG] 2 at cuda_graph_runner.py, self.capture_bs=[32], self.compile_bs=[]
+
         log_info_on_rank0(logger, f"Capture cuda graph bs {self.capture_bs}")
         if KTRANSFORMERS_AVAILABLE:
             KTMoEWrapper.set_capture_batch_sizes(self.capture_bs)
