@@ -337,6 +337,8 @@ class Indexer(MultiPlatformOp):
         assert len(weights.shape) == 3
         weights = weights.squeeze(2)
 
+        print(f"[DEBUG] 8 at nsa_indexer.py, q_fp8 shape: {q_fp8.shape}, block_tables shape: {block_tables.shape}")
+
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8,
             kv_cache_fp8,
@@ -788,6 +790,7 @@ class Indexer(MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
+        print(f"[DEBUG] 9 at nsa_indexer.py, is_hip()={is_hip()}, not is_npu()={not is_npu()}")
         if is_hip():
             from sglang.srt.layers.attention.nsa.tilelang_kernel import act_quant
         elif not is_npu():
@@ -848,6 +851,8 @@ class Indexer(MultiPlatformOp):
         else:
             q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
             k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
+
+        print(f"[DEBUG] 9.1 at nsa_indexer.py, q_fp8 shape: {q_fp8.shape}")
 
         # k_fp8: (seq_len, head_dim) fp8_e4m3fn
         # k_buffer: (num_total_tokens + page_size, head_dim) fp8_e4m3fn
