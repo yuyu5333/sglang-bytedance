@@ -1586,13 +1586,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     def init_sparse_coordinator(self):
         """Initialize sparse attention coordinator if enabled."""
         self.sparse_coordinator = None
+        print(f"[DEBUG] 5 1 at model_runner.py")
 
         # Check if sparse attention is enabled
         if not self.server_args.enable_nsa_decode_hybrid_pool:
             return
 
         try:
+            print(f"[DEBUG] 5 2 at model_runner.py")
             from sglang.srt.mem_cache.sparsity import create_sparse_coordinator
+            print(f"[DEBUG] 5 3 at model_runner.py")
 
             # Get CPU group for offload communication
             if self.server_args.enable_dp_attention:
@@ -1602,6 +1605,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             else:
                 tp_group_cpu = get_tp_group().cpu_group
 
+            print(f"[DEBUG] 5 4 at model_runner.py")
+
             self.sparse_coordinator = create_sparse_coordinator(
                 device=self.device,
                 req_to_token_pool=self.req_to_token_pool,
@@ -1610,6 +1615,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 end_layer=self.end_layer,
                 server_args=self.server_args,
             )
+            print(f"[DEBUG] 5 5 at model_runner.py, self.sparse_coordinator is {self.sparse_coordinator}")
 
         except Exception as e:
             logger.error(f"[ModelRunner] Failed to initialize sparse coordinator: {e}")
