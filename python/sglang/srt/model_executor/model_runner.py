@@ -1588,7 +1588,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.sparse_coordinator = None
 
         # Check if sparse attention is enabled
-        if not self.server_args.enable_sparse_attn:
+        if not self.server_args.enable_nsa_decode_hybrid_pool:
             return
 
         try:
