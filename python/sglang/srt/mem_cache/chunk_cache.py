@@ -151,7 +151,6 @@ class NSAChunkCache(ChunkCache):
         index_k_indices = self.req_to_token_pool.req_to_nsa_index_k[
             req.req_pool_idx, :kv_committed_len
         ]
-        index_k_indices = index_k_indices[index_k_indices > 0]
         self.token_to_kv_pool_allocator.free((kv_indices, index_k_indices))
         self.req_to_token_pool.free(req.req_pool_idx)
         self.protected_size_ -= len(req.prefix_indices)

@@ -814,7 +814,6 @@ class NSAHybridTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
         self.kv_allocator.free(kv_indices)
         if index_k_indices is not None and index_k_indices.numel() > 0:
-            index_k_indices = index_k_indices[index_k_indices > 0]
             self.index_k_allocator.free(index_k_indices)
 
     def available_size(self):
