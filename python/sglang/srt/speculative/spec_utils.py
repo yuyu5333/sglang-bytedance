@@ -159,10 +159,11 @@ def assign_draft_cache_locs(
 ):
     BLOCK_SIZE: tl.constexpr = 128
     pid = tl.program_id(axis=0)
+    pid_i64 = tl.cast(pid, tl.int64)
 
     if page_size == 1 or topk == 1:
         copy_len = topk * speculative_num_steps
-        out_cache_ptr = out_cache_loc + pid * topk * speculative_num_steps
+        out_cache_ptr = out_cache_loc + pid_i64 * copy_len
     else:
         bs_offset = tl.arange(0, bs_upper)
         copy_len = tl.load(extend_lens + pid)
@@ -232,7 +233,7 @@ def assign_draft_cache_locs(
                 other=0,
             )
             # Shift from previous batches
-            ptr_offset = pid * speculative_num_steps * topk
+            ptr_offset = pid_i64 * speculative_num_steps * topk
             # Subtract last_page_len to fill the gap of duplicated last page tokens.
             # For example, token pool is (1, 2, 3, 4 ,5) and last page is 1,
             # we write 2, 3, 4 to the front of out_cache_loc.
