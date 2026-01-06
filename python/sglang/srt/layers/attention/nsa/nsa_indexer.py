@@ -302,7 +302,7 @@ class Indexer(MultiPlatformOp):
         assert page_size == 64, "only support page size 64"
 
         # NOTE(dark): this support extend/decode/decode+graph
-        print(f"[DEBUG] 8.1 at nsa_indexer.py, metadata: {metadata}")
+        print(f"[DEBUG] 8.1 at nsa_indexer.py, type of metadata: {type(metadata)}")
         
         block_tables = metadata.get_page_table_64()
 
