@@ -1912,6 +1912,9 @@ class NativeSparseAttnBackend(
     def get_indexer_metadata(
         self, layer_id: int, forward_batch: ForwardBatch
     ) -> NSAIndexerMetadata:
+        print(f"[DEBUG] 9.5 at nsa_backend.py, type of self.forward_metadata.paged_mqa_schedule_metadata: {type(self.forward_metadata.paged_mqa_schedule_metadata)}")
+        print(f"[DEBUG] 9.6 at nsa_backend.py, type of self.forward_metadata: {type(self.forward_metadata)}")
+        
         return NSAIndexerMetadata(
             attn_metadata=self.forward_metadata,
             topk_transform_method=self.get_topk_transform_method(),

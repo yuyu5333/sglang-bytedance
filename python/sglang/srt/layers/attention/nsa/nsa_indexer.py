@@ -889,6 +889,7 @@ class Indexer(MultiPlatformOp):
                 or forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend(include_v2=True)
             ):
+                print(f"[DEBUG] 9.1.2 at nsa_indexer.py, forward_batch.nsa_cp_metadata: {forward_batch.nsa_cp_metadata}")
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
