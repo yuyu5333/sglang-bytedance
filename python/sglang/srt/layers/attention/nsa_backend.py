@@ -962,7 +962,7 @@ class NativeSparseAttnBackend(
         if self.enable_nsa_hybrid_indexer_pool:
             indexer_page_table_1 = self.decode_cuda_graph_metadata[
                 "indexer_page_table"
-            ][:bs, :]
+            ][:bs * self.speculative_num_draft_tokens, :]
             print_0(
                 f"[NSA CAPTURE] real transform indexer, page_table_1 shape: {indexer_page_table_1.shape}"
             )
