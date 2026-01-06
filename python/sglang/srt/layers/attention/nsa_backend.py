@@ -646,7 +646,8 @@ class NativeSparseAttnBackend(
                 )
             except (ImportError, ModuleNotFoundError):
                 paged_mqa_schedule_metadata = None
-        print_0(f"[DEBUG] 10.3 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape}")
+
+        print_0(f"[DEBUG] 10.3 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape if indexer_page_table is not None else None}")
 
         metadata = NSAMetadata(
             page_size=self.real_page_size,
