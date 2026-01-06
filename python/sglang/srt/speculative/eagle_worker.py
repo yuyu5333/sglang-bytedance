@@ -460,7 +460,6 @@ class EAGLEWorker(TpModelWorker):
                     last_loc,
                     extend_num_tokens,
                     backup_state=True,
-                    skip_index_k=True,
                 )
             )
 

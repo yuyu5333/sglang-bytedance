@@ -134,7 +134,6 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 end_offset_cpu,
                 last_loc,
                 len(batch.input_ids),
-                skip_index_k=True,
             )
             self.last_loc = last_loc
 
