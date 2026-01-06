@@ -163,10 +163,14 @@ class SchedulerRuntimeCheckerMixin:
             self.max_total_num_tokens - protected_size
         )
 
+        print_0(f"[DEBUG] [MTP] 14 at scheduler_runtime_checker_mixin.py, {kv_memory_leak=}")
+
         # Check index_k
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
         index_k_expected = self.token_to_kv_pool_allocator.index_k_expected_size()
         index_k_memory_leak = index_k_available != index_k_expected
+        
+        print_0(f"[DEBUG] [MTP] 15 at scheduler_runtime_checker_mixin.py, {index_k_available=}, {index_k_expected=}, {index_k_memory_leak=}")
 
         memory_leak = kv_memory_leak or index_k_memory_leak
 
