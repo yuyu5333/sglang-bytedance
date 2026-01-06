@@ -462,35 +462,19 @@ class EAGLEWorker(TpModelWorker):
                 )
                 extend_num_tokens = torch.sum((seq_lens_cpu - prefix_lens_cpu)).item()
 
-            if enable_nsa_hybrid_indexer_pool(
-                allocator=batch.tree_cache.token_to_kv_pool_allocator
-            ):
-                token_to_kv_pool_state_backup = (
-                    batch.tree_cache.token_to_kv_pool_allocator.backup_state()
+            out_cache_loc, token_to_kv_pool_state_backup = (
+                alloc_paged_token_slots_extend(
+                    batch.tree_cache,
+                    prefix_lens,
+                    prefix_lens_cpu,
+                    seq_lens,
+                    seq_lens_cpu,
+                    last_loc,
+                    extend_num_tokens,
+                    backup_state=True,
+                    skip_index_k=True,
                 )
-                out_cache_loc = (
-                    batch.tree_cache.token_to_kv_pool_allocator.kv_allocator.alloc_extend(
-                        prefix_lens,
-                        prefix_lens_cpu,
-                        seq_lens,
-                        seq_lens_cpu,
-                        last_loc,
-                        extend_num_tokens,
-                    )
-                )
-            else:
-                out_cache_loc, token_to_kv_pool_state_backup = (
-                    alloc_paged_token_slots_extend(
-                        batch.tree_cache,
-                        prefix_lens,
-                        prefix_lens_cpu,
-                        seq_lens,
-                        seq_lens_cpu,
-                        last_loc,
-                        extend_num_tokens,
-                        backup_state=True,
-                    )
-                )
+            )
 
         if enable_nsa_hybrid_indexer_pool(
             allocator=batch.tree_cache.token_to_kv_pool_allocator
