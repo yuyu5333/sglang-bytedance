@@ -255,6 +255,9 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
         if allocator.available_size() < num_tokens:
             tree_cache.evict(num_tokens)
 
+def print_0(msg: str):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 def alloc_paged_token_slots_extend(
     tree_cache: BasePrefixCache,
@@ -294,6 +297,8 @@ def alloc_paged_token_slots_extend(
         if tree_cache is not None:
             tree_cache.pretty_print()
         raise RuntimeError(error_msg)
+
+    print_0(f"[DEBUG] [MTP] 2 at common.py, out_cache_loc shape: {backup_state}")
 
     return (out_cache_loc, state) if backup_state else out_cache_loc
 
