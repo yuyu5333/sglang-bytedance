@@ -469,8 +469,10 @@ class EAGLEWorker(TpModelWorker):
         if enable_nsa_hybrid_indexer_pool(
             allocator=batch.tree_cache.token_to_kv_pool_allocator
         ) and isinstance(out_cache_loc, tuple):
+            print_0(f"[DEBUG] [MTP] 3 at eagle_worker.py, out_cache_loc type: {type(out_cache_loc)}")
             kv_loc, index_k_loc = out_cache_loc
             out_cache_loc = kv_loc
+            print_0(f"[DEBUG] [MTP] 4 at eagle_worker.py, out_cache_loc type: {type(out_cache_loc)}")
 
             if self.page_size == 1:
                 per_len = self.speculative_num_steps * self.topk

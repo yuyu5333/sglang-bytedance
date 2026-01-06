@@ -298,7 +298,7 @@ def alloc_paged_token_slots_extend(
             tree_cache.pretty_print()
         raise RuntimeError(error_msg)
 
-    print_0(f"[DEBUG] [MTP] 2 at common.py, out_cache_loc shape: {backup_state}")
+    print_0(f"[DEBUG] [MTP] 2 at common.py, backup_state: {backup_state}")
 
     return (out_cache_loc, state) if backup_state else out_cache_loc
 
