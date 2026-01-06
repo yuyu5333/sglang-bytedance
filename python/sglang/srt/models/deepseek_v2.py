@@ -1360,7 +1360,6 @@ class DeepseekV2AttentionMLA(nn.Module):
                 prefix=add_prefix("kv_a_proj_with_mqa", prefix),
             )
 
-        print(f"[DEBUG] 6 at deepseek_v2.py, self.use_nsa is {self.use_nsa}")
         if self.use_nsa:
             self.indexer = Indexer(
                 hidden_size=hidden_size,

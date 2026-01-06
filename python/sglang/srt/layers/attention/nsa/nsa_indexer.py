@@ -302,6 +302,8 @@ class Indexer(MultiPlatformOp):
         assert page_size == 64, "only support page size 64"
 
         # NOTE(dark): this support extend/decode/decode+graph
+        print(f"[DEBUG] 8.1 at nsa_indexer.py, metadata: {metadata}")
+        
         block_tables = metadata.get_page_table_64()
 
         max_seq_len = block_tables.shape[1] * page_size
@@ -799,6 +801,8 @@ class Indexer(MultiPlatformOp):
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
 
+        print(f"[DEBUG] 9.2 at nsa_indexer.py, layer_id: {layer_id}, q_lora shape: {q_lora.shape}")
+        print(f"[DEBUG] 9.2 at nsa_indexer.py, type of forward_batch.attn_backend: {type(forward_batch.attn_backend)}")
         metadata = forward_batch.attn_backend.get_indexer_metadata(
             layer_id, forward_batch
         )
@@ -885,6 +889,8 @@ class Indexer(MultiPlatformOp):
                 or forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend(include_v2=True)
             ):
+                print(f"[DEBUG] 9.2 at nsa_indexer.py, topk_result: {topk_result}")
+                
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
