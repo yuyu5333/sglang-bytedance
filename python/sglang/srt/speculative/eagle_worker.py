@@ -24,6 +24,7 @@ from sglang.srt.mem_cache.common import (
     alloc_paged_token_slots_extend,
     alloc_token_slots,
     get_last_loc,
+    enable_nsa_hybrid_indexer_pool,
 )
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
@@ -465,6 +466,46 @@ class EAGLEWorker(TpModelWorker):
                 )
             )
 
+        if enable_nsa_hybrid_indexer_pool(
+            allocator=batch.tree_cache.token_to_kv_pool_allocator
+        ) and isinstance(out_cache_loc, tuple):
+            kv_loc, index_k_loc = out_cache_loc
+            out_cache_loc = kv_loc
+
+            if self.page_size == 1:
+                per_len = self.speculative_num_steps * self.topk
+                offset = 0
+                for i in range(num_seqs):
+                    start = int(batch.seq_lens[i].item())
+                    end = start + per_len
+                    batch.req_to_token_pool.write_index_token(
+                        (int(batch.req_pool_indices[i].item()), slice(start, end)),
+                        index_k_loc[offset : offset + per_len].to(torch.int32),
+                    )
+                    offset += per_len
+            elif self.topk == 1:
+                per_len = self.speculative_num_steps
+                offset = 0
+                for i in range(num_seqs):
+                    start = int(batch.seq_lens[i].item())
+                    end = start + per_len
+                    batch.req_to_token_pool.write_index_token(
+                        (int(batch.req_pool_indices[i].item()), slice(start, end)),
+                        index_k_loc[offset : offset + per_len].to(torch.int32),
+                    )
+                    offset += per_len
+            else:
+                offset = 0
+                for i in range(num_seqs):
+                    length = int(self.extend_lens[i].item())
+                    start = int(batch.seq_lens[i].item())
+                    end = start + length
+                    batch.req_to_token_pool.write_index_token(
+                        (int(batch.req_pool_indices[i].item()), slice(start, end)),
+                        index_k_loc[offset : offset + length].to(torch.int32),
+                    )
+                    offset += length
+
         if self.page_size > 1 and self.topk > 1:
             last_page_lens_cumsum = torch.cumsum(last_page_lens, dim=0)
             duplicate_cache_len = torch.sum(last_page_lens_cpu).item() * (self.topk - 1)
@@ -479,7 +520,10 @@ class EAGLEWorker(TpModelWorker):
             duplicate_cache_len = 0
             source_cache_loc, target_cache_loc, last_page_lens_cumsum = None, None, None
 
-        print_0(f"[DEBUG] [MTP] 1 at eagle_worker.py, out_cache_loc shape: {out_cache_loc.shape}")
+        print_0(
+            f"[DEBUG] [MTP] 1 at eagle_worker.py, out_cache_loc shape: "
+            + (f"{out_cache_loc.shape}" if not isinstance(out_cache_loc, tuple) else f"{out_cache_loc[0].shape}, index_k_loc: {out_cache_loc[1].shape}")
+        )
 
         assign_draft_cache_locs[(num_seqs,)](
             batch.req_pool_indices,
