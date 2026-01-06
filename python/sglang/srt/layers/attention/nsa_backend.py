@@ -928,9 +928,10 @@ class NativeSparseAttnBackend(
                 paged_mqa_schedule_metadata = None
 
         if self.enable_nsa_hybrid_indexer_pool:
+            nsa_speculative_num_draft_tokens = self.speculative_num_draft_tokens if self.speculative_num_draft_tokens is not None else 1
             indexer_page_table_1 = self.decode_cuda_graph_metadata[
                 "indexer_page_table"
-            ][:bs * self.speculative_num_draft_tokens, :]
+            ][:bs * nsa_speculative_num_draft_tokens, :]
             indexer_real_page_table = self._transform_table_1_to_real(
                 indexer_page_table_1
             )
