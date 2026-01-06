@@ -278,6 +278,8 @@ def alloc_paged_token_slots_extend(
     if backup_state:
         state = allocator.backup_state()
 
+    print_0(f"[DEBUG] [MTP] 10 at common.py, allocator type : {type(allocator)}")
+
     out_cache_loc = allocator.alloc_extend(
         prefix_lens,
         prefix_lens_cpu,
@@ -286,6 +288,8 @@ def alloc_paged_token_slots_extend(
         last_loc,
         extend_num_tokens,
     )
+    
+    print_0(f"[DEBUG] [MTP] 11 at common.py, out_cache_loc type : {type(out_cache_loc)}")
 
     if out_cache_loc is None:
         error_msg = (
