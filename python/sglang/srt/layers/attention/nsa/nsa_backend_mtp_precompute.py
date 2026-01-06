@@ -132,9 +132,8 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
         
         page_indices = self.req_to_token[req_pool_indices, :max_len]
         print(f"[DEBUG] 11.2 at nsa_backend_mtp_precompute.py, page_indices shape: {page_indices.shape}")
-        
         import time
-        time.sleep(20)
+        time.sleep(5)
         
         # Compute NSA seqlens
         nsa_cache_seqlens = compute_nsa_seqlens(

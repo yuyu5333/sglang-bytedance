@@ -25,7 +25,7 @@ class DraftBackendFactory:
     ):
         print(f"[DEBUG] 12 at draft_utils.py, backend_name: {backend_name}")
         import time
-        time.sleep(20)
+        time.sleep(5)
         
         backend_type = (
             self.draft_attn_backend

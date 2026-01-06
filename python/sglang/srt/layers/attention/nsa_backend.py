@@ -180,7 +180,10 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
 
     def get_page_table_64(self) -> torch.Tensor:
         if self.attn_metadata.indexer_real_page_table is not None:
+            print(f"[DEBUG] 12.0 at nsa_backend.py, type of self.attn_metadata: {type(self.attn_metadata)}")
+            print(f"[DEBUG] 12.1 at nsa_backend.py, indexer_real_page_table shape: {self.attn_metadata.indexer_real_page_table.shape}")
             return self.attn_metadata.indexer_real_page_table
+        print(f"[DEBUG] 12.2 at nsa_backend.py, real_page_table shape: {self.attn_metadata.real_page_table.shape}")
         return self.attn_metadata.real_page_table
 
     def get_seqlens_expanded(self) -> torch.Tensor:
@@ -352,7 +355,7 @@ class NativeSparseAttnBackend(
     def _transform_table_1_to_real(self, page_table: torch.Tensor) -> torch.Tensor:
         print(f"[DEBUG] 10 at nsa_backend.py, page_table shape: {page_table.shape}")
         import time
-        time.sleep(20)
+        time.sleep(5)
         page_size = self.real_page_size
         if page_size == 1:
             return page_table
