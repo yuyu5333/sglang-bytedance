@@ -2047,7 +2047,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 )
             else:
                 print(f"[DEBUG] 3.3 at deepseek_v2.py")
-                print(f"[DEBUG] 3.3.1 at deepseek_v2.py, self.indexer is {self.indexer}")
+                print(f"[DEBUG] 3.3.1 at deepseek_v2.py, type self.indexer is {type(self.indexer)}")
                 topk_indices = self.indexer(
                     x=hidden_states,
                     q_lora=q_lora,
