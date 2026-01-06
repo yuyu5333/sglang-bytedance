@@ -350,6 +350,7 @@ class NativeSparseAttnBackend(
         return self._arange_buf[:l]
 
     def _transform_table_1_to_real(self, page_table: torch.Tensor) -> torch.Tensor:
+        print(f"[DEBUG] 10 at nsa_backend.py, page_table shape: {page_table.shape}")
         page_size = self.real_page_size
         if page_size == 1:
             return page_table
@@ -379,10 +380,13 @@ class NativeSparseAttnBackend(
         ]
         # Build indexer_page_table for indexer_k
         indexer_page_table = None
+        print(f"[DEBUG] 10.1 at nsa_backend.py self.enable_nsa_hybrid_indexer_pool is {self.enable_nsa_hybrid_indexer_pool}")
         if self.enable_nsa_hybrid_indexer_pool:
             indexer_page_table = self.req_to_token_pool.req_to_nsa_index_k[
                 forward_batch.req_pool_indices, :max_seqlen_k
             ]
+
+        print(f"[DEBUG] 10.2 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape}")
 
         page_table_1_flattened = None
         topk_indices_offset = None
