@@ -18,6 +18,7 @@ from sglang.srt.mem_cache.common import (
     alloc_paged_token_slots_extend,
     alloc_token_slots,
     get_last_loc,
+    enable_nsa_hybrid_indexer_pool,
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.server_args import get_global_server_args
@@ -141,6 +142,23 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 len(batch.input_ids),
             )
             self.last_loc = last_loc
+
+        if enable_nsa_hybrid_indexer_pool(
+            allocator=batch.tree_cache.token_to_kv_pool_allocator
+        ) and isinstance(batch.out_cache_loc, tuple):
+            kv_loc, index_k_loc = batch.out_cache_loc
+            batch.out_cache_loc = kv_loc
+            offset = 0
+            num_seqs = batch.batch_size()
+            for i in range(num_seqs):
+                start = int(batch.seq_lens[i].item())
+                end = int(end_offset[i].item())
+                length = end - start
+                batch.req_to_token_pool.write_index_token(
+                    (int(batch.req_pool_indices[i].item()), slice(start, end)),
+                    index_k_loc[offset : offset + length].to(torch.int32),
+                )
+                offset += length
 
         print_0(f"[DEBUG] [MTP] 9 at eagle_info.py, batch.out_cache_loc type {type(batch.out_cache_loc)}")
 
