@@ -892,7 +892,7 @@ class Indexer(MultiPlatformOp):
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
-                print(f"[DEBUG] 9.2 at nsa_indexer.py, topk_result: {topk_result}")
+                print(f"[DEBUG] 9.2 at nsa_indexer.py, topk_result shape: {topk_result.shape}")
                 
             else:
                 if (
