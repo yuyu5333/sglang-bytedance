@@ -377,6 +377,9 @@ def alloc_for_extend(
             (t[-1:] if len(t) > 0 else torch.tensor([-1], device=batch.device))
             for t in prefix_tensors
         ]
+        
+        print_0(f"[DEBUG] [MTP] 6 at common.py")
+        
         out_cache_loc = alloc_paged_token_slots_extend(
             tree_cache=batch.tree_cache,
             prefix_lens=prefix_lens_device,

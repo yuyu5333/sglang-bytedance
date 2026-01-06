@@ -50,6 +50,9 @@ if is_cuda():
 
 logger = logging.getLogger(__name__)
 
+def print_0(msg: str):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 @dataclass
 class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
@@ -124,6 +127,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 batch.req_pool_indices,
                 prefix_lens,
             )
+            print_0(f"[DEBUG] [MTP] 7 at eagle_info.py")
+            
             batch.out_cache_loc = alloc_paged_token_slots_extend(
                 batch.tree_cache,
                 prefix_lens,
