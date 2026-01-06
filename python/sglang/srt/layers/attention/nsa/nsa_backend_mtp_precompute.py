@@ -151,6 +151,9 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Transform page table if needed
         if self.real_page_size > 1:
+            print_0(
+                f"[NSA MTP_PRECOMP] real transform main, page_table_1 shape: {page_indices.shape}"
+            )
             real_page_table = self._transform_table_1_to_real(page_indices)
         else:
             real_page_table = None  # Will use page_indices directly
@@ -230,6 +233,9 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Transform page table
         if self.real_page_size > 1:
+            print_0(
+                f"[NSA MTP_PRECOMP] real transform verify, page_table_1 shape: {page_indices.shape}"
+            )
             real_page_table = self._transform_table_1_to_real(page_indices)
         else:
             real_page_table = None
@@ -307,6 +313,9 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Transform page table
         if self.real_page_size > 1:
+            print_0(
+                f"[NSA MTP_PRECOMP] real transform extend, page_table_1 shape: {page_indices.shape}"
+            )
             real_page_table = self._transform_table_1_to_real(page_indices)
         else:
             real_page_table = None

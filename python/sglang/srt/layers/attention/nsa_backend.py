@@ -675,9 +675,17 @@ class NativeSparseAttnBackend(
             nsa_cu_seqlens_k=nsa_cu_seqlens_k,
             nsa_seqlens_expanded=seqlens_expanded,
             nsa_extend_seq_lens_list=extend_seq_lens_cpu,
-            real_page_table=self._transform_table_1_to_real(page_table),
+            real_page_table=(
+                print_0(
+                    f"[NSA INIT_META] real transform main, page_table_1 shape: {page_table.shape}"
+                )
+                or self._transform_table_1_to_real(page_table)
+            ),
             indexer_real_page_table=(
-                self._transform_table_1_to_real(indexer_page_table)
+                print_0(
+                    f"[NSA INIT_META] real transform indexer, page_table_1 shape: {indexer_page_table.shape}"
+                )
+                or self._transform_table_1_to_real(indexer_page_table)
                 if indexer_page_table is not None
                 else None
             ),
@@ -923,6 +931,9 @@ class NativeSparseAttnBackend(
 
         nsa_cu_seqlens_k = compute_cu_seqlens(nsa_cache_seqlens_int32)
         nsa_cu_seqlens_q = self.get_device_int32_arange(len(nsa_cu_seqlens_k))
+        print_0(
+            f"[NSA CAPTURE] real transform main, page_table_1 shape: {page_table_1.shape}"
+        )
         real_page_table = self._transform_table_1_to_real(page_table_1)
 
         paged_mqa_schedule_metadata = None
@@ -952,6 +963,9 @@ class NativeSparseAttnBackend(
             indexer_page_table_1 = self.decode_cuda_graph_metadata[
                 "indexer_page_table"
             ][:bs, :]
+            print_0(
+                f"[NSA CAPTURE] real transform indexer, page_table_1 shape: {indexer_page_table_1.shape}"
+            )
             indexer_real_page_table = self._transform_table_1_to_real(
                 indexer_page_table_1
             )
@@ -1145,6 +1159,9 @@ class NativeSparseAttnBackend(
 
         assert self.real_page_size == metadata.page_size
         if self.real_page_size > 1:
+            print_0(
+                f"[NSA REPLAY] real transform main, page_table_1 shape: {page_indices.shape}"
+            )
             real_table = self._transform_table_1_to_real(page_indices)
             new_rows = real_table.shape[0]
             new_cols = real_table.shape[1]
@@ -1176,6 +1193,9 @@ class NativeSparseAttnBackend(
                 )
 
             if self.real_page_size > 1:
+                print_0(
+                    f"[NSA REPLAY] real transform indexer, page_table_1 shape: {indexer_page_indices.shape}"
+                )
                 indexer_real_table = self._transform_table_1_to_real(
                     indexer_page_indices
                 )
