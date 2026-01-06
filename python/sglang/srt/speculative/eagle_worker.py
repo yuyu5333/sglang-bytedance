@@ -476,6 +476,8 @@ class EAGLEWorker(TpModelWorker):
             duplicate_cache_len = 0
             source_cache_loc, target_cache_loc, last_page_lens_cumsum = None, None, None
 
+        print_0(f"[DEBUG] [MTP] 1 at eagle_worker.py, out_cache_loc shape: {out_cache_loc.shape}")
+
         assign_draft_cache_locs[(num_seqs,)](
             batch.req_pool_indices,
             batch.req_to_token_pool.req_to_token,
