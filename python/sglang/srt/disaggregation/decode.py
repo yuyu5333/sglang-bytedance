@@ -167,6 +167,7 @@ class NSADecodeReqToTokenPool(DecodeReqToTokenPool):
         """Get both KV and index_k indices for a range."""
         kv_indices = self.req_to_token[req_pool_idx, start:end]
         index_k_indices = self.req_to_nsa_index_k[req_pool_idx, start:end]
+        index_k_indices = index_k_indices[index_k_indices > 0]
         return (kv_indices, index_k_indices)
 
     def clear(self):
