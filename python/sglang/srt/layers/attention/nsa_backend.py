@@ -394,8 +394,7 @@ class NativeSparseAttnBackend(
             indexer_page_table = self.req_to_token_pool.req_to_nsa_index_k[
                 forward_batch.req_pool_indices, :max_seqlen_k
             ]
-
-        print_0(f"[DEBUG] 10.2 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape}")
+            print_0(f"[DEBUG] 10.2 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape}")
 
         page_table_1_flattened = None
         topk_indices_offset = None
