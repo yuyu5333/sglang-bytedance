@@ -75,6 +75,9 @@ if is_cuda():
 
 logger = logging.getLogger(__name__)
 
+def print_0(msg: str):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 class EAGLEWorker(TpModelWorker):
 
