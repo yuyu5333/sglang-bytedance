@@ -127,8 +127,15 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
         cu_seqlens_k = compute_cu_seqlens(cache_seqlens)
 
         # Get page indices from cache
+        print(f"[DEBUG] 11 at nsa_backend_mtp_precompute.py, req_pool_indices shape: {req_pool_indices.shape}")
+        print(f"[DEBUG] 11.1 at nsa_backend_mtp_precompute.py, max_len: {max_len}")
+        
         page_indices = self.req_to_token[req_pool_indices, :max_len]
-
+        print(f"[DEBUG] 11.2 at nsa_backend_mtp_precompute.py, page_indices shape: {page_indices.shape}")
+        
+        import time
+        time.sleep(20)
+        
         # Compute NSA seqlens
         nsa_cache_seqlens = compute_nsa_seqlens(
             cache_seqlens, nsa_index_topk=self.nsa_index_topk
