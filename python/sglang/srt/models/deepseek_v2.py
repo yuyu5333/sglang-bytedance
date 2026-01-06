@@ -1582,7 +1582,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             zero_allocator=zero_allocator,
             llama_4_scaling=llama_4_scaling,
         )
-        print_0(f"[DEBUG] 7.2 at deepseek_v2.py, self.forward_prepare is {s}")
+        print_0(f"[DEBUG] 7.2 at deepseek_v2.py, self.forward_prepare is {type(s)}")
         return self.forward_core(s)
 
     def forward_prepare(
