@@ -521,11 +521,8 @@ class EAGLEWorker(TpModelWorker):
             # When source_cache_loc is not needed, simply skip
             duplicate_cache_len = 0
             source_cache_loc, target_cache_loc, last_page_lens_cumsum = None, None, None
-
-        print_0(
-            f"[DEBUG] [MTP] 1 at eagle_worker.py, out_cache_loc shape: "
-            + (f"{out_cache_loc.shape}" if not isinstance(out_cache_loc, tuple) else f"{out_cache_loc[0].shape}, index_k_loc: {out_cache_loc[1].shape}")
-        )
+        
+        print_0(f"[DEBUG] [MTP] 5 at eagle_worker.py, out_cache_loc type: {type(out_cache_loc)}")
 
         assign_draft_cache_locs[(num_seqs,)](
             batch.req_pool_indices,
