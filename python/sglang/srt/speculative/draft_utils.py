@@ -5,6 +5,7 @@ from sglang.srt.utils.common import is_blackwell
 
 logger = logging.getLogger(__name__)
 
+import torch
 def print_0(msg: str):
     if torch.distributed.get_rank() == 0:
         print(msg)
