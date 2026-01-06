@@ -359,8 +359,6 @@ class NativeSparseAttnBackend(
     def _transform_table_1_to_real(self, page_table: torch.Tensor) -> torch.Tensor:
         print_0(f"[DEBUF] 10.0 self is {type(self)}")
         print_0(f"[DEBUG] 10 at nsa_backend.py, page_table shape: {page_table.shape}")
-        import time
-        time.sleep(5)
         page_size = self.real_page_size
         if page_size == 1:
             return page_table
