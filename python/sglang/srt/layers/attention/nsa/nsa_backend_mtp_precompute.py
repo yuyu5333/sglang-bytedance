@@ -57,10 +57,6 @@ def compute_cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
     
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
 class NativeSparseAttnBackendMTPPrecomputeMixin:
     """Mixin class providing metadata precomputation for multi-step speculative decoding.
 
@@ -130,12 +126,7 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
         cu_seqlens_k = compute_cu_seqlens(cache_seqlens)
 
         # Get page indices from cache
-        # 在rank 0 上打印
-        print_0(f"[DEBUG] 11 at nsa_backend_mtp_precompute.py, req_pool_indices shape: {req_pool_indices.shape}")
-        print_0(f"[DEBUG] 11.1 at nsa_backend_mtp_precompute.py, max_len: {max_len}")
-            
         page_indices = self.req_to_token[req_pool_indices, :max_len]
-        print_0(f"[DEBUG] 11.2 at nsa_backend_mtp_precompute.py, page_indices shape: {page_indices.shape}")
         
         # Compute NSA seqlens
         nsa_cache_seqlens = compute_nsa_seqlens(
@@ -149,9 +140,6 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Transform page table if needed
         if self.real_page_size > 1:
-            print_0(
-                f"[NSA MTP_PRECOMP] real transform main, page_table_1 shape: {page_indices.shape}"
-            )
             real_page_table = self._transform_table_1_to_real(page_indices)
         else:
             real_page_table = None  # Will use page_indices directly
@@ -231,9 +219,6 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Transform page table
         if self.real_page_size > 1:
-            print_0(
-                f"[NSA MTP_PRECOMP] real transform verify, page_table_1 shape: {page_indices.shape}"
-            )
             real_page_table = self._transform_table_1_to_real(page_indices)
         else:
             real_page_table = None
@@ -311,9 +296,6 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Transform page table
         if self.real_page_size > 1:
-            print_0(
-                f"[NSA MTP_PRECOMP] real transform extend, page_table_1 shape: {page_indices.shape}"
-            )
             real_page_table = self._transform_table_1_to_real(page_indices)
         else:
             real_page_table = None

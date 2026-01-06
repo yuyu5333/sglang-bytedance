@@ -20,11 +20,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-def print_0(msg: str):
-    import torch
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
 class SchedulerRuntimeCheckerMixin:
     def _get_token_info(self: Scheduler):
         available_size = self.token_to_kv_pool_allocator.available_size()
@@ -156,22 +151,17 @@ class SchedulerRuntimeCheckerMixin:
         """Check memory for NSA hybrid allocator (KV cache + index_k buffer)"""
         _, _, available_size, evictable_size = self._get_token_info()
         protected_size = self.tree_cache.protected_size()
-        print_0(f"[DEBUG] [MTP] 13 at scheduler_runtime_checker_mixin.py, {available_size=}, {evictable_size=}, {protected_size=}")
         
         # Check KV cache
         kv_memory_leak = (available_size + evictable_size) != (
             self.max_total_num_tokens - protected_size
         )
 
-        print_0(f"[DEBUG] [MTP] 14 at scheduler_runtime_checker_mixin.py, {kv_memory_leak=}")
-
         # Check index_k
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
         index_k_expected = self.token_to_kv_pool_allocator.index_k_expected_size()
         index_k_memory_leak = index_k_available != index_k_expected
         
-        print_0(f"[DEBUG] [MTP] 15 at scheduler_runtime_checker_mixin.py, {index_k_available=}, {index_k_expected=}, {index_k_memory_leak=}")
-
         memory_leak = kv_memory_leak or index_k_memory_leak
 
         token_msg = (
@@ -271,7 +261,6 @@ class SchedulerRuntimeCheckerMixin:
         elif self.is_hybrid_ssm and isinstance(self.tree_cache, MambaRadixCache):
             memory_leak, token_msg = self._check_mamba_memory()
         elif enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator):
-            print_0(f"[DEBUG] [MTP] 12 at scheduler_runtime_checker_mixin.py")
             memory_leak, token_msg = self._check_nsa_memory()
         else:
             memory_leak, token_msg = self._check_radix_cache_memory()

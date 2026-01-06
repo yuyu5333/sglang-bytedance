@@ -255,10 +255,6 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
         if allocator.available_size() < num_tokens:
             tree_cache.evict(num_tokens)
 
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
 def alloc_paged_token_slots_extend(
     tree_cache: BasePrefixCache,
     prefix_lens: torch.Tensor,
@@ -279,8 +275,6 @@ def alloc_paged_token_slots_extend(
     if backup_state:
         state = allocator.backup_state()
 
-    print_0(f"[DEBUG] [MTP] 10 at common.py, allocator type : {type(allocator)}")
-
     if skip_index_k and enable_nsa_hybrid_indexer_pool(allocator=allocator):
         out_cache_loc = allocator.kv_allocator.alloc_extend(
             prefix_lens,
@@ -300,8 +294,6 @@ def alloc_paged_token_slots_extend(
             extend_num_tokens,
         )
     
-    print_0(f"[DEBUG] [MTP] 11 at common.py, out_cache_loc type : {type(out_cache_loc)}")
-
     if out_cache_loc is None:
         error_msg = (
             f"Prefill out of memory. Try to lower your batch size.\n"
@@ -312,8 +304,6 @@ def alloc_paged_token_slots_extend(
         if tree_cache is not None:
             tree_cache.pretty_print()
         raise RuntimeError(error_msg)
-
-    print_0(f"[DEBUG] [MTP] 2 at common.py, backup_state: {backup_state}")
 
     return (out_cache_loc, state) if backup_state else out_cache_loc
 
@@ -392,8 +382,6 @@ def alloc_for_extend(
             (t[-1:] if len(t) > 0 else torch.tensor([-1], device=batch.device))
             for t in prefix_tensors
         ]
-        
-        print_0(f"[DEBUG] [MTP] 6 at common.py")
         
         out_cache_loc = alloc_paged_token_slots_extend(
             tree_cache=batch.tree_cache,

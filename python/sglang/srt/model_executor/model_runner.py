@@ -254,10 +254,6 @@ class ModelRunnerOutput:
     can_run_graph: bool
     expert_distribution_metrics: Optional[ExpertDistributionMetrics] = None
 
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
 class ModelRunner(ModelRunnerKVCacheMixin):
     """ModelRunner runs the forward passes of the models."""
 
@@ -1589,16 +1585,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     def init_sparse_coordinator(self):
         """Initialize sparse attention coordinator if enabled."""
         self.sparse_coordinator = None
-        print_0(f"[DEBUG] 5 1 at model_runner.py")
 
         # Check if sparse attention is enabled
         if not self.server_args.enable_nsa_decode_hybrid_pool:
             return
 
         try:
-            print_0(f"[DEBUG] 5 2 at model_runner.py")
             from sglang.srt.mem_cache.sparsity import create_sparse_coordinator
-            print_0(f"[DEBUG] 5 3 at model_runner.py")
 
             # Get CPU group for offload communication
             if self.server_args.enable_dp_attention:
@@ -1608,7 +1601,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             else:
                 tp_group_cpu = get_tp_group().cpu_group
 
-            print_0(f"[DEBUG] 5 4 at model_runner.py")
 
             self.sparse_coordinator = create_sparse_coordinator(
                 device=self.device,
@@ -1618,7 +1610,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 end_layer=self.end_layer,
                 server_args=self.server_args,
             )
-            print_0(f"[DEBUG] 5 5 at model_runner.py, self.sparse_coordinator is {self.sparse_coordinator}")
 
         except Exception as e:
             logger.error(f"[ModelRunner] Failed to initialize sparse coordinator: {e}")

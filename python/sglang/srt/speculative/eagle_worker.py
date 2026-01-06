@@ -76,9 +76,6 @@ if is_cuda():
 
 logger = logging.getLogger(__name__)
 
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
 
 class EAGLEWorker(TpModelWorker):
 
@@ -486,8 +483,6 @@ class EAGLEWorker(TpModelWorker):
             duplicate_cache_len = 0
             source_cache_loc, target_cache_loc, last_page_lens_cumsum = None, None, None
         
-        print_0(f"[DEBUG] [MTP] 5 at eagle_worker.py, out_cache_loc type: {type(out_cache_loc)}")
-
         assign_draft_cache_locs[(num_seqs,)](
             batch.req_pool_indices,
             batch.req_to_token_pool.req_to_token,

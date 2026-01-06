@@ -168,10 +168,6 @@ def _cat(tensors: list[torch.Tensor], dim: int = -1) -> torch.Tensor:
 
     return _compiled_cat([qk_nope, qk_rope], dim=dim)
 
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
 @dataclass(frozen=True)
 class NSAIndexerMetadata(BaseIndexerMetadata):
     attn_metadata: NSAMetadata
@@ -183,11 +179,8 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
 
     def get_page_table_64(self) -> torch.Tensor:
         if self.attn_metadata.indexer_real_page_table is not None:
-            print_0(f"[DEBUG] 12.0 at nsa_backend.py, type of self.attn_metadata: {type(self.attn_metadata)}")
-            print_0(f"[DEBUG] 12.1 at nsa_backend.py, indexer_real_page_table shape: {self.attn_metadata.indexer_real_page_table.shape}")
             return self.attn_metadata.indexer_real_page_table
         
-        print_0(f"[DEBUG] 12.2 at nsa_backend.py, real_page_table shape: {self.attn_metadata.real_page_table.shape}")
         return self.attn_metadata.real_page_table
 
     def get_seqlens_expanded(self) -> torch.Tensor:
@@ -357,8 +350,6 @@ class NativeSparseAttnBackend(
         return self._arange_buf[:l]
 
     def _transform_table_1_to_real(self, page_table: torch.Tensor) -> torch.Tensor:
-        print_0(f"[DEBUF] 10.0 self is {type(self)}")
-        print_0(f"[DEBUG] 10 at nsa_backend.py, page_table shape: {page_table.shape}")
         page_size = self.real_page_size
         if page_size == 1:
             return page_table
@@ -388,13 +379,11 @@ class NativeSparseAttnBackend(
         ]
         # Build indexer_page_table for indexer_k
         indexer_page_table = None
-        print_0(f"[DEBUG] 10.1 at nsa_backend.py self.enable_nsa_hybrid_indexer_pool is {self.enable_nsa_hybrid_indexer_pool}")
         if self.enable_nsa_hybrid_indexer_pool:
             
             indexer_page_table = self.req_to_token_pool.req_to_nsa_index_k[
                 forward_batch.req_pool_indices, :max_seqlen_k
             ]
-            print_0(f"[DEBUG] 10.2 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape}")
 
         page_table_1_flattened = None
         topk_indices_offset = None
@@ -411,15 +400,12 @@ class NativeSparseAttnBackend(
         indexer_seq_lens_cpu = forward_batch.seq_lens_cpu
 
         if forward_batch.forward_mode.is_decode_or_idle():
-            print_0(f"[DEBUG] 13.1 at nsa_backend.py")
             extend_seq_lens_cpu = [1] * batch_size
             max_seqlen_q = 1
             cu_seqlens_q = self.get_device_int32_arange(batch_size + 1)
             seqlens_expanded = cache_seqlens_int32
             
         elif forward_batch.forward_mode.is_target_verify():
-            print_0(f"[DEBUG] 13.2 at nsa_backend.py")
-            
             max_seqlen_q = 1
             cu_seqlens_q = torch.arange(
                 0,
@@ -454,8 +440,6 @@ class NativeSparseAttnBackend(
                 page_table, repeats=self.speculative_num_draft_tokens, dim=0
             )
         elif forward_batch.forward_mode.is_draft_extend(include_v2=True):
-            print_0(f"[DEBUG] 13.3 at nsa_backend.py")
-            
             assert (
                 forward_batch.extend_seq_lens_cpu is not None
                 and forward_batch.extend_seq_lens is not None
@@ -489,7 +473,6 @@ class NativeSparseAttnBackend(
                 ]
             )
             if forward_batch.forward_mode.is_draft_extend_v2():
-                print_0(f"[DEBUG] 13.4 at nsa_backend.py")
                 # DRAFT_EXTEND_V2: V2 worker pre-fills draft KV cache with ALL speculated
                 # tokens upfront. All requests extend by the same fixed
                 # (speculative_num_draft_tokens). Use scalar to avoid GPU sync.
@@ -497,7 +480,6 @@ class NativeSparseAttnBackend(
                     page_table, repeats=self.speculative_num_draft_tokens, dim=0
                 )
             else:
-                print_0(f"[DEBUG] 13.5 at nsa_backend.py")
                 # DRAFT_EXTEND (v1): V1 worker extends by (accept_length + 1) per request
                 # after verification. Lengths vary per request based on how many tokens
                 # were accepted.
@@ -505,7 +487,6 @@ class NativeSparseAttnBackend(
                     page_table, repeats=forward_batch.extend_seq_lens, dim=0
                 )
         elif forward_batch.forward_mode.is_extend():
-            print_0(f"[DEBUG] 13.6 at nsa_backend.py")
             assert (
                 forward_batch.extend_seq_lens_cpu is not None
                 and forward_batch.extend_seq_lens is not None
@@ -647,8 +628,6 @@ class NativeSparseAttnBackend(
             except (ImportError, ModuleNotFoundError):
                 paged_mqa_schedule_metadata = None
 
-        print_0(f"[DEBUG] 10.3 at nsa_backend.py, indexer_page_table shape: {indexer_page_table.shape if indexer_page_table is not None else None}")
-
         metadata = NSAMetadata(
             page_size=self.real_page_size,
             cache_seqlens_int32=cache_seqlens_int32,
@@ -674,16 +653,10 @@ class NativeSparseAttnBackend(
             nsa_seqlens_expanded=seqlens_expanded,
             nsa_extend_seq_lens_list=extend_seq_lens_cpu,
             real_page_table=(
-                print_0(
-                    f"[NSA INIT_META] real transform main, page_table_1 shape: {page_table.shape}"
-                )
-                or self._transform_table_1_to_real(page_table)
+                self._transform_table_1_to_real(page_table)
             ),
             indexer_real_page_table=(
-                print_0(
-                    f"[NSA INIT_META] real transform indexer, page_table_1 shape: {indexer_page_table.shape}"
-                )
-                or self._transform_table_1_to_real(indexer_page_table)
+                self._transform_table_1_to_real(indexer_page_table)
                 if indexer_page_table is not None
                 else None
             ),
@@ -929,9 +902,6 @@ class NativeSparseAttnBackend(
 
         nsa_cu_seqlens_k = compute_cu_seqlens(nsa_cache_seqlens_int32)
         nsa_cu_seqlens_q = self.get_device_int32_arange(len(nsa_cu_seqlens_k))
-        print_0(
-            f"[NSA CAPTURE] real transform main, page_table_1 shape: {page_table_1.shape}"
-        )
         real_page_table = self._transform_table_1_to_real(page_table_1)
 
         paged_mqa_schedule_metadata = None
@@ -961,9 +931,6 @@ class NativeSparseAttnBackend(
             indexer_page_table_1 = self.decode_cuda_graph_metadata[
                 "indexer_page_table"
             ][:bs * self.speculative_num_draft_tokens, :]
-            print_0(
-                f"[NSA CAPTURE] real transform indexer, page_table_1 shape: {indexer_page_table_1.shape}"
-            )
             indexer_real_page_table = self._transform_table_1_to_real(
                 indexer_page_table_1
             )
@@ -1157,9 +1124,6 @@ class NativeSparseAttnBackend(
 
         assert self.real_page_size == metadata.page_size
         if self.real_page_size > 1:
-            print_0(
-                f"[NSA REPLAY] real transform main, page_table_1 shape: {page_indices.shape}"
-            )
             real_table = self._transform_table_1_to_real(page_indices)
             new_rows = real_table.shape[0]
             new_cols = real_table.shape[1]
@@ -1191,9 +1155,6 @@ class NativeSparseAttnBackend(
                 )
 
             if self.real_page_size > 1:
-                print_0(
-                    f"[NSA REPLAY] real transform indexer, page_table_1 shape: {indexer_page_indices.shape}"
-                )
                 indexer_real_table = self._transform_table_1_to_real(
                     indexer_page_indices
                 )
@@ -1935,9 +1896,7 @@ class NativeSparseAttnBackend(
     def get_indexer_metadata(
         self, layer_id: int, forward_batch: ForwardBatch
     ) -> NSAIndexerMetadata:
-        print_0(f"[DEBUG] 9.5 at nsa_backend.py, type of self.forward_metadata.paged_mqa_schedule_metadata: {type(self.forward_metadata.paged_mqa_schedule_metadata)}")
-        print_0(f"[DEBUG] 9.6 at nsa_backend.py, type of self.forward_metadata: {type(self.forward_metadata)}")
-        
+
         return NSAIndexerMetadata(
             attn_metadata=self.forward_metadata,
             topk_transform_method=self.get_topk_transform_method(),

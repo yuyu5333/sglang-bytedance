@@ -110,10 +110,6 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
     return hadamard_transform(x, scale=hidden_size**-0.5)
 
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
 class Indexer(MultiPlatformOp):
     def __init__(
         self,
@@ -305,8 +301,6 @@ class Indexer(MultiPlatformOp):
         assert page_size == 64, "only support page size 64"
 
         # NOTE(dark): this support extend/decode/decode+graph
-        print_0(f"[DEBUG] 8.1 at nsa_indexer.py, type of metadata: {type(metadata)}")
-        
         block_tables = metadata.get_page_table_64()
 
         max_seq_len = block_tables.shape[1] * page_size
@@ -341,8 +335,6 @@ class Indexer(MultiPlatformOp):
         )
         assert len(weights.shape) == 3
         weights = weights.squeeze(2)
-
-        print_0(f"[DEBUG] 8 at nsa_indexer.py, q_fp8 shape: {q_fp8.shape}, block_tables shape: {block_tables.shape}")
 
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8,
@@ -795,7 +787,6 @@ class Indexer(MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
-        print_0(f"[DEBUG] 9 at nsa_indexer.py, is_hip()={is_hip()}, not is_npu()={not is_npu()}")
         if is_hip():
             from sglang.srt.layers.attention.nsa.tilelang_kernel import act_quant
         elif not is_npu():
@@ -804,8 +795,6 @@ class Indexer(MultiPlatformOp):
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
 
-        print_0(f"[DEBUG] 9.3 at nsa_indexer.py, layer_id: {layer_id}, q_lora shape: {q_lora.shape}")
-        print_0(f"[DEBUG] 9.4 at nsa_indexer.py, type of forward_batch.attn_backend: {type(forward_batch.attn_backend)}")
         metadata = forward_batch.attn_backend.get_indexer_metadata(
             layer_id, forward_batch
         )
@@ -859,8 +848,6 @@ class Indexer(MultiPlatformOp):
             q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
             k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
 
-        print_0(f"[DEBUG] 9.1 at nsa_indexer.py, q_fp8 shape: {q_fp8.shape}")
-
         # k_fp8: (seq_len, head_dim) fp8_e4m3fn
         # k_buffer: (num_total_tokens + page_size, head_dim) fp8_e4m3fn
         # k_scale: (seq_len, head_dim // block_size = 1) fp8_e4m3fn
@@ -892,11 +879,9 @@ class Indexer(MultiPlatformOp):
                 or forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend(include_v2=True)
             ):
-                print_0(f"[DEBUG] 9.1.2 at nsa_indexer.py, type of metadata: {type(metadata)}")
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
-                print_0(f"[DEBUG] 9.2 at nsa_indexer.py, topk_result shape: {topk_result.shape}")
                 
             else:
                 if (

@@ -5,10 +5,6 @@ from sglang.srt.utils.common import is_blackwell
 
 logger = logging.getLogger(__name__)
 
-import torch
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
 
 class DraftBackendFactory:
     def __init__(
@@ -27,8 +23,6 @@ class DraftBackendFactory:
     def _create_backend(
         self, backend_name: str, backend_map: dict, error_template: str
     ):
-        print_0(f"[DEBUG] 12 at draft_utils.py, backend_name: {backend_name}")
-        
         backend_type = (
             self.draft_attn_backend
             if self.draft_attn_backend
@@ -43,8 +37,6 @@ class DraftBackendFactory:
         return backend_map[backend_type]()
 
     def create_decode_backend(self):
-        print_0(f"[DEBUG] 12.1.1 at draft_utils.py, self.speculative_num_steps: {self.speculative_num_steps}")
-        
         if self.speculative_num_steps == 1:
             return None
 

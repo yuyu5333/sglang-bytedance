@@ -51,9 +51,6 @@ if is_cuda():
 
 logger = logging.getLogger(__name__)
 
-def print_0(msg: str):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
 
 @dataclass
 class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
@@ -113,12 +110,10 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         batch.input_ids = self.draft_token
 
         if page_size == 1:
-            print_0(f"[DEBUG] [MTP] 7 at eagle_info.py")
             batch.out_cache_loc = alloc_token_slots(
                 batch.tree_cache,
                 len(batch.input_ids),
             )
-            print_0(f"[DEBUG] [MTP] 7.2 at eagle_info.py, batch.out_cache_loc type {type(batch.out_cache_loc)}")
             end_offset = batch.seq_lens + self.draft_token_num
         else:
             prefix_lens = batch.seq_lens
@@ -130,7 +125,6 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 batch.req_pool_indices,
                 prefix_lens,
             )
-            print_0(f"[DEBUG] [MTP] 8 at eagle_info.py")
             
             batch.out_cache_loc = alloc_paged_token_slots_extend(
                 batch.tree_cache,
@@ -148,8 +142,6 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             allocator=batch.tree_cache.token_to_kv_pool_allocator
         ) and isinstance(batch.out_cache_loc, tuple):
             batch.out_cache_loc = batch.out_cache_loc[0]
-
-        print_0(f"[DEBUG] [MTP] 9 at eagle_info.py, batch.out_cache_loc type {type(batch.out_cache_loc)}")
 
         bs = batch.batch_size()
         assign_req_to_token_pool_func(
