@@ -801,8 +801,8 @@ class Indexer(MultiPlatformOp):
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
 
-        print(f"[DEBUG] 9.2 at nsa_indexer.py, layer_id: {layer_id}, q_lora shape: {q_lora.shape}")
-        print(f"[DEBUG] 9.2 at nsa_indexer.py, type of forward_batch.attn_backend: {type(forward_batch.attn_backend)}")
+        print(f"[DEBUG] 9.3 at nsa_indexer.py, layer_id: {layer_id}, q_lora shape: {q_lora.shape}")
+        print(f"[DEBUG] 9.4 at nsa_indexer.py, type of forward_batch.attn_backend: {type(forward_batch.attn_backend)}")
         metadata = forward_batch.attn_backend.get_indexer_metadata(
             layer_id, forward_batch
         )
@@ -889,11 +889,11 @@ class Indexer(MultiPlatformOp):
                 or forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend(include_v2=True)
             ):
-                print(f"[DEBUG] 9.2 at nsa_indexer.py, topk_result: {topk_result}")
-                
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
+                print(f"[DEBUG] 9.2 at nsa_indexer.py, topk_result: {topk_result}")
+                
             else:
                 if (
                     forward_batch.nsa_cp_metadata is not None
