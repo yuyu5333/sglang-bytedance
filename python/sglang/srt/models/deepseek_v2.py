@@ -1267,6 +1267,9 @@ def _get_llama_4_scaling(
     # Broadcast over num_heads and head_dim
     return scaling[..., None, None]
 
+def print_0(msg: str):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 class DeepseekV2AttentionMLA(nn.Module):
 
@@ -1571,7 +1574,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         zero_allocator: BumpAllocator,
         llama_4_scaling: Optional[torch.Tensor] = None,
     ):
-        print(f"[DEBUG] 7.1 at deepseek_v2.py")
+        print_0(f"[DEBUG] 7.1 at deepseek_v2.py")
         s = self.forward_prepare(
             positions=positions,
             hidden_states=hidden_states,
@@ -1579,7 +1582,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             zero_allocator=zero_allocator,
             llama_4_scaling=llama_4_scaling,
         )
-        print(f"[DEBUG] 7.2 at deepseek_v2.py, self.forward_prepare is {s}")
+        print_0(f"[DEBUG] 7.2 at deepseek_v2.py, self.forward_prepare is {s}")
         return self.forward_core(s)
 
     def forward_prepare(
@@ -1614,7 +1617,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 return hidden_states, None, forward_batch, None
 
         attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
-        print(f"[DEBUG] 7.4 at deepseek_v2.py, self.dispatch_attn_forward_method is {attn_forward_method}")
+        print_0(f"[DEBUG] 7.4 at deepseek_v2.py, self.dispatch_attn_forward_method is {attn_forward_method}")
         
         if attn_forward_method == AttnForwardMethod.MHA:
             inner_state = self.forward_normal_prepare(
@@ -1657,7 +1660,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         return None, attn_forward_method, forward_batch, inner_state
 
     def forward_core(self, intermediate_state):
-        print(f"[DEBUG] 7.3 at deepseek_v2.py")
+        print_0(f"[DEBUG] 7.3 at deepseek_v2.py")
         hidden_states, attn_forward_method, forward_batch, inner_state = (
             intermediate_state
         )
@@ -2026,8 +2029,8 @@ class DeepseekV2AttentionMLA(nn.Module):
         topk_indices = None
         if q_lora is not None:
             sparse_coordinator = get_sparse_coordinator()
-            print(f"[DEBUG] 3.1 at deepseek_v2.py, sparse_coordinator is {sparse_coordinator}")
-            print(f"[DEBUG] 3.2 at deepseek_v2.py, forward_batch.forward_mode.is_decode() is {forward_batch.forward_mode.is_decode()}")
+            print_0(f"[DEBUG] 3.1 at deepseek_v2.py, sparse_coordinator is {sparse_coordinator}")
+            print_0(f"[DEBUG] 3.2 at deepseek_v2.py, forward_batch.forward_mode.is_decode() is {forward_batch.forward_mode.is_decode()}")
             if (
                 forward_batch.forward_mode.is_decode()
                 and sparse_coordinator is not None
@@ -2045,8 +2048,8 @@ class DeepseekV2AttentionMLA(nn.Module):
                     positions=positions,
                 )
             else:
-                print(f"[DEBUG] 3.3 at deepseek_v2.py")
-                print(f"[DEBUG] 3.3.1 at deepseek_v2.py, type self.indexer is {type(self.indexer)}")
+                print_0(f"[DEBUG] 3.3 at deepseek_v2.py")
+                print_0(f"[DEBUG] 3.3.1 at deepseek_v2.py, type self.indexer is {type(self.indexer)}")
                 topk_indices = self.indexer(
                     x=hidden_states,
                     q_lora=q_lora,
@@ -2054,7 +2057,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                     forward_batch=forward_batch,
                     layer_id=self.layer_id,
                 )
-                print(f"[DEBUG] 3.4 at deepseek_v2.py") 
+                print_0(f"[DEBUG] 3.4 at deepseek_v2.py") 
 
         return (
             q_pe,
@@ -2081,7 +2084,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         llama_4_scaling,
     ):
         save_kv_cache = True
-        print(f"[DEBUG] 7 at deepseek_v2.py, self.current_attention_backend is {self.current_attention_backend}")
+        print_0(f"[DEBUG] 7 at deepseek_v2.py, self.current_attention_backend is {self.current_attention_backend}")
         if self.current_attention_backend in FORWARD_ABSORB_CORE_ATTENTION_BACKENDS:
             extra_args = {}
             if self._fuse_rope_for_trtllm_mla(forward_batch):

@@ -56,7 +56,10 @@ def compute_cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.pad(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
-
+    
+def print_0(msg: str):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 class NativeSparseAttnBackendMTPPrecomputeMixin:
     """Mixin class providing metadata precomputation for multi-step speculative decoding.
@@ -127,11 +130,12 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
         cu_seqlens_k = compute_cu_seqlens(cache_seqlens)
 
         # Get page indices from cache
-        print(f"[DEBUG] 11 at nsa_backend_mtp_precompute.py, req_pool_indices shape: {req_pool_indices.shape}")
-        print(f"[DEBUG] 11.1 at nsa_backend_mtp_precompute.py, max_len: {max_len}")
-        
+        # 在rank 0 上打印
+        print_0(f"[DEBUG] 11 at nsa_backend_mtp_precompute.py, req_pool_indices shape: {req_pool_indices.shape}")
+        print_0(f"[DEBUG] 11.1 at nsa_backend_mtp_precompute.py, max_len: {max_len}")
+            
         page_indices = self.req_to_token[req_pool_indices, :max_len]
-        print(f"[DEBUG] 11.2 at nsa_backend_mtp_precompute.py, page_indices shape: {page_indices.shape}")
+        print_0(f"[DEBUG] 11.2 at nsa_backend_mtp_precompute.py, page_indices shape: {page_indices.shape}")
         import time
         time.sleep(5)
         

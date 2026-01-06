@@ -228,6 +228,9 @@ def set_global_graph_memory_pool(val):
     global global_graph_memory_pool
     global_graph_memory_pool = val
 
+def print_0(msg: str):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 class CudaGraphRunner:
     """A CudaGraphRunner runs the forward pass of a model with cuda graph and torch.compile."""
@@ -272,10 +275,10 @@ class CudaGraphRunner:
         
         # DeepGEMM attention backend requires capture-time batch size to match
         # the initialized cuda graph state. Restrict to max bs and rely on padding.
-        print(f"[DEBUG] 1 at cuda_graph_runner.py, self.capture_bs={self.capture_bs}, self.compile_bs={self.compile_bs}")
+        print_0(f"[DEBUG] 1 at cuda_graph_runner.py, self.capture_bs={self.capture_bs}, self.compile_bs={self.compile_bs}")
         # self.capture_bs = [max(self.capture_bs)]
         # self.compile_bs = [bs for bs in self.compile_bs if bs == self.capture_bs[0]]
-        print(f"[DEBUG] 2 at cuda_graph_runner.py, self.capture_bs={self.capture_bs}, self.compile_bs={self.compile_bs}")
+        print_0(f"[DEBUG] 2 at cuda_graph_runner.py, self.capture_bs={self.capture_bs}, self.compile_bs={self.compile_bs}")
         # [DEBUG] 1 at cuda_graph_runner.py, self.capture_bs=[1, 2, 4, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32], self.compile_bs=[]
         # [DEBUG] 2 at cuda_graph_runner.py, self.capture_bs=[32], self.compile_bs=[]
 
