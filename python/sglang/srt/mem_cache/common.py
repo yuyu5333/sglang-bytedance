@@ -268,6 +268,7 @@ def alloc_paged_token_slots_extend(
     last_loc: torch.Tensor,
     extend_num_tokens: int,
     backup_state: bool = False,
+    skip_index_k: bool = False,
 ):
     # Over estimate the number of tokens: assume each request needs a new page.
     allocator = tree_cache.token_to_kv_pool_allocator
@@ -280,14 +281,24 @@ def alloc_paged_token_slots_extend(
 
     print_0(f"[DEBUG] [MTP] 10 at common.py, allocator type : {type(allocator)}")
 
-    out_cache_loc = allocator.alloc_extend(
-        prefix_lens,
-        prefix_lens_cpu,
-        seq_lens,
-        seq_lens_cpu,
-        last_loc,
-        extend_num_tokens,
-    )
+    if skip_index_k and enable_nsa_hybrid_indexer_pool(allocator=allocator):
+        out_cache_loc = allocator.kv_allocator.alloc_extend(
+            prefix_lens,
+            prefix_lens_cpu,
+            seq_lens,
+            seq_lens_cpu,
+            last_loc,
+            extend_num_tokens,
+        )
+    else:
+        out_cache_loc = allocator.alloc_extend(
+            prefix_lens,
+            prefix_lens_cpu,
+            seq_lens,
+            seq_lens_cpu,
+            last_loc,
+            extend_num_tokens,
+        )
     
     print_0(f"[DEBUG] [MTP] 11 at common.py, out_cache_loc type : {type(out_cache_loc)}")
 

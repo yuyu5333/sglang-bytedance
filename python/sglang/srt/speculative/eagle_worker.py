@@ -463,50 +463,14 @@ class EAGLEWorker(TpModelWorker):
                     last_loc,
                     extend_num_tokens,
                     backup_state=True,
+                    skip_index_k=True,
                 )
             )
 
         if enable_nsa_hybrid_indexer_pool(
             allocator=batch.tree_cache.token_to_kv_pool_allocator
         ) and isinstance(out_cache_loc, tuple):
-            print_0(f"[DEBUG] [MTP] 3 at eagle_worker.py, out_cache_loc type: {type(out_cache_loc)}")
-            kv_loc, index_k_loc = out_cache_loc
-            out_cache_loc = kv_loc
-            print_0(f"[DEBUG] [MTP] 4 at eagle_worker.py, out_cache_loc type: {type(out_cache_loc)}")
-
-            if self.page_size == 1:
-                per_len = self.speculative_num_steps * self.topk
-                offset = 0
-                for i in range(num_seqs):
-                    start = int(batch.seq_lens[i].item())
-                    end = start + per_len
-                    batch.req_to_token_pool.write_index_token(
-                        (int(batch.req_pool_indices[i].item()), slice(start, end)),
-                        index_k_loc[offset : offset + per_len].to(torch.int32),
-                    )
-                    offset += per_len
-            elif self.topk == 1:
-                per_len = self.speculative_num_steps
-                offset = 0
-                for i in range(num_seqs):
-                    start = int(batch.seq_lens[i].item())
-                    end = start + per_len
-                    batch.req_to_token_pool.write_index_token(
-                        (int(batch.req_pool_indices[i].item()), slice(start, end)),
-                        index_k_loc[offset : offset + per_len].to(torch.int32),
-                    )
-                    offset += per_len
-            else:
-                offset = 0
-                for i in range(num_seqs):
-                    length = int(self.extend_lens[i].item())
-                    start = int(batch.seq_lens[i].item())
-                    end = start + length
-                    batch.req_to_token_pool.write_index_token(
-                        (int(batch.req_pool_indices[i].item()), slice(start, end)),
-                        index_k_loc[offset : offset + length].to(torch.int32),
-                    )
-                    offset += length
+            out_cache_loc = out_cache_loc[0]
 
         if self.page_size > 1 and self.topk > 1:
             last_page_lens_cumsum = torch.cumsum(last_page_lens, dim=0)

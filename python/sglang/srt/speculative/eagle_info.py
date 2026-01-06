@@ -140,25 +140,14 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 end_offset_cpu,
                 last_loc,
                 len(batch.input_ids),
+                skip_index_k=True,
             )
             self.last_loc = last_loc
 
         if enable_nsa_hybrid_indexer_pool(
             allocator=batch.tree_cache.token_to_kv_pool_allocator
         ) and isinstance(batch.out_cache_loc, tuple):
-            kv_loc, index_k_loc = batch.out_cache_loc
-            batch.out_cache_loc = kv_loc
-            offset = 0
-            num_seqs = batch.batch_size()
-            for i in range(num_seqs):
-                start = int(batch.seq_lens[i].item())
-                end = int(end_offset[i].item())
-                length = end - start
-                batch.req_to_token_pool.write_index_token(
-                    (int(batch.req_pool_indices[i].item()), slice(start, end)),
-                    index_k_loc[offset : offset + length].to(torch.int32),
-                )
-                offset += length
+            batch.out_cache_loc = batch.out_cache_loc[0]
 
         print_0(f"[DEBUG] [MTP] 9 at eagle_info.py, batch.out_cache_loc type {type(batch.out_cache_loc)}")
 
