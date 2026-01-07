@@ -1601,13 +1601,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             else:
                 tp_group_cpu = get_tp_group().cpu_group
 
-
             self.sparse_coordinator = create_sparse_coordinator(
                 device=self.device,
+                page_size=self.server_args.page_size,
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool=self.token_to_kv_pool,
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                tp_group=tp_group_cpu,
                 server_args=self.server_args,
             )
 
