@@ -53,10 +53,13 @@ class NSABackendAdaptor(BackendAdaptor):
         self,
         device: torch.device,
         req_to_token_pool,
+        kvcache_manager,
     ):
         super().__init__(device)
         self.req_to_token_pool = req_to_token_pool
+        self.kvcache_manager = kvcache_manager
 
+    @nvtx.annotate("NSABackendAdaptor.adapt_for_attn_metadata", color="green")
     def adapt_for_attn_metadata(
         self,
         selected_indices: torch.Tensor,
@@ -69,12 +72,21 @@ class NSABackendAdaptor(BackendAdaptor):
         layer_id: int,
         **kwargs,
     ) -> Optional[torch.Tensor]:
-        """
-        Transform logical page indices to physical device indices for NSA backend.
-        """
-        # TODO: Implement NSA backend adaptor logic
-        pass
-
+        """Transform NSA topk indices to physical device indices."""
+        req_pool_indices = forward_batch.req_pool_indices
+        max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
+        page_table = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
+        transformed_indices = self.kvcache_manager.transfer_sparse_top_k_cache(
+            req_pool_indices=req_pool_indices,
+            top_k_result=selected_indices,
+            out_cache_loc=forward_batch.out_cache_loc,
+            seq_lens=forward_batch.seq_lens,
+            sparse_mask=sparse_mask,
+            page_table=page_table,
+            layer_id=layer_id,
+            page_size=1,
+        )
+        return transformed_indices
 
 class FlashAttentionAdaptor(BackendAdaptor):
     """Adaptor for FlashAttention backend."""
@@ -100,12 +112,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
         **kwargs,
     ) -> Any:
         """
-        Adapt FlashAttention metadata for sparse KVCache access.
-
-        Modifies page_table, cache_seqlens, and related metadata to redirect
-        FlashAttention to only process selected sparse pages.
-
-        # TODO: Optimize performance
+        Adapt metadata for sparse attention.
         """
         if self._original_metadata is None:
             return current_metadata
@@ -140,6 +147,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
         diff = page_size - positions_in_page - 1
         sparse_seq_lens = (valid_lengths * page_size - diff).to(torch.int32)
 
+        logger.info(f"Adapt for attn metadata, sparse_seq_lens: {sparse_seq_lens.tolist()}, original_cache_seqlens_int32: {self._original_metadata['cache_seqlens_int32'].tolist()}")
         current_metadata.cache_seqlens_int32 = torch.where(
             sparse_mask, sparse_seq_lens, self._original_metadata["cache_seqlens_int32"]
         )
