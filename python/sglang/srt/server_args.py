@@ -2229,8 +2229,6 @@ class ServerArgs:
 
     def _handle_pd_disaggregation(self):
         if self.disaggregation_mode == "decode":
-            print(f"[DEBUG] [ARGS] self.disaggregation_decode_tp: {self.disaggregation_decode_tp}")
-            print(f"[DEBUG] [ARGS] self.disaggregation_decode_dp: {self.disaggregation_decode_dp}")
             assert (
                 self.disaggregation_decode_tp is None
             ), "Cannot set --disaggregation-decode-tp for the decode engine."
@@ -2324,8 +2322,6 @@ class ServerArgs:
             envs.SGLANG_TOOL_STRICT_LEVEL.set(ToolStrictLevel.PARAMETER)
 
     def _handle_cache_compatibility(self):
-        print(f"[DEBUG] [ARGS] self.attention_backend: {self.attention_backend}, self.disable_radix_cache: {self.disable_radix_cache}")
-        print(f"[DEBUG] [ARGS] self.enable_hierarchical_cache: {self.enable_hierarchical_cache}, self.disaggregation_decode_enable_offload_kvcache: {self.disaggregation_decode_enable_offload_kvcache}")
         if self.enable_hierarchical_cache and self.disable_radix_cache:
             raise ValueError(
                 "The arguments enable-hierarchical-cache and disable-radix-cache are mutually exclusive "
@@ -2415,7 +2411,6 @@ class ServerArgs:
                 self.attention_backend
                 not in RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND
             ):
-                print(f"[DEBUG] [ARGS] self.attention_backend: {self.attention_backend}, self.disable_radix_cache: {self.disable_radix_cache}")
                 # Currently, only certain backends support radix cache. Support for other backends is in progress
                 self.disable_radix_cache = True
                 logger.warning(
