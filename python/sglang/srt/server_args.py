@@ -2229,6 +2229,8 @@ class ServerArgs:
 
     def _handle_pd_disaggregation(self):
         if self.disaggregation_mode == "decode":
+            print(f"[DEBUG] [ARGS] self.disaggregation_decode_tp: {self.disaggregation_decode_tp}")
+            print(f"[DEBUG] [ARGS] self.disaggregation_decode_dp: {self.disaggregation_decode_dp}")
             assert (
                 self.disaggregation_decode_tp is None
             ), "Cannot set --disaggregation-decode-tp for the decode engine."
