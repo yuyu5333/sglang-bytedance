@@ -162,10 +162,14 @@ class SchedulerRuntimeCheckerMixin:
             self.max_total_num_tokens - protected_size
         )
 
+        print(f"[DEBUG] [NSA] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}")
+
         # Check index_k
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
         index_k_expected = self.token_to_kv_pool_allocator.index_k_expected_size()
         index_k_memory_leak = index_k_available != index_k_expected
+        
+        print(f"[DEBUG] [NSA] {index_k_expected=}, {index_k_available=}")
         
         memory_leak = kv_memory_leak or index_k_memory_leak
 
@@ -173,6 +177,8 @@ class SchedulerRuntimeCheckerMixin:
             f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
             f"[Index K] {index_k_expected=}, {index_k_available=}\n"
         )
+
+        print(f"[DEBUG] [NSA] {kv_memory_leak=}, {index_k_memory_leak=}")
 
         return memory_leak, token_msg
 
