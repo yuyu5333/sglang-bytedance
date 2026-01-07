@@ -118,7 +118,13 @@ class DecodeKVCacheOffloadManager:
 
         # Early free prefill-offloaded GPU memory
         if prefill_offloaded_len > 0:
-            self.token_to_kv_pool_allocator.free(token_indices[:prefill_offloaded_len])
+            if enable_nsa_hybrid_indexer_pool(req_to_token_pool=self.req_to_token_pool):
+                indices = self.req_to_token_pool.get_all_indices_range(
+                    req.req_pool_idx, 0, prefill_offloaded_len
+                )
+            else:
+                indices = token_indices[:prefill_offloaded_len]
+            self.token_to_kv_pool_allocator.free(indices)
 
         # Asynchronously offload incremental KV cache from device to host
         self.request_counter += 1
@@ -185,11 +191,13 @@ class DecodeKVCacheOffloadManager:
 
     def _release_finished_req(self, req: Req, prefill_offloaded_len: int):
         kv_committed_len = req.pop_committed_kv_cache()
-        kv_indices = self.req_to_token_pool.req_to_token[
-            req.req_pool_idx, prefill_offloaded_len:kv_committed_len
-        ]
-
-        # Free the incremental part of the request
+        # Free the incremental part of the request (NSA-aware)
+        if enable_nsa_hybrid_indexer_pool(req_to_token_pool=self.req_to_token_pool):
+            kv_indices = self.req_to_token_pool.get_all_indices_range(
+                req.req_pool_idx, prefill_offloaded_len, kv_committed_len
+            )
+        else:
+            kv_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, prefill_offloaded_len:kv_committed_len]
         self.token_to_kv_pool_allocator.free(kv_indices)
         
         self.req_to_token_pool.free(req.req_pool_idx)
