@@ -67,6 +67,8 @@ class DecodeKVCacheOffloadManager:
         self.tp_group = tp_group
         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)
 
+        print(f"[DEBUG] [OFFLOAD] server_args.hicache_storage_backend: {self.server_args.hicache_storage_backend}")
+
         self.cache_controller = HiCacheController(
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             mem_pool_host=self.decode_host_mem_pool,
@@ -142,7 +144,7 @@ class DecodeKVCacheOffloadManager:
     def check_offload_progress(self):
         """Check the progress of offload from device to host and backup from host to storage."""
         cc = self.cache_controller
-
+        print(f"[DEBUG] [OFFLOAD] ack_write_queue type: {type(cc.ack_write_queue)}")
         qsizes = torch.tensor(
             [
                 len(cc.ack_write_queue),

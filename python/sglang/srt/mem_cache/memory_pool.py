@@ -1391,6 +1391,7 @@ class MLATokenToKVPool(KVCache):
         cache_v: torch.Tensor,
     ):
         layer_id = layer.layer_id
+        print(f"[DEBUG] [MLA] self.use_nsa: {self.use_nsa}, self.nsa_kv_cache_store_fp8: {self.nsa_kv_cache_store_fp8}")
         assert not (self.use_nsa and self.nsa_kv_cache_store_fp8)
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
