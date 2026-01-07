@@ -2322,6 +2322,8 @@ class ServerArgs:
             envs.SGLANG_TOOL_STRICT_LEVEL.set(ToolStrictLevel.PARAMETER)
 
     def _handle_cache_compatibility(self):
+        print(f"[DEBUG] [ARGS] self.attention_backend: {self.attention_backend}, self.disable_radix_cache: {self.disable_radix_cache}")
+        print(f"[DEBUG] [ARGS] self.enable_hierarchical_cache: {self.enable_hierarchical_cache}, self.disaggregation_decode_enable_offload_kvcache: {self.disaggregation_decode_enable_offload_kvcache}")
         if self.enable_hierarchical_cache and self.disable_radix_cache:
             raise ValueError(
                 "The arguments enable-hierarchical-cache and disable-radix-cache are mutually exclusive "
