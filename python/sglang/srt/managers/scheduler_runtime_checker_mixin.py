@@ -262,6 +262,7 @@ class SchedulerRuntimeCheckerMixin:
             )
 
     def check_memory(self: Scheduler):
+        print(f"[DEBUG] [CHECK] {self.is_hybrid_swa=}, {self.is_hybrid_ssm=}, enable_nsa_hybrid_indexer_pool={enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator)}")
         if self.is_hybrid_swa:
             memory_leak, token_msg = self._check_hybrid_memory()
         elif self.is_hybrid_ssm and isinstance(self.tree_cache, MambaRadixCache):
