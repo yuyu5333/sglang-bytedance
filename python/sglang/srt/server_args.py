@@ -2411,6 +2411,7 @@ class ServerArgs:
                 self.attention_backend
                 not in RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND
             ):
+                print(f"[DEBUG] [ARGS] self.attention_backend: {self.attention_backend}, self.disable_radix_cache: {self.disable_radix_cache}")
                 # Currently, only certain backends support radix cache. Support for other backends is in progress
                 self.disable_radix_cache = True
                 logger.warning(
