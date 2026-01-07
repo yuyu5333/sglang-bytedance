@@ -122,6 +122,9 @@ class SparseConfig:
     sparse_ratio: float = 0.5
     min_sparse_prompt_len: int = 2048
     lru_len: int = 4096
+    sparse_extra_config: dict = field(
+        default_factory=dict
+    )  # Algorithm-specific config, parsed by each algorithm
 
 
 class SparseCoordinator:
