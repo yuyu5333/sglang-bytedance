@@ -22,8 +22,11 @@ logger = logging.getLogger(__name__)
 
 def print_0(msg: str):
     import torch
-    if torch.distributed.get_rank() == 0:
-        print(msg)
+    # 从 0 到 7 都输出
+    for i in range(8):
+        if torch.distributed.get_rank() == i:
+            # 加上rank信息
+            print(f"[Rank {i}] {msg}")
 
 class SchedulerRuntimeCheckerMixin:
     def _get_token_info(self: Scheduler):
