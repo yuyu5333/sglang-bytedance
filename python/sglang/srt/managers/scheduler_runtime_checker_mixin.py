@@ -372,6 +372,8 @@ def create_scheduler_watchdog(
             scheduler.tree_cache, MambaRadixCache
         ):
             _, info_msg = scheduler._check_mamba_memory()
+        elif enable_nsa_hybrid_indexer_pool(allocator=scheduler.token_to_kv_pool_allocator):
+            _, info_msg = scheduler._check_nsa_memory()
         else:
             _, info_msg = scheduler._check_radix_cache_memory()
         return (
