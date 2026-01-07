@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import Optional
 
@@ -14,6 +13,9 @@ from sglang.srt.mem_cache.sparsity.backend.backend_adaptor import (
 from sglang.srt.mem_cache.sparsity.core.sparse_coordinator import (
     SparseConfig,
     SparseCoordinator,
+)
+from sglang.srt.mem_cache.sparsity.core.sparse_kvcache_manager import (
+    SparseKVCacheManager,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,8 +39,9 @@ def _create_sparse_algorithm(
     factory = _ALGORITHM_REGISTRY.get(algorithm_name)
 
     if factory is None:
-        raise ValueError(f"Unknown sparse algorithm: {algorithm_name}")
+        raise ValueError(f"Unknown algorithm: {algorithm_name}")
 
+    logger.info(f"Creating {algorithm_name} algorithm")
     return factory(config, device, **kwargs)
 
 
@@ -47,60 +50,44 @@ def _create_backend_adaptor(
     device: torch.device,
     sparse_algorithm: BaseSparseAlgorithm,
     req_to_token_pool,
+    decode_offload_manager,
 ):
     """Create backend adaptor."""
     if isinstance(sparse_algorithm, DeepSeekNSAAlgorithm):
-        return NSABackendAdaptor(device, req_to_token_pool)
+        logger.info("Creating NSA backend adaptor")
+        return NSABackendAdaptor(device, req_to_token_pool, decode_offload_manager)
 
     if backend in ["fa3", "flashattention"]:
+        logger.info("Creating FlashAttention backend adaptor")
         return FlashAttentionAdaptor(device)
 
-    raise ValueError(f"Unknown attention backend: {backend}")
-
-
-def _parse_sparse_config(server_args) -> SparseConfig:
-    """Parse hierarchical sparse config"""
-    # Parse extra config if provided
-    extra_config_str = server_args.hierarchical_sparse_attention_extra_config
-    if extra_config_str is not None:
-        try:
-            extra_config = json.loads(extra_config_str)
-
-            # Extract algorithm and backend
-            algorithm = extra_config.pop("algorithm", "quest")
-            backend = extra_config.pop("backend", "flashattention")
-            min_sparse_prompt_len = extra_config.pop("min_sparse_prompt_len", 2048)
-
-            # Everything else goes to algorithm_extra_config
-            sparse_extra_config = extra_config
-        except json.JSONDecodeError as e:
-            logger.warning(
-                f"Failed to parse hierarchical_sparse_attention_extra_config: {e}"
-            )
-
-    config = SparseConfig(
-        algorithm=algorithm,
-        backend=backend,
-        page_size=server_args.page_size,
-        min_sparse_prompt_len=min_sparse_prompt_len,
-        sparse_extra_config=sparse_extra_config,
-    )
-    return config
+    raise ValueError(f"Unknown backend: {backend}")
 
 
 def create_sparse_coordinator(
     device: torch.device,
+    page_size: int,
     req_to_token_pool,
     token_to_kv_pool,
     start_layer: int,
     end_layer: int,
+    token_to_kv_pool_allocator,
+    tp_group,
     server_args,
     **kwargs,
 ) -> SparseCoordinator:
-    config = _parse_sparse_config(server_args)
+    config = SparseConfig(page_size=page_size, algorithm="deepseek_nsa")
     algorithm = _create_sparse_algorithm(config, device, **kwargs)
+
+    sparse_kv_cache_manager = SparseKVCacheManager(
+        req_to_token_pool=req_to_token_pool,
+        token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+        tp_group=tp_group,
+        server_args=server_args,
+    )
+
     backend_adaptor = _create_backend_adaptor(
-        config.backend, device, algorithm, req_to_token_pool
+        config.backend, device, algorithm, req_to_token_pool, sparse_kv_cache_manager
     )
 
     coordinator = SparseCoordinator(
@@ -109,11 +96,13 @@ def create_sparse_coordinator(
         backend_adaptor=backend_adaptor,
         req_to_token_pool=req_to_token_pool,
         token_to_kv_pool=token_to_kv_pool,
+        sparse_kv_cache_manager=sparse_kv_cache_manager,
         start_layer=start_layer,
         end_layer=end_layer,
         device=device,
     )
     register_sparse_coordinator(coordinator)
+    logger.info(f"SparseCoordinator created: algorithm={config.algorithm}")
     return coordinator
 
 
