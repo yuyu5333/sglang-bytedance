@@ -2,6 +2,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Optional
 
+import nvtx
 import torch
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ class BackendAdaptor(ABC):
         self._original_metadata = None
 
     def save_original_metadata(self, metadata: Any) -> None:
-        """Save original metadata in the beginning of the forward pass."""
+        """Save original metadata (called once at layer 0)."""
         pass
 
     @abstractmethod
@@ -34,15 +35,7 @@ class BackendAdaptor(ABC):
         layer_id: int,
         **kwargs,
     ) -> Any:
-        """
-        Adapt attention metadata for sparse KVCache access.
-
-        Transforms sparse retrieval results (logical indices of important KV pages/tokens)
-        into backend-specific attention metadata format.
-
-        Returns:
-            Modified attention metadata compatible with the backend
-        """
+        """Adapt attention metadata for sparse attention."""
         pass
 
 
@@ -87,6 +80,7 @@ class NSABackendAdaptor(BackendAdaptor):
             page_size=1,
         )
         return transformed_indices
+
 
 class FlashAttentionAdaptor(BackendAdaptor):
     """Adaptor for FlashAttention backend."""
