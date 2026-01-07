@@ -20,14 +20,12 @@ Page-aligned memory pool.
 """
 
 import abc
-import weakref
 from typing import TYPE_CHECKING
 
 import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.mem_cache.memory_pool import SWAKVPool
 from sglang.srt.utils import get_bool_env_var, get_num_new_pages, next_power_of_2
 
 if TYPE_CHECKING:
