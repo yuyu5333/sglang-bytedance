@@ -116,15 +116,9 @@ class DecodeKVCacheOffloadManager:
         incremental_tokens = all_tokens[start:end]
         incremental_indices = token_indices[start:end]
 
-        # Early free prefill-offloaded GPU memory (NSA-aware)
+        # Early free prefill-offloaded GPU memory
         if prefill_offloaded_len > 0:
-            if enable_nsa_hybrid_indexer_pool(req_to_token_pool=self.req_to_token_pool):
-                indices = self.req_to_token_pool.get_all_indices_range(
-                    req.req_pool_idx, 0, prefill_offloaded_len
-                )
-            else:
-                indices = token_indices[:prefill_offloaded_len]
-            self.token_to_kv_pool_allocator.free(indices)
+            self.token_to_kv_pool_allocator.free(token_indices[:prefill_offloaded_len])
 
         # Asynchronously offload incremental KV cache from device to host
         self.request_counter += 1
