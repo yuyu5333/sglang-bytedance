@@ -412,6 +412,12 @@ class SchedulerOutputProcessorMixin:
 
             req.check_finished(new_accepted_len)
 
+            if (
+                self.server_args.disaggregation_decode_enable_offload_kvcache
+                and not req.finished()
+            ):
+                self.decode_offload_manager.offload_kv_cache(req)
+
             if req.finished():
                 self.maybe_collect_routed_experts(req)
 
