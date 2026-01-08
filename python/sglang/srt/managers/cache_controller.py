@@ -259,6 +259,7 @@ class HiCacheController:
         prefetch_threshold: int = 256,
         model_name: Optional[str] = None,
         storage_backend_extra_config: Optional[dict] = None,
+        enable_sparse_attn: Optional[bool] = False,
         pp_rank: int = 0,
         pp_size: int = 1,
     ):
@@ -350,6 +351,9 @@ class HiCacheController:
         self.write_queue: List[CacheOperation] = []
         self.ack_load_queue: List[HiCacheAck] = []
         self.ack_write_queue: List[HiCacheAck] = []
+        if enable_sparse_attn:
+            self.sparse_prefill_ack_write_queue: List[HiCacheAck] = []
+            self.sparse_decode_ack_write_queue: List[HiCacheAck] = []
 
         self.stop_event = threading.Event()
         self.write_buffer = TransferBuffer(self.stop_event)
@@ -440,6 +444,7 @@ class HiCacheController:
         device_indices: torch.Tensor,
         priority: Optional[int] = None,
         node_id: int = -1,
+        ack_type: Optional[str] = "",
     ) -> Optional[torch.Tensor]:
         """
         Back up KV caches from device memory to host memory.
@@ -450,10 +455,10 @@ class HiCacheController:
         self.write_queue.append(
             CacheOperation(host_indices, device_indices, node_id, priority)
         )
-        self.start_writing()
+        self.start_writing(ack_type)
         return host_indices
 
-    def start_writing(self) -> None:
+    def start_writing(self, ack_type: Optional[str] = "") -> None:
         if len(self.write_queue) == 0:
             return
 
@@ -479,7 +484,18 @@ class HiCacheController:
             if device_indices.is_cuda:
                 device_indices.record_stream(self.write_stream)
 
-        self.ack_write_queue.append(HiCacheAck(start_event, finish_event, op.node_ids))
+        if ack_type == "sparse_prefill":
+            self.sparse_prefill_ack_write_queue.append(
+                HiCacheAck(start_event, finish_event, op.node_ids)
+            )
+        elif ack_type == "sparse_decode":
+            self.sparse_decode_ack_write_queue.append(
+                HiCacheAck(start_event, finish_event, op.node_ids)
+            )
+        else:
+            self.ack_write_queue.append(
+                HiCacheAck(start_event, finish_event, op.node_ids)
+            )
 
     def load(
         self,

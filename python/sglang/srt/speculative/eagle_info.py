@@ -18,6 +18,7 @@ from sglang.srt.mem_cache.common import (
     alloc_paged_token_slots_extend,
     alloc_token_slots,
     get_last_loc,
+    enable_nsa_hybrid_indexer_pool,
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.server_args import get_global_server_args
@@ -124,6 +125,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 batch.req_pool_indices,
                 prefix_lens,
             )
+            
             batch.out_cache_loc = alloc_paged_token_slots_extend(
                 batch.tree_cache,
                 prefix_lens,
@@ -132,8 +134,14 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 end_offset_cpu,
                 last_loc,
                 len(batch.input_ids),
+                skip_index_k=True,
             )
             self.last_loc = last_loc
+
+        if enable_nsa_hybrid_indexer_pool(
+            allocator=batch.tree_cache.token_to_kv_pool_allocator
+        ) and isinstance(batch.out_cache_loc, tuple):
+            batch.out_cache_loc = batch.out_cache_loc[0]
 
         bs = batch.batch_size()
         assign_req_to_token_pool_func(

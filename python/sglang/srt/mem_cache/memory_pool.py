@@ -515,6 +515,7 @@ class KVCache(abc.ABC):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        index_k_max_size: Optional[int] = None,
     ):
         self.size = size
         self.page_size = page_size
@@ -1640,6 +1641,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        index_k_max_size: Optional[int] = None,
     ):
         assert (
             kv_lora_rank % self.quant_block_size == 0
@@ -1680,6 +1682,9 @@ class NSATokenToKVPool(MLATokenToKVPool):
             if self.custom_mem_pool
             else nullcontext()
         ):
+            index_k_max_size = (
+                index_k_max_size if index_k_max_size is not None else size
+            )
             self.index_k_with_scale_buffer = [
                 torch.zeros(
                     # Layout:
@@ -1689,7 +1694,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
                     #         * buf[i, :page_size * head_dim] for fp8 data
                     #         * buf[i, page_size * head_dim:].view(float32) for scale
                     (
-                        (size + page_size + 1) // self.page_size,
+                        (index_k_max_size + page_size + 1) // self.page_size,
                         self.page_size
                         * (
                             index_head_dim + index_head_dim // self.quant_block_size * 4
@@ -1700,6 +1705,9 @@ class NSATokenToKVPool(MLATokenToKVPool):
                 )
                 for _ in range(layer_num)
             ]
+        logger.info(
+            f"NSATokenToKVPool initialized with index_k_max_size: {index_k_max_size},kv_max_size: {size}"
+        )
         self._finalize_allocation_log(size)
 
     def get_index_k_with_scale_buffer(self, layer_id: int) -> torch.Tensor:

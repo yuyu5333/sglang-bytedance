@@ -56,8 +56,7 @@ def compute_cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.pad(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
-
-
+    
 class NativeSparseAttnBackendMTPPrecomputeMixin:
     """Mixin class providing metadata precomputation for multi-step speculative decoding.
 
@@ -128,7 +127,7 @@ class NativeSparseAttnBackendMTPPrecomputeMixin:
 
         # Get page indices from cache
         page_indices = self.req_to_token[req_pool_indices, :max_len]
-
+        
         # Compute NSA seqlens
         nsa_cache_seqlens = compute_nsa_seqlens(
             cache_seqlens, nsa_index_topk=self.nsa_index_topk

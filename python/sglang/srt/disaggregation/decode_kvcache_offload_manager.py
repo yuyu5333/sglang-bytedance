@@ -20,6 +20,7 @@ from sglang.srt.mem_cache.memory_pool_host import (
     MLATokenToKVPoolHost,
 )
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -115,9 +116,17 @@ class DecodeKVCacheOffloadManager:
         incremental_tokens = all_tokens[start:end]
         incremental_indices = token_indices[start:end]
 
-        # Early free prefill-offloaded GPU memory
+        # Early free prefill-offloaded GPU memory (NSA-aware)
         if prefill_offloaded_len > 0:
-            self.token_to_kv_pool_allocator.free(token_indices[:prefill_offloaded_len])
+            if enable_nsa_hybrid_indexer_pool(req_to_token_pool=self.req_to_token_pool):
+                indices = self.req_to_token_pool.get_all_indices_range(
+                    req.req_pool_idx, 0, prefill_offloaded_len
+                )
+                self.token_to_kv_pool_allocator.free(indices)
+            else:
+                self.token_to_kv_pool_allocator.free(
+                    token_indices[:prefill_offloaded_len]
+                )
 
         # Asynchronously offload incremental KV cache from device to host
         self.request_counter += 1
@@ -142,7 +151,6 @@ class DecodeKVCacheOffloadManager:
     def check_offload_progress(self):
         """Check the progress of offload from device to host and backup from host to storage."""
         cc = self.cache_controller
-
         qsizes = torch.tensor(
             [
                 len(cc.ack_write_queue),
@@ -185,12 +193,17 @@ class DecodeKVCacheOffloadManager:
 
     def _release_finished_req(self, req: Req, prefill_offloaded_len: int):
         kv_committed_len = req.pop_committed_kv_cache()
-        kv_indices = self.req_to_token_pool.req_to_token[
-            req.req_pool_idx, prefill_offloaded_len:kv_committed_len
-        ]
-
-        # Free the incremental part of the request
-        self.token_to_kv_pool_allocator.free(kv_indices)
+        start = prefill_offloaded_len
+        end = kv_committed_len
+        # Free the incremental part of the request (NSA-aware)
+        if enable_nsa_hybrid_indexer_pool(req_to_token_pool=self.req_to_token_pool):
+            indices = self.req_to_token_pool.get_all_indices_range(
+                req.req_pool_idx, start, end
+            )
+            self.token_to_kv_pool_allocator.free(indices)
+        else:
+            kv_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, start:end]
+            self.token_to_kv_pool_allocator.free(kv_indices)
         self.req_to_token_pool.free(req.req_pool_idx)
         self.tree_cache.protected_size_ -= len(req.prefix_indices)
 

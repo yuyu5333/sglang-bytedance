@@ -24,6 +24,7 @@ from sglang.srt.mem_cache.common import (
     alloc_paged_token_slots_extend,
     alloc_token_slots,
     get_last_loc,
+    enable_nsa_hybrid_indexer_pool,
 )
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
@@ -396,11 +397,23 @@ class EAGLEWorker(TpModelWorker):
         # [iter=0, iter=1, iter=2] [iter=0, iter=1, iter=2]
         if self.page_size == 1:
             # TODO: We only need self.speculative_num_steps - 1 * topk cache loc
-            out_cache_loc, token_to_kv_pool_state_backup = alloc_token_slots(
-                batch.tree_cache,
-                num_seqs * self.speculative_num_steps * self.topk,
-                backup_state=True,
-            )
+            if enable_nsa_hybrid_indexer_pool(
+                allocator=batch.tree_cache.token_to_kv_pool_allocator
+            ):
+                token_to_kv_pool_state_backup = (
+                    batch.tree_cache.token_to_kv_pool_allocator.backup_state()
+                )
+                out_cache_loc = (
+                    batch.tree_cache.token_to_kv_pool_allocator.kv_allocator.alloc(
+                        num_seqs * self.speculative_num_steps * self.topk
+                    )
+                )
+            else:
+                out_cache_loc, token_to_kv_pool_state_backup = alloc_token_slots(
+                    batch.tree_cache,
+                    num_seqs * self.speculative_num_steps * self.topk,
+                    backup_state=True,
+                )
         else:
             if self.topk == 1:
                 prefix_lens, seq_lens, last_loc = get_last_loc_large_page_size_top_k_1(
@@ -459,8 +472,14 @@ class EAGLEWorker(TpModelWorker):
                     last_loc,
                     extend_num_tokens,
                     backup_state=True,
+                    skip_index_k=True,
                 )
             )
+
+        if enable_nsa_hybrid_indexer_pool(
+            allocator=batch.tree_cache.token_to_kv_pool_allocator
+        ) and isinstance(out_cache_loc, tuple):
+            out_cache_loc = out_cache_loc[0]
 
         if self.page_size > 1 and self.topk > 1:
             last_page_lens_cumsum = torch.cumsum(last_page_lens, dim=0)
@@ -475,7 +494,7 @@ class EAGLEWorker(TpModelWorker):
             # When source_cache_loc is not needed, simply skip
             duplicate_cache_len = 0
             source_cache_loc, target_cache_loc, last_page_lens_cumsum = None, None, None
-
+        
         assign_draft_cache_locs[(num_seqs,)](
             batch.req_pool_indices,
             batch.req_to_token_pool.req_to_token,
