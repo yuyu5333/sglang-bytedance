@@ -199,9 +199,7 @@ class DecodeKVCacheOffloadManager:
                 ) = self.ongoing_offload.pop(ack_id)
 
                 if req.finished():
-                    state = self.offloaded_state.get(req.rid, {})
-                    start_offset = (state.get("prefill_len", 0) + state.get("inc_len", 0))
-                    self._release_finished_req(req, start_offset)
+                    self._release_finished_req(req, start)
                 else:
                     if enable_nsa_hybrid_indexer_pool(
                         req_to_token_pool=self.req_to_token_pool
