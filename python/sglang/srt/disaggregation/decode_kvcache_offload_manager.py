@@ -193,9 +193,7 @@ class DecodeKVCacheOffloadManager:
                 ) = self.ongoing_offload.pop(ack_id)
 
                 if req.finished():
-                    state = self.offloaded_state.get(req.rid, {})
-                    start_offset = (state.get("prefill_len", 0) + state.get("inc_len", 0))
-                    self._release_finished_req(req, start_offset)
+                    self._release_finished_req(req, start)
                 else:
                     kv_indices = self.req_to_token_pool.req_to_token[
                         req.req_pool_idx, start:end
