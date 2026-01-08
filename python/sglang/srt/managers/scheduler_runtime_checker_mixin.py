@@ -20,13 +20,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-def print_0(msg: str):
-    import torch
-    # 从 0 到 7 都输出
-    for i in range(8):
-        if torch.distributed.get_rank() == i:
-            # 加上rank信息
-            print(f"[Rank {i}] {msg}")
 
 class SchedulerRuntimeCheckerMixin:
     def _get_token_info(self: Scheduler):
@@ -165,14 +158,10 @@ class SchedulerRuntimeCheckerMixin:
             self.max_total_num_tokens - protected_size
         )
 
-        print_0(f"[DEBUG] [NSA] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}")
-
         # Check index_k
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
         index_k_expected = self.token_to_kv_pool_allocator.index_k_expected_size()
         index_k_memory_leak = index_k_available != index_k_expected
-        
-        print_0(f"[DEBUG] [NSA] {index_k_expected=}, {index_k_available=}")
         
         memory_leak = kv_memory_leak or index_k_memory_leak
 
@@ -180,8 +169,6 @@ class SchedulerRuntimeCheckerMixin:
             f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
             f"[Index K] {index_k_expected=}, {index_k_available=}\n"
         )
-
-        print_0(f"[DEBUG] [NSA] {kv_memory_leak=}, {index_k_memory_leak=}")
 
         return memory_leak, token_msg
 
@@ -270,7 +257,6 @@ class SchedulerRuntimeCheckerMixin:
             )
 
     def check_memory(self: Scheduler):
-        print_0(f"[DEBUG] [CHECK] 1 {self.is_hybrid_swa=}, {self.is_hybrid_ssm=}, enable_nsa_hybrid_indexer_pool={enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator)}")
         if self.is_hybrid_swa:
             memory_leak, token_msg = self._check_hybrid_memory()
         elif self.is_hybrid_ssm and isinstance(self.tree_cache, MambaRadixCache):
@@ -280,7 +266,6 @@ class SchedulerRuntimeCheckerMixin:
         else:
             memory_leak, token_msg = self._check_radix_cache_memory()
             
-        print_0(f"[DEBUG] [CHECK] 2 {self.is_hybrid_swa=}, {self.is_hybrid_ssm=}, enable_nsa_hybrid_indexer_pool={enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator)}")
         if memory_leak:
             msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
             raise_error_or_warn(
