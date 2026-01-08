@@ -193,7 +193,9 @@ class DecodeKVCacheOffloadManager:
                 ) = self.ongoing_offload.pop(ack_id)
 
                 if req.finished():
-                    self._release_finished_req(req, self.offloaded_state.get(req.rid, {}).get("prefill_len", 0))
+                    state = self.offloaded_state.get(req.rid, {})
+                    start_offset = (state.get("prefill_len", 0) + state.get("inc_len", 0))
+                    self._release_finished_req(req, start_offset)
                 else:
                     kv_indices = self.req_to_token_pool.req_to_token[
                         req.req_pool_idx, start:end
@@ -208,16 +210,17 @@ class DecodeKVCacheOffloadManager:
                     self.offloaded_state[req.rid]["last_hash"] = last_hash
             finish_count -= 1
 
-    def _release_finished_req(self, req: Req, prefill_offloaded_len: int):
+    def _release_finished_req(self, req: Req, start_offset: int):
         kv_committed_len = req.pop_committed_kv_cache()
-        kv_indices = self.req_to_token_pool.req_to_token[
-            req.req_pool_idx, prefill_offloaded_len:kv_committed_len
-        ]
-
-        # Free the incremental part of the request
+        start = start_offset
+        end = kv_committed_len
+        # Free the incremental part of the request (NSA-aware)
+        kv_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, start:end]
         self.token_to_kv_pool_allocator.free(kv_indices)
         self.req_to_token_pool.free(req.req_pool_idx)
         self.tree_cache.protected_size_ -= len(req.prefix_indices)
+        if req.rid in self.offloaded_state:
+            del self.offloaded_state[req.rid]
 
     def _check_backup_progress(self, finish_count):
         """Check the progress of backup from host to storage."""
@@ -254,3 +257,17 @@ class DecodeKVCacheOffloadManager:
             last_hash = self.cache_controller.get_hash_str(page_tokens, last_hash)
             page_hashes.append(last_hash)
         return page_hashes
+
+    def finalize_release_on_finish(self, req: Req):
+        """Free any remaining tail KV that was not offloaded due to non-aligned length."""
+        if req.req_pool_idx == -1:
+            return
+        state = self.offloaded_state.get(req.rid)
+        if state is None:
+            prefill_len = len(req.origin_input_ids) // self.page_size * self.page_size
+            inc_len = 0
+        else:
+            prefill_len = state.get("prefill_len", 0)
+            inc_len = state.get("inc_len", 0)
+        start_offset = prefill_len + inc_len
+        self._release_finished_req(req, start_offset)
