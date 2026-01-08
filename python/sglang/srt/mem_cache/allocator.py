@@ -178,13 +178,6 @@ def is_enable_hierarchical_nsa(allocator):
     """Check if NSA hierarchical allocation is enabled."""
     return isinstance(allocator, NSAHybridTokenToKVPoolAllocator)
 
-def print_0(msg: str):
-    import torch
-    # 从 0 到 7 都输出
-    for i in range(8):
-        if torch.distributed.get_rank() == i:
-            # 加上rank信息
-            print(f"[Rank {i}] {msg}")
 
 class NSAHybridTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     """
@@ -314,12 +307,10 @@ class NSAHybridTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def index_k_available_size(self):
         """Return index_k allocator's available size"""
-        print_0(f"[DEBUG] [NSA] {self.index_k_allocator.available_size()}")
         return self.index_k_allocator.available_size()
 
     def index_k_expected_size(self):
         """Return index_k allocator's expected size"""
-        print_0(f"[DEBUG] [NSA] {self.index_k_allocator.num_pages=}, {self.index_k_allocator.page_size=}")
         return self.index_k_allocator.num_pages * self.index_k_allocator.page_size
 
     def clear(self):
