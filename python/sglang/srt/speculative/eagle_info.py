@@ -448,7 +448,16 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
 
         if page_size == 1:
             # TODO: boolean array index leads to a device sync. Remove it.
-            token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
+            if enable_nsa_hybrid_indexer_pool(req_to_token_pool=batch.req_to_token_pool):
+                index_k_slice = batch.req_to_token_pool.req_to_nsa_index_k[
+                    batch.req_pool_indices, batch.seq_lens : batch.seq_lens + self.draft_token_num
+                ]
+                index_k_to_free = index_k_slice[evict_mask]
+                token_to_kv_pool_allocator.free(
+                    (batch.out_cache_loc[evict_mask], index_k_to_free)
+                )
+            else:
+                token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
             for i, req in enumerate(batch.reqs):
                 req.kv_committed_len += accept_length_list[i] + 1
                 req.kv_allocated_len = req.kv_committed_len
@@ -462,7 +471,17 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                     self.draft_token_num,
                     next_power_of_2(self.draft_token_num),
                 )
-                token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
+                if enable_nsa_hybrid_indexer_pool(req_to_token_pool=batch.req_to_token_pool):
+                    token_per_req = next_power_of_2(self.draft_token_num)
+                    index_k_slice = batch.req_to_token_pool.req_to_nsa_index_k[
+                        batch.req_pool_indices, batch.seq_lens : batch.seq_lens + token_per_req
+                    ]
+                    index_k_to_free = index_k_slice[evict_mask]
+                    token_to_kv_pool_allocator.free(
+                        (batch.out_cache_loc[evict_mask], index_k_to_free)
+                    )
+                else:
+                    token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
                 for i, req in enumerate(batch.reqs):
                     req.kv_committed_len += accept_length_list[i] + 1
                     req.kv_allocated_len = req.kv_committed_len
