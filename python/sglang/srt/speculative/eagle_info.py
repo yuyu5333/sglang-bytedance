@@ -452,10 +452,9 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 index_k_slice = batch.req_to_token_pool.req_to_nsa_index_k[
                     batch.req_pool_indices, batch.seq_lens : batch.seq_lens + self.draft_token_num
                 ]
-                index_k_to_free = index_k_slice[evict_mask]
-                token_to_kv_pool_allocator.free(
-                    (batch.out_cache_loc[evict_mask], index_k_to_free)
-                )
+                index_k_to_free = torch.masked_select(index_k_slice, evict_mask)
+                kv_to_free = torch.masked_select(batch.out_cache_loc, evict_mask)
+                token_to_kv_pool_allocator.free((kv_to_free, index_k_to_free))
             else:
                 token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
             for i, req in enumerate(batch.reqs):
@@ -476,10 +475,9 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                     index_k_slice = batch.req_to_token_pool.req_to_nsa_index_k[
                         batch.req_pool_indices, batch.seq_lens : batch.seq_lens + token_per_req
                     ]
-                    index_k_to_free = index_k_slice[evict_mask]
-                    token_to_kv_pool_allocator.free(
-                        (batch.out_cache_loc[evict_mask], index_k_to_free)
-                    )
+                    index_k_to_free = torch.masked_select(index_k_slice, evict_mask)
+                    kv_to_free = torch.masked_select(batch.out_cache_loc, evict_mask)
+                    token_to_kv_pool_allocator.free((kv_to_free, index_k_to_free))
                 else:
                     token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
                 for i, req in enumerate(batch.reqs):
