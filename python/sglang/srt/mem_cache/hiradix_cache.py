@@ -24,6 +24,7 @@ from sglang.srt.mem_cache.radix_cache import (
     split_node_hash_value,
 )
 from sglang.srt.metrics.collector import StorageMetricsCollector
+from sglang.srt.utils import get_int_env_var
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -130,7 +131,7 @@ class HiRadixCache(RadixCache):
         self.write_through_threshold = (
             1 if server_args.hicache_write_policy == "write_through" else 2
         )
-        self.load_back_threshold = 10
+        self.load_back_threshold = get_int_env_var("SGLANG_HICACHE_LOAD_BACK_THRESHOLD", 10)
 
         super().__init__(params=params)
 

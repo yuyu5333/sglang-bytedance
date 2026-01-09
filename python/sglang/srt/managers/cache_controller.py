@@ -518,9 +518,15 @@ class HiCacheController:
         host_indices, device_indices = op.host_indices, op.device_indices
         # move indices to GPU if using kernels, to host if using direct indexing
         if self.io_backend == "kernel":
-            if not host_indices.is_cuda:
-                host_indices = host_indices.to(self.device, non_blocking=True)
-            return host_indices, device_indices
+            if host_indices.is_cuda:
+                hi = host_indices
+            else:
+                hi = host_indices.cpu()
+            si, idx = hi.sort()
+            di = device_indices.index_select(0, idx)
+            if not si.is_cuda:
+                si = si.to(self.device, non_blocking=True)
+            return si, di
         elif self.io_backend == "direct":
             if self.mem_pool_host.layout == "layer_first":
                 device_indices = device_indices.cpu()
