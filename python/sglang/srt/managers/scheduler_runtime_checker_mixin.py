@@ -152,22 +152,25 @@ class SchedulerRuntimeCheckerMixin:
         """Check memory for NSA hybrid allocator (KV cache + index_k buffer)"""
         _, _, available_size, evictable_size = self._get_token_info()
         protected_size = self.tree_cache.protected_size()
-        
-        # Check KV cache
-        kv_memory_leak = (available_size + evictable_size) != (
-            self.max_total_num_tokens - protected_size
-        )
+        in_flight_kv = 0
+        if hasattr(self, "decode_offload_manager") and self.decode_offload_manager is not None:
+            for _, (_, _, _, _, start, end) in self.decode_offload_manager.ongoing_offload.items():
+                in_flight_kv += max(0, end - start)
+        used_kv = self.max_total_num_tokens - (available_size + evictable_size + protected_size)
+        expected_free_kv = self.max_total_num_tokens - protected_size - used_kv - in_flight_kv
+        kv_memory_leak = (available_size + evictable_size) != expected_free_kv
 
-        # Check index_k
+        index_k_total = getattr(self.token_to_kv_pool_allocator, "index_k_max_total_size", None)
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
-        index_k_expected = self.token_to_kv_pool_allocator.index_k_expected_size()
-        index_k_memory_leak = index_k_available != index_k_expected
+        used_kv = self.max_total_num_tokens - (available_size + evictable_size + protected_size)
+        expected_index_k_available = index_k_total - used_kv - in_flight_kv if index_k_total is not None else index_k_available
+        index_k_memory_leak = index_k_available != expected_index_k_available
         
         memory_leak = kv_memory_leak or index_k_memory_leak
 
         token_msg = (
-            f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
-            f"[Index K] {index_k_expected=}, {index_k_available=}\n"
+            f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, expected_free_kv={expected_free_kv}, used_kv={used_kv}, in_flight_kv={in_flight_kv}\n"
+            f"[Index K] expected_index_k_available={expected_index_k_available}, {index_k_available=}\n"
         )
 
         return memory_leak, token_msg
@@ -353,7 +356,14 @@ class SchedulerRuntimeCheckerMixin:
                 queue_size += len(self.decode_offload_manager.ongoing_offload)
             if queue_size:
                 return
+            if self.running_batch is not None and not self.running_batch.is_empty():
+                return
 
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and self.server_args.disaggregation_decode_enable_offload_kvcache
+        ):
+            self.decode_offload_manager.check_offload_progress()
         self.check_memory()
         self.check_tree_cache()
         self.new_token_ratio = self.init_new_token_ratio
