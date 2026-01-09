@@ -152,19 +152,27 @@ class SchedulerRuntimeCheckerMixin:
         """Check memory for NSA hybrid allocator (KV cache + index_k buffer)"""
         _, _, available_size, evictable_size = self._get_token_info()
         protected_size = self.tree_cache.protected_size()
-        
-        # Check KV cache
-        kv_memory_leak = (available_size + evictable_size) != (
-            self.max_total_num_tokens - protected_size
+        reserved_per_req = self.server_args.num_reserved_decode_tokens
+        num_running = len(self.running_batch.reqs)
+        num_transfer = len(self.disagg_decode_transfer_queue.queue) if hasattr(self, "disagg_decode_transfer_queue") else 0
+        num_waiting = len(self.waiting_queue)
+        prealloc_tokens = (
+            self.disagg_decode_prealloc_queue.num_tokens_pre_allocated
+            if hasattr(self, "disagg_decode_prealloc_queue")
+            else 0
         )
-
-        # Check index_k
+        expected_available = (
+            self.max_total_num_tokens
+            - protected_size
+            - prealloc_tokens
+            - reserved_per_req * (num_running + num_transfer + num_waiting)
+        )
+        kv_memory_leak = (available_size + evictable_size) != expected_available
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
         index_k_expected = self.token_to_kv_pool_allocator.index_k_expected_size()
-        index_k_memory_leak = index_k_available != index_k_expected
-        
+        index_k_expected_adj = index_k_expected - prealloc_tokens - reserved_per_req * (num_running + num_transfer + num_waiting)
+        index_k_memory_leak = index_k_available != index_k_expected_adj
         memory_leak = kv_memory_leak or index_k_memory_leak
-
         token_msg = (
             f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
             f"[Index K] {index_k_expected=}, {index_k_available=}\n"
