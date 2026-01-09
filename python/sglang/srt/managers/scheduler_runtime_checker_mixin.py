@@ -156,7 +156,8 @@ class SchedulerRuntimeCheckerMixin:
         if hasattr(self, "decode_offload_manager") and self.decode_offload_manager is not None:
             for _, (_, _, _, _, start, end) in self.decode_offload_manager.ongoing_offload.items():
                 in_flight_kv += max(0, end - start)
-        expected_free_kv = self.max_total_num_tokens - protected_size - in_flight_kv
+        used_kv = self.max_total_num_tokens - (available_size + evictable_size + protected_size)
+        expected_free_kv = self.max_total_num_tokens - protected_size - used_kv - in_flight_kv
         kv_memory_leak = (available_size + evictable_size) != expected_free_kv
 
         index_k_total = getattr(self.token_to_kv_pool_allocator, "index_k_max_total_size", None)
@@ -168,7 +169,7 @@ class SchedulerRuntimeCheckerMixin:
         memory_leak = kv_memory_leak or index_k_memory_leak
 
         token_msg = (
-            f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, expected_free_kv={expected_free_kv}, in_flight_kv={in_flight_kv}\n"
+            f"[KV Cache] {self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, expected_free_kv={expected_free_kv}, used_kv={used_kv}, in_flight_kv={in_flight_kv}\n"
             f"[Index K] expected_index_k_available={expected_index_k_available}, {index_k_available=}\n"
         )
 
