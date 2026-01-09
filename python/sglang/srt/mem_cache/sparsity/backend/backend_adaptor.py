@@ -66,6 +66,8 @@ class NSABackendAdaptor(BackendAdaptor):
         **kwargs,
     ) -> Optional[torch.Tensor]:
         """Transform NSA topk indices to physical device indices."""
+        if selected_indices is None or not sparse_mask.any():
+            return None
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
         page_table = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
