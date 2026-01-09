@@ -82,6 +82,7 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
     def merge_and_sort_free(self):
         if len(self.release_pages) > 0:
             self.free_pages = torch.cat((self.free_pages, self.release_pages))
+            self.free_pages = torch.unique(self.free_pages)
             self.free_pages, _ = torch.sort(self.free_pages)
             self.release_pages = torch.empty(
                 (0,), dtype=self.release_pages.dtype, device=self.device
@@ -840,11 +841,15 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
         if self.is_not_in_free_group:
             free_page_indices = torch.unique(free_index // self.page_size)
-            free_page_indices = free_page_indices[free_page_indices > 0]
+            free_page_indices = free_page_indices[
+                (free_page_indices > 0) & (free_page_indices <= self.num_pages)
+            ]
             if self.need_sort:
                 self.release_pages = torch.cat((free_page_indices, self.release_pages))
+                self.release_pages = torch.unique(self.release_pages)
             else:
                 self.free_pages = torch.cat((free_page_indices, self.free_pages))
+                self.free_pages = torch.unique(self.free_pages)
         else:
             self.free_group.append(free_index)
 
