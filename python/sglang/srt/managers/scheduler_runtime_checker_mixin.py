@@ -359,7 +359,6 @@ class SchedulerRuntimeCheckerMixin:
             if self.running_batch is not None and not self.running_batch.is_empty():
                 return
 
-        print(f"[DEBUG] [Mem Check (IDLE)] self.is_hybrid_swa={self.is_hybrid_swa}, self.is_hybrid_ssm={self.is_hybrid_ssm}, self.enable_hierarchical_cache={enable_nsa_hybrid_indexer_pool(allocator=self.token_to_kv_pool_allocator)}")
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and self.server_args.disaggregation_decode_enable_offload_kvcache
