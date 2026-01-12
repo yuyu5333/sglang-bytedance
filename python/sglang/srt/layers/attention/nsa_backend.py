@@ -1840,10 +1840,9 @@ class NativeSparseAttnBackend(
         start = (seqlens - topk).clamp(min=0)
         arange_topk = torch.arange(topk, device=page_table_1.device, dtype=torch.int32).unsqueeze(0).expand(bs, -1)
         pos = start.unsqueeze(1) + arange_topk
-        pos = pos.clamp(min=0, max=max_seqlen - 1)
         mask = pos < seqlens.unsqueeze(1)
         result = torch.empty((bs, topk), dtype=torch.int32, device=page_table_1.device)
-        torch.gather(page_table_1.to(torch.int32), dim=1, index=pos, out=result)
+        torch.gather(page_table_1.to(torch.int32), dim=1, index=pos.clamp(min=0), out=result)
         result[~mask] = -1
         return result
 
