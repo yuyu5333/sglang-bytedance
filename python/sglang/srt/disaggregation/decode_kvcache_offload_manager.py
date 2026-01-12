@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -45,6 +46,15 @@ class DecodeKVCacheOffloadManager:
         self.server_args = server_args
         self.request_counter = 0
         self.tree_cache = tree_cache
+        env_stride = os.getenv("SGLANG_DECODE_OFFLOAD_STRIDE")
+        if env_stride is None:
+            self.offload_stride = self.page_size
+        else:
+            try:
+                parsed = int(env_stride)
+                self.offload_stride = parsed if parsed > 0 else self.page_size
+            except Exception:
+                self.offload_stride = self.page_size
         kv_cache = self.token_to_kv_pool_allocator.get_kvcache()
         if isinstance(kv_cache, MHATokenToKVPool):
             self.decode_host_mem_pool = MHATokenToKVPoolHost(
@@ -119,7 +129,9 @@ class DecodeKVCacheOffloadManager:
             self.offloaded_state[req.rid] = state
         incremental_total = len(all_tokens) - state["prefill_len"]
         incremental_new = incremental_total - state["inc_len"]
-        incremental_aligned_len = incremental_new // self.page_size * self.page_size
+        incremental_aligned_len = (
+            incremental_new // self.offload_stride * self.offload_stride
+        )
 
         if incremental_aligned_len == 0:
             return False
