@@ -251,12 +251,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 logits_output=logits_output,
                 verified_id=torch.empty(0, dtype=torch.long, device=batch.device),
                 accept_length_per_req_cpu=[],
-                accepted_indices=torch.full(
-                    (0, self.spec_steps + 1),
-                    -1,
-                    dtype=torch.int32,
-                    device=batch.device,
-                ),
+                accepted_indices=torch.empty((0,), dtype=torch.int64, device=batch.device),
             )
 
         bs = self.retrive_index.shape[0]
@@ -267,7 +262,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         predict_shape[-1] += 1
         predict = torch.empty(predict_shape, dtype=torch.int32, device=batch.device)
         accept_index = torch.full(
-            (bs, self.spec_steps + 1), -1, dtype=torch.int32, device=batch.device
+            (bs, self.draft_token_num + 1), -1, dtype=torch.int32, device=batch.device
         )
         accept_length = torch.empty((bs,), dtype=torch.int32, device=batch.device)
 
