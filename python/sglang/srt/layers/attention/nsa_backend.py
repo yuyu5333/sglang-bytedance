@@ -1479,12 +1479,7 @@ class NativeSparseAttnBackend(
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
         if NSA_FUSE_TOPK:
-            if topk_indices is not None:
-                page_table_1 = topk_indices
-            else:
-                page_table_1 = self._default_topk_from_page_table(
-                    metadata.page_table_1, metadata.cache_seqlens_int32, self.nsa_index_topk
-                )
+            page_table_1 = topk_indices
         else:
             page_table_1 = transform_index_page_table_decode(
                 page_table=metadata.page_table_1,
@@ -1822,6 +1817,7 @@ class NativeSparseAttnBackend(
             f"topk_indices rows ({current_tokens}) > num_tokens ({num_tokens}); "
             "this indicates a mismatch between indexer output and q layout."
         )
+
         pad_size = num_tokens - current_tokens
         padding = torch.full(
             (pad_size, topk_indices.shape[1]),
@@ -1830,21 +1826,6 @@ class NativeSparseAttnBackend(
             device=topk_indices.device,
         )
         return torch.cat([topk_indices, padding], dim=0)
-
-    def _default_topk_from_page_table(
-        self, page_table_1: torch.Tensor, cache_seqlens: torch.Tensor, topk: int
-    ) -> torch.Tensor:
-        bs = page_table_1.shape[0]
-        max_seqlen = page_table_1.shape[1]
-        seqlens = cache_seqlens.to(torch.int32).clamp(max=max_seqlen)
-        start = (seqlens - topk).clamp(min=0)
-        arange_topk = torch.arange(topk, device=page_table_1.device, dtype=torch.int32).unsqueeze(0).expand(bs, -1)
-        pos = start.unsqueeze(1) + arange_topk
-        mask = pos < seqlens.unsqueeze(1)
-        result = torch.empty((bs, topk), dtype=torch.int32, device=page_table_1.device)
-        torch.gather(page_table_1.to(torch.int32), dim=1, index=pos.clamp(min=0), out=result)
-        result[~mask] = -1
-        return result
 
     def get_cuda_graph_seq_len_fill_value(self):
         """Get the fill value for sequence length in CUDA graph."""
