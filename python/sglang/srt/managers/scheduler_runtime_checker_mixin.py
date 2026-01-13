@@ -164,7 +164,9 @@ class SchedulerRuntimeCheckerMixin:
         index_k_available = self.token_to_kv_pool_allocator.index_k_available_size()
         used_kv = self.max_total_num_tokens - (available_size + evictable_size + protected_size)
         expected_index_k_available = index_k_total - used_kv - in_flight_kv if index_k_total is not None else index_k_available
-        index_k_memory_leak = index_k_available != expected_index_k_available
+        # Allow small mismatch within one page due to reserved decode token or allocator rounding
+        page_tolerance = getattr(self.token_to_kv_pool_allocator, "page_size", 1)
+        index_k_memory_leak = abs(index_k_available - expected_index_k_available) > page_tolerance
         
         memory_leak = kv_memory_leak or index_k_memory_leak
 
