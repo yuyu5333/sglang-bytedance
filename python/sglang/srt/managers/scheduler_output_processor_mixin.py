@@ -58,7 +58,11 @@ class SchedulerOutputProcessorMixin:
                     req.rid,
                     thread_finish_flag=True,
                 )
-                release_kv_cache(req, self.tree_cache)
+                if self.server_args.disaggregation_decode_enable_offload_kvcache:
+                    if not self.decode_offload_manager.offload_kv_cache(req):
+                        self.decode_offload_manager.finalize_release_on_finish(req)
+                else:
+                    release_kv_cache(req, self.tree_cache)
 
         # Note: Logprobs should be handled on the prefill engine.
         trace_slice_batch(RequestStage.DECODE_FAKE_OUTPUT, batch.reqs)

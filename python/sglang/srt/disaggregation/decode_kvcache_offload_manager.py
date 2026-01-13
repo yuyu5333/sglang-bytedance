@@ -244,6 +244,10 @@ class DecodeKVCacheOffloadManager:
             finish_count -= 1
 
     def _release_finished_req(self, req: Req, start_offset: int):
+        if req.kv_committed_freed:
+            if req.rid in self.offloaded_state:
+                del self.offloaded_state[req.rid]
+            return
         kv_committed_len = req.pop_committed_kv_cache()
         start = start_offset
         end = kv_committed_len
