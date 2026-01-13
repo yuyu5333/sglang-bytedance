@@ -55,6 +55,9 @@ class DecodeKVCacheOffloadManager:
                 self.offload_stride = parsed if parsed > 0 else self.page_size
             except Exception:
                 self.offload_stride = self.page_size
+        logger.info(
+            f"Decode offload stride: {self.offload_stride}, page_size: {self.page_size}"
+        )
         kv_cache = self.token_to_kv_pool_allocator.get_kvcache()
         if isinstance(kv_cache, MHATokenToKVPool):
             self.decode_host_mem_pool = MHATokenToKVPoolHost(
@@ -135,6 +138,9 @@ class DecodeKVCacheOffloadManager:
 
         if incremental_aligned_len == 0:
             return False
+        logger.debug(
+            f"Decode offload chunk: aligned_len={incremental_aligned_len}, stride={self.offload_stride}, prefill_len={state['prefill_len']}, prev_inc_len={state['inc_len']}"
+        )
 
         # Extract incremental tokens and indices for the newly available chunk
         start = state["prefill_len"] + state["inc_len"]
