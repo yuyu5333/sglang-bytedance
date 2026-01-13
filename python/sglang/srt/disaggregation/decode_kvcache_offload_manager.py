@@ -96,6 +96,7 @@ class DecodeKVCacheOffloadManager:
         self.ongoing_offload = {}
         self.ongoing_backup = {}
         self.offloaded_state = {}
+        self.pending_host_free = {}
         logger.info("Enable offload kv cache for decode side")
 
     def offload_kv_cache(self, req) -> bool:
@@ -265,11 +266,22 @@ class DecodeKVCacheOffloadManager:
             ack_id = storage_operation.id
             req_id, host_indices, start_time = self.ongoing_backup.pop(ack_id)
 
-            # Release host memory
-            self.decode_host_mem_pool.free(host_indices)
+            buf = self.pending_host_free.get(req_id)
+            if buf is None:
+                buf = host_indices
+            else:
+                buf = torch.cat([buf, host_indices])
 
+            freed_total = 0
+            while len(buf) >= self.offload_stride:
+                to_free = buf[: self.offload_stride]
+                self.decode_host_mem_pool.free(to_free)
+                freed_total += len(to_free)
+                buf = buf[self.offload_stride :]
+
+            self.pending_host_free[req_id] = buf
             logger.info(
-                f"Finished backup request {req_id}, free host memory, len:{len(host_indices)}, cost time:{time.time() - start_time:.2f} seconds."
+                f"Finished backup request {req_id}, free host memory, len:{freed_total}, cost time:{time.time() - start_time:.2f} seconds."
             )
 
     def _trigger_backup(
@@ -321,3 +333,7 @@ class DecodeKVCacheOffloadManager:
                     req.req_pool_idx, start_p:end_p
                 ]
                 self.token_to_kv_pool_allocator.free(indices)
+        pending = self.pending_host_free.get(req.rid)
+        if pending is not None and len(pending) > 0:
+            self.decode_host_mem_pool.free(pending)
+            del self.pending_host_free[req.rid]
