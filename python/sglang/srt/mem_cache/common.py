@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from sglang.srt.mem_cache.allocator import (
+    HIERARCHICAL_NSA_DECODE_MAX_TOKENS,
     NSAHybridTokenToKVPoolAllocator,
     SWATokenToKVPoolAllocator,
 )
@@ -258,7 +259,8 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
 
 def truncate_kv_cache_after_prefill(req: "Req", req_to_token_pool, tree_cache):
     """Truncate KV cache to HIERARCHICAL_NSA_DECODE_MAX_TOKENS after prefill completes."""
-    if not is_enable_hierarchical_nsa(tree_cache.token_to_kv_pool_allocator):
+    
+    if not enable_nsa_hybrid_indexer_pool(tree_cache.token_to_kv_pool_allocator):
         return
 
     if req.is_chunked > 0:
