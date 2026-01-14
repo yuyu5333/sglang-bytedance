@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 
+import os
 import torch
 
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import BaseSparseAlgorithm
@@ -76,7 +77,8 @@ def create_sparse_coordinator(
     server_args,
     **kwargs,
 ) -> SparseCoordinator:
-    config = SparseConfig(page_size=page_size, algorithm="deepseek_nsa")
+    lru_len = int(os.environ.get("SPARSE_LRU_LEN", 4096))
+    config = SparseConfig(page_size=page_size, algorithm="deepseek_nsa", lru_len=lru_len)
     algorithm = _create_sparse_algorithm(config, device, **kwargs)
 
     sparse_kv_cache_manager = SparseKVCacheManager(
