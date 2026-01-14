@@ -51,7 +51,7 @@ from sglang.srt.managers.schedule_batch import FINISH_ABORT, RequestStage, Sched
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
-from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool, release_kv_cache
+from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool, release_kv_cache, truncate_kv_cache_after_prefill
 from sglang.srt.mem_cache.memory_pool import (
     HybridLinearKVPool,
     HybridReqToTokenPool,
