@@ -520,11 +520,7 @@ class HiCacheController:
         if self.io_backend == "kernel":
             if not host_indices.is_cuda:
                 host_indices = host_indices.to(self.device, non_blocking=True)
-            if not device_indices.is_cuda:
-                device_indices = device_indices.to(self.device, non_blocking=True)
-            sorted_host, order = host_indices.sort()
-            reordered_device = device_indices.index_select(0, order)
-            return sorted_host, reordered_device
+            return host_indices, device_indices
         elif self.io_backend == "direct":
             if self.mem_pool_host.layout == "layer_first":
                 device_indices = device_indices.cpu()
