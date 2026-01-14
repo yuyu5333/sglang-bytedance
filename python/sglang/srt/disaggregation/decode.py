@@ -1074,4 +1074,15 @@ class SchedulerDisaggregationDecodeMixin:
             alloc_reqs = (
                 self.disagg_decode_transfer_queue.pop_transferred()
             )  # the requests which kv has arrived
+            
+            # NSA: Register, Offload and Truncate after KV transfer completes
+            sparse_coordinator = get_sparse_coordinator()
+            if sparse_coordinator is not None:
+                for req in alloc_reqs:
+                    sparse_coordinator.on_request_begin(req)
+                    sparse_coordinator.on_request_prefill_end(req)
+                    truncate_kv_cache_after_prefill(
+                        req, self.req_to_token_pool, self.tree_cache
+                    )
+            
             self.waiting_queue.extend(alloc_reqs)
