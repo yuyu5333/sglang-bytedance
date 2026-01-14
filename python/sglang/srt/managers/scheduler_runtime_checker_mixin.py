@@ -180,14 +180,14 @@ class SchedulerRuntimeCheckerMixin:
     def _check_radix_cache_memory(self: Scheduler):
         _, _, available_size, evictable_size = self._get_token_info()
         protected_size = self.tree_cache.protected_size()
-        memory_leak = (available_size + evictable_size) != (
-            # self.max_total_num_tokens
-            # if not self.enable_hierarchical_cache
-            # else self.max_total_num_tokens - protected_size
-            self.max_total_num_tokens
-            - protected_size
-        )
-        token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
+        in_flight_kv = 0
+        if hasattr(self, "decode_offload_manager") and self.decode_offload_manager is not None:
+            for _, (_, _, _, _, start, end) in self.decode_offload_manager.ongoing_offload.items():
+                in_flight_kv += max(0, end - start)
+        used_kv = self.max_total_num_tokens - (available_size + evictable_size + protected_size)
+        expected_free_kv = self.max_total_num_tokens - protected_size - used_kv - in_flight_kv
+        memory_leak = (available_size + evictable_size) != expected_free_kv
+        token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, expected_free_kv={expected_free_kv}, used_kv={used_kv}, in_flight_kv={in_flight_kv}\n"
         return memory_leak, token_msg
 
     def _get_batch_uncached_size(self: Scheduler, batch: ScheduleBatch) -> int:
