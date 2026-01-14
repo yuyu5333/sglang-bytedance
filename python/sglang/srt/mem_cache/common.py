@@ -256,6 +256,32 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
         if allocator.available_size() < num_tokens:
             tree_cache.evict(num_tokens)
 
+def truncate_kv_cache_after_prefill(req: "Req", req_to_token_pool, tree_cache):
+    """Truncate KV cache to HIERARCHICAL_NSA_DECODE_MAX_TOKENS after prefill completes."""
+    if not is_enable_hierarchical_nsa(tree_cache.token_to_kv_pool_allocator):
+        return
+
+    if req.is_chunked > 0:
+        return
+
+    current_len = len(req.origin_input_ids)
+    page_size = tree_cache.page_size
+    kv_keep_len = ceil_align(HIERARCHICAL_NSA_DECODE_MAX_TOKENS, page_size)
+    if current_len > kv_keep_len:
+        old_prefix_len = len(req.prefix_indices)
+
+        free_indices = req_to_token_pool.req_to_token[
+            req.req_pool_idx, kv_keep_len:current_len
+        ]
+        tree_cache.token_to_kv_pool_allocator.kv_allocator.free(free_indices)
+        req.kv_committed_len = kv_keep_len
+        req.kv_allocated_len = kv_keep_len
+        req.prefix_indices = req_to_token_pool.req_to_token[
+            req.req_pool_idx, :kv_keep_len
+        ].to(dtype=torch.int64, copy=True)
+        if old_prefix_len > 0:
+            tree_cache.protected_size_ -= old_prefix_len - kv_keep_len
+
 def alloc_paged_token_slots_extend(
     tree_cache: BasePrefixCache,
     prefix_lens: torch.Tensor,
