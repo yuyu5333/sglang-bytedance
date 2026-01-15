@@ -275,13 +275,7 @@ class DecodeKVCacheOffloadManager:
         if self.page_size > 1:
             start_p = ((start_p + self.page_size - 1) // self.page_size) * self.page_size
         if start_p < end_p:
-            if enable_nsa_hybrid_indexer_pool(req_to_token_pool=self.req_to_token_pool):
-                indices = self.req_to_token_pool.get_all_indices_range(
-                    req.req_pool_idx, start_p, end_p
-                )
-                self.token_to_kv_pool_allocator.free(indices)
-            else:
-                indices = self.req_to_token_pool.req_to_token[
-                    req.req_pool_idx, start_p:end_p
-                ]
-                self.token_to_kv_pool_allocator.free(indices)
+            indices = self.req_to_token_pool.req_to_token[
+                req.req_pool_idx, start_p:end_p
+            ]
+            self.token_to_kv_pool_allocator.free(indices)
