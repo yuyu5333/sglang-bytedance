@@ -194,7 +194,8 @@ class SparseCoordinator:
             return
 
         # Offload full KV cache for prefill
-        self.sparse_kv_cache_manager.offload_prefill_full_kv_cache(req)
+        ack = self.sparse_kv_cache_manager.offload_prefill_full_kv_cache(req)
+        logger.info(f"Request {req.rid} prefill offload ack:{ack}, origin_len:{len(req.origin_input_ids)}")
         self.sparse_kv_cache_manager.check_prefill_offload_progress()
 
         # Store previous device indices
@@ -218,13 +219,28 @@ class SparseCoordinator:
                 pending = -1
             processed = self.sparse_kv_cache_manager.check_sparse_offload_progress()
             logger.info(f"Request {req.rid} end, decode ack pending:{pending}, processed:{processed}")
+            try:
+                remaining = []
+                for ack_id, (host_indices, req_pool_indices, seq_lens) in list(self.sparse_kv_cache_manager.sparse_decode_ongoing_offload.items()):
+                    if (req_pool_indices == req.req_pool_idx).any():
+                        self.sparse_kv_cache_manager.req_states.full_host_indices[req_pool_indices, seq_lens] = host_indices.to(
+                            self.sparse_kv_cache_manager.req_states.device
+                        )
+                        self.sparse_kv_cache_manager.sparse_decode_ongoing_offload.pop(ack_id)
+                        remaining.append(ack_id)
+                if len(remaining) > 0:
+                    logger.info(f"Request {req.rid} end, force-commit decode offloads without ack: {remaining}")
+            except Exception as e:
+                logger.info(f"Request {req.rid} end, force-commit decode offloads error: {e}")
         host_indices = self.states.clear(req.req_pool_idx)
 
         if host_indices.numel() > 0:
             # Free host indices
             self.sparse_kv_cache_manager.host_mem_pool.free(host_indices.cpu())
             req_seqlen = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
-            logger.info(f"Request {req.rid} end, host_indices:{len(host_indices)}, req_seqlen:{req_seqlen}")
+            logger.info(
+                f"Request {req.rid} end, host_indices:{len(host_indices)}, req_seqlen:{req_seqlen}, origin_len:{len(req.origin_input_ids)}, output_len:{len(req.output_ids)}, lru_len:{self.config.lru_len}"
+            )
             assert (
                 len(host_indices) == req_seqlen
             ), f"Host indices mismatch: {len(host_indices)} != {req_seqlen}"

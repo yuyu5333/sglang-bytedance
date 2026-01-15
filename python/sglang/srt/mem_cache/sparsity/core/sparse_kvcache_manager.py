@@ -154,6 +154,12 @@ class SparseKVCacheManager:
             req_pool_indices,
             seq_lens,
         )
+        try:
+            logger.info(
+                f"Sparse decode offload ack:{ack_id}, req_pool_indices:{req_pool_indices.tolist()}, seq_lens:{seq_lens.tolist()}, out_alloc_len:{out_alloc_len.numel()}"
+            )
+        except Exception:
+            logger.info(f"Sparse decode offload ack:{ack_id}, batch_size:{len(req_pool_indices)}")
         return ack_id
 
     def check_sparse_offload_progress(self):
@@ -188,6 +194,14 @@ class SparseKVCacheManager:
                 self.req_states.full_host_indices[req_pool_indices, seq_lens] = host_indices.to(
                     self.req_states.device
                 )
+                try:
+                    logger.info(
+                        f"Sparse decode ack committed ack:{ack_list[0]}, req_pool_indices:{req_pool_indices.tolist()}, seq_lens:{seq_lens.tolist()}, host_indices_len:{len(host_indices)}"
+                    )
+                except Exception:
+                    logger.info(
+                        f"Sparse decode ack committed ack:{ack_list[0]}, batch_size:{len(req_pool_indices)}, host_indices_len:{len(host_indices)}"
+                    )
                 processed += 1
         return processed
 
