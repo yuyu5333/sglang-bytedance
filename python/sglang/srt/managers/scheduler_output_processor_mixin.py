@@ -415,6 +415,9 @@ class SchedulerOutputProcessorMixin:
             if req.finished():
                 self.maybe_collect_routed_experts(req)
 
+                final_committed_len = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+                req.kv_committed_len = final_committed_len
+
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; release_kv_cache will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
