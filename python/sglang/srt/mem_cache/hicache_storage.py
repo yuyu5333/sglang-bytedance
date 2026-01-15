@@ -257,6 +257,84 @@ class HiCacheFile(HiCacheStorage):
             logger.error(f"Failed to save tensor {key}: {e}")
             return False
 
+
+class HiCacheDrop(HiCacheStorage):
+    """
+    A storage backend that drops all data:
+    - get/batch_get always miss
+    - set/batch_set are treated as successful no-ops
+    - exists/batch_exists always report miss
+    This enables a mode where KV is offloaded from device to host and then freed
+    without persisting to any storage.
+    """
+
+    def __init__(self, storage_config: HiCacheStorageConfig):
+        self.storage_config = storage_config
+
+    def get(
+        self,
+        key: str,
+        target_location: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ):
+        return None
+
+    def batch_get(
+        self,
+        keys: List[str],
+        target_locations: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ):
+        return [None for _ in keys]
+
+    def batch_get_v1(
+        self,
+        keys: List[str],
+        host_indices: torch.Tensor,
+        extra_info: Optional[HiCacheStorageExtraInfo] = None,
+    ) -> List[bool]:
+        return [False for _ in keys]
+
+    def set(
+        self,
+        key: str,
+        value: Optional[Any] = None,
+        target_location: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ) -> bool:
+        return True
+
+    def batch_set(
+        self,
+        keys: List[str],
+        values: Optional[Any] = None,
+        target_locations: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ) -> bool:
+        return True
+
+    def batch_set_v1(
+        self,
+        keys: List[str],
+        host_indices: torch.Tensor,
+        extra_info: Optional[HiCacheStorageExtraInfo] = None,
+    ) -> List[bool]:
+        return [True for _ in keys]
+
+    def exists(self, key: str) -> bool:
+        return False
+
+    def batch_exists(
+        self, keys: List[str], extra_info: Optional[HiCacheStorageExtraInfo] = None
+    ) -> int:
+        return 0
+
+    def clear(self) -> None:
+        return None
+
+    def get_stats(self):
+        return {"backend": "drop"}
+
     def batch_set(
         self,
         keys: List[str],
