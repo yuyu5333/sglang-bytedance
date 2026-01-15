@@ -195,18 +195,10 @@ class DecodeKVCacheOffloadManager:
                 if req.finished():
                     self._release_finished_req(req, self.offloaded_state.get(req.rid, {}).get("prefill_len", 0))
                 else:
-                    if enable_nsa_hybrid_indexer_pool(
-                        req_to_token_pool=self.req_to_token_pool
-                    ):
-                        indices = self.req_to_token_pool.get_all_indices_range(
-                            req.req_pool_idx, start, end
-                        )
-                        self.token_to_kv_pool_allocator.free(indices)
-                    else:
-                        kv_indices = self.req_to_token_pool.req_to_token[
-                            req.req_pool_idx, start:end
-                        ]
-                        self.token_to_kv_pool_allocator.free(kv_indices)
+                    kv_indices = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, start:end
+                    ]
+                    self.token_to_kv_pool_allocator.free(kv_indices)
 
                 prior_hash = self.offloaded_state.get(req.rid, {}).get("last_hash", "")
                 last_hash = self._trigger_backup(
