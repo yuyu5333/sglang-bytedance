@@ -157,6 +157,10 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if free_index.numel() == 0:
             return
 
+        free_index = free_index[free_index > 0]
+        if free_index.numel() == 0:
+            return
+
         if self.is_not_in_free_group:
             if self.need_sort:
                 self.release_pages = torch.cat((self.release_pages, free_index))
@@ -171,6 +175,16 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def load_cpu_copy(self, kv_cache_cpu, indices):
         return self._kvcache.load_cpu_copy(kv_cache_cpu, indices)
+
+    def merge_and_sort_free(self):
+        if len(self.release_pages) > 0:
+            merged = torch.cat((self.free_pages, self.release_pages))
+            merged = merged[merged > 0]
+            merged = torch.unique(merged)
+            self.free_pages, _ = torch.sort(merged)
+            self.release_pages = torch.empty(
+                (0,), dtype=self.release_pages.dtype, device=self.device
+            )
 
 
 HIERARCHICAL_NSA_DECODE_MAX_TOKENS = 4096 + 1
