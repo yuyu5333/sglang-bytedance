@@ -59,7 +59,12 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
         return ""
 
     def available_size(self):
-        return (len(self.free_pages) + len(self.release_pages)) * self.page_size
+        if len(self.release_pages) > 0:
+            merged = torch.cat((self.free_pages, self.release_pages))
+            merged = merged[merged > 0]
+            merged = torch.unique(merged)
+            return int(merged.numel()) * self.page_size
+        return int(self.free_pages.numel()) * self.page_size
 
     def get_kvcache(self):
         return self._kvcache
