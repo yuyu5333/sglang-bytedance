@@ -159,34 +159,37 @@ class SparseKVCacheManager:
     def check_sparse_offload_progress(self):
         """Check the progress of offload from device to host for sparse schedule every step"""
         if len(self.sparse_decode_ongoing_offload) == 0:
-            return
+            return 0
 
         cc = self.cache_controller
-        qsizes = torch.tensor(
-            [
-                len(cc.sparse_decode_ack_write_queue),
-            ],
-            dtype=torch.int,
-        )
-        if self.tp_world_size > 1:
-            torch.distributed.all_reduce(
-                qsizes, op=torch.distributed.ReduceOp.MIN, group=self.tp_group
+        processed = 0
+        while True:
+            qsizes = torch.tensor(
+                [
+                    len(cc.sparse_decode_ack_write_queue),
+                ],
+                dtype=torch.int,
             )
-        finish_count = qsizes.tolist()[0]
-        assert finish_count == 1
-
-        _, finish_event, ack_list = (
-            self.cache_controller.sparse_decode_ack_write_queue.pop(0)
-        )
-        finish_event.synchronize()
-
-        # update full_host_indices
-        host_indices, req_pool_indices, seq_lens = (
-            self.sparse_decode_ongoing_offload.pop(ack_list[0])
-        )
-        self.req_states.full_host_indices[req_pool_indices, seq_lens] = host_indices.to(
-            self.req_states.device
-        )
+            if self.tp_world_size > 1:
+                torch.distributed.all_reduce(
+                    qsizes, op=torch.distributed.ReduceOp.MIN, group=self.tp_group
+                )
+            finish_count = qsizes.tolist()[0]
+            if finish_count <= 0:
+                break
+            for _ in range(finish_count):
+                _, finish_event, ack_list = (
+                    self.cache_controller.sparse_decode_ack_write_queue.pop(0)
+                )
+                finish_event.synchronize()
+                host_indices, req_pool_indices, seq_lens = (
+                    self.sparse_decode_ongoing_offload.pop(ack_list[0])
+                )
+                self.req_states.full_host_indices[req_pool_indices, seq_lens] = host_indices.to(
+                    self.req_states.device
+                )
+                processed += 1
+        return processed
 
     def offload_prefill_full_kv_cache(self, req):
         offloaded_len = len(req.origin_input_ids)

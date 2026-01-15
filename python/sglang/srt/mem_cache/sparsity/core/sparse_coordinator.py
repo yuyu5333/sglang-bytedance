@@ -211,13 +211,20 @@ class SparseCoordinator:
         if req.req_pool_idx is None or self.sparse_kv_cache_manager is None:
             return
 
-        self.sparse_kv_cache_manager.check_sparse_offload_progress()
+        if hasattr(self.sparse_kv_cache_manager, "cache_controller"):
+            try:
+                pending = len(self.sparse_kv_cache_manager.cache_controller.sparse_decode_ack_write_queue)
+            except Exception:
+                pending = -1
+            processed = self.sparse_kv_cache_manager.check_sparse_offload_progress()
+            logger.info(f"Request {req.rid} end, decode ack pending:{pending}, processed:{processed}")
         host_indices = self.states.clear(req.req_pool_idx)
 
         if host_indices.numel() > 0:
             # Free host indices
             self.sparse_kv_cache_manager.host_mem_pool.free(host_indices.cpu())
             req_seqlen = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+            logger.info(f"Request {req.rid} end, host_indices:{len(host_indices)}, req_seqlen:{req_seqlen}")
             assert (
                 len(host_indices) == req_seqlen
             ), f"Host indices mismatch: {len(host_indices)} != {req_seqlen}"
