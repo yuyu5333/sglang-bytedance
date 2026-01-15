@@ -232,6 +232,13 @@ class SparseCoordinator:
                     logger.info(f"Request {req.rid} end, force-commit decode offloads without ack: {remaining}")
             except Exception as e:
                 logger.info(f"Request {req.rid} end, force-commit decode offloads error: {e}")
+            try:
+                final_seqlen = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+                finalized = self.sparse_kv_cache_manager.finalize_sparse_decode_req(req.req_pool_idx, final_seqlen)
+                if finalized > 0:
+                    logger.info(f"Request {req.rid} end, finalize missing decode host indices: {finalized}")
+            except Exception as e:
+                logger.info(f"Request {req.rid} end, finalize error: {e}")
         host_indices = self.states.clear(req.req_pool_idx)
 
         if host_indices.numel() > 0:

@@ -252,3 +252,33 @@ class SparseKVCacheManager:
         self.req_states.full_host_indices[req.req_pool_idx][: len(host_indices)] = (
             host_indices.to(self.req_states.device)
         )
+
+    def finalize_sparse_decode_req(self, req_pool_idx: int, final_seqlen: int) -> int:
+        if self.req_states is None:
+            return 0
+        row = self.req_states.full_host_indices[req_pool_idx]
+        final_seqlen = int(final_seqlen)
+        if final_seqlen <= 0:
+            return 0
+        existing_mask = row[:final_seqlen] != -1
+        missing_count = int((~existing_mask).sum().item())
+        if missing_count <= 0:
+            return 0
+        device_indices = self.req_to_token_pool.req_to_token[req_pool_idx, :final_seqlen][~existing_mask].long()
+        self.request_counter += 1
+        ack_id = self.request_counter
+        host_indices = self.cache_controller.write(
+            device_indices=device_indices,
+            node_id=ack_id,
+            ack_type="sparse_decode_finalize",
+        )
+        assert host_indices is not None, "Host out of memory"
+        row_indices = torch.arange(final_seqlen, device=self.req_states.device)[~existing_mask]
+        self.req_states.full_host_indices[req_pool_idx, row_indices] = host_indices.to(self.req_states.device)
+        try:
+            logger.info(
+                f"Sparse decode finalize req_pool_idx:{req_pool_idx}, final_seqlen:{final_seqlen}, missing:{missing_count}"
+            )
+        except Exception:
+            pass
+        return missing_count
