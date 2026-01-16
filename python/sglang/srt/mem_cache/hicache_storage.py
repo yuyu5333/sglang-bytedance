@@ -257,6 +257,35 @@ class HiCacheFile(HiCacheStorage):
             logger.error(f"Failed to save tensor {key}: {e}")
             return False
 
+    def batch_set(
+        self,
+        keys: List[str],
+        values: Optional[Any] = None,
+        target_locations: Optional[Any] = None,
+        target_sizes: Optional[Any] = None,
+    ) -> bool:
+        for key, value in zip(keys, values):
+            if not self.set(key, value):
+                return False
+        return True
+
+    def exists(self, key: str) -> bool:
+        key = self._get_suffixed_key(key)
+        tensor_path = os.path.join(self.file_path, f"{key}.bin")
+        return os.path.exists(tensor_path)
+
+    def clear(self) -> bool:
+        try:
+            for filename in os.listdir(self.file_path):
+                file_path = os.path.join(self.file_path, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            logger.info("Cleared all entries in HiCacheFile storage.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear HiCacheFile storage: {e}")
+            return False
+
 
 class HiCacheDrop(HiCacheStorage):
     """
@@ -334,32 +363,3 @@ class HiCacheDrop(HiCacheStorage):
 
     def get_stats(self):
         return {"backend": "drop"}
-
-    def batch_set(
-        self,
-        keys: List[str],
-        values: Optional[Any] = None,
-        target_locations: Optional[Any] = None,
-        target_sizes: Optional[Any] = None,
-    ) -> bool:
-        for key, value in zip(keys, values):
-            if not self.set(key, value):
-                return False
-        return True
-
-    def exists(self, key: str) -> bool:
-        key = self._get_suffixed_key(key)
-        tensor_path = os.path.join(self.file_path, f"{key}.bin")
-        return os.path.exists(tensor_path)
-
-    def clear(self) -> bool:
-        try:
-            for filename in os.listdir(self.file_path):
-                file_path = os.path.join(self.file_path, filename)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-            logger.info("Cleared all entries in HiCacheFile storage.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to clear HiCacheFile storage: {e}")
-            return False
