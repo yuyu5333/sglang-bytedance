@@ -149,7 +149,7 @@ class SchedulerRuntimeCheckerMixin:
 
     def _check_radix_cache_memory(self: Scheduler):
         _, _, available_size, evictable_size = self._get_token_info()
-        protected_size = self.tree_cache.protected_size()
+        protected_size = self.tree_cache.protected_size()        
         reserved_per_req = self.server_args.num_reserved_decode_tokens
         num_running = len(self.running_batch.reqs)
         num_transfer = len(self.disagg_decode_transfer_queue.queue) if hasattr(self, "disagg_decode_transfer_queue") else 0
@@ -159,18 +159,14 @@ class SchedulerRuntimeCheckerMixin:
             if hasattr(self, "disagg_decode_prealloc_queue")
             else 0
         )
-        uncached_size = 0
-        if self.running_batch is not None and not self.running_batch.is_empty():
-            uncached_size = self._get_batch_uncached_size(self.running_batch)
         expected_available = (
             self.max_total_num_tokens
             - protected_size
             - prealloc_tokens
-            - uncached_size
-            - reserved_per_req * (num_transfer + num_waiting)
+            - reserved_per_req * (num_running + num_transfer + num_waiting)
         )
         memory_leak = (available_size + evictable_size) != expected_available
-        token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, {prealloc_tokens=}, {uncached_size=}\n"
+        token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
         return memory_leak, token_msg
 
     def _get_batch_uncached_size(self: Scheduler, batch: ScheduleBatch) -> int:
