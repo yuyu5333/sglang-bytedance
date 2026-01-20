@@ -13,6 +13,7 @@ import torch
 
 from sglang.srt.mem_cache.sparsity.kernel.quest_kernels import (
     launch_compute_page_reps,
+    launch_update_last_constructed,
     launch_update_states,
 )
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
@@ -230,3 +231,43 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             else:
                 self.states.repr_constructed[success_indices] = True
                 self.states.last_constructed_page[success_indices] = num_pages[valid_mask]
+
+    def update_representations(
+        self,
+        layer_id,
+        req_pool_indices,
+        seq_lens,
+        k_buffer,
+        forward_batch,
+    ) -> torch.Tensor:
+        if not forward_batch.forward_mode.is_decode_or_idle():
+            return
+
+        start_page = self.states.last_constructed_page[req_pool_indices]
+        end_page = seq_lens // self.page_size
+        valid_mask = self.states.repr_constructed[req_pool_indices] & (
+            start_page < end_page
+        )
+
+        if not valid_mask.any():
+            return
+
+        self._compute_page_representations(
+            layer_id,
+            req_pool_indices[valid_mask],
+            seq_lens[valid_mask],
+            start_page[valid_mask],
+            end_page[valid_mask],
+            k_buffer,
+        )
+
+        if layer_id == self.end_layer - 1:
+            success_indices = req_pool_indices[valid_mask]
+            if k_buffer.is_cuda:
+                launch_update_last_constructed(
+                    success_indices.to(torch.int32),
+                    self.states.last_constructed_page,
+                    end_page[valid_mask].to(self.states.last_constructed_page.dtype),
+                )
+            else:
+                self.states.last_constructed_page[success_indices] = end_page[valid_mask]
