@@ -10,6 +10,7 @@ materializing full dot products.
 import logging
 
 import torch
+import triton
 
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
     BaseSparseAlgorithmImpl,
@@ -68,58 +69,52 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         if isinstance(start_page, int):
             start_page = torch.full_like(end_page, start_page)
 
-        device = k_buffer.device
-        req_to_token = self.req_to_token_pool.req_to_token
         n = reqs.shape[0]
         max_pages = int((end_page - start_page).max().item())
         if max_pages <= 0:
             return
 
-        pg_off = torch.arange(max_pages, device=device).unsqueeze(0)
-        pg_id = start_page.unsqueeze(1) + pg_off
-        pg_mask = pg_id < end_page.unsqueeze(1)
+        req_to_token = self.req_to_token_pool.req_to_token
+        head_num = k_buffer.shape[1]
+        head_dim = k_buffer.shape[2]
 
-        tok_start = pg_id * self.page_size
-        tok_off = torch.arange(self.page_size, device=device).view(1, 1, -1)
-        tok_pos = tok_start.unsqueeze(2) + tok_off
-        tok_mask = (
-            tok_pos
-            < (tok_start + self.page_size).clamp(max=seq_lens.unsqueeze(1)).unsqueeze(2)
-        ) & pg_mask.unsqueeze(2)
+        BLOCK_DIM = triton.next_power_of_2(head_dim)
 
-        phys_tok = req_to_token[
-            reqs.view(n, 1, 1).expand(n, max_pages, self.page_size),
-            tok_pos.clamp(0, req_to_token.shape[1] - 1),
-        ].clamp(0, k_buffer.shape[0] - 1)
+        page_k_min = self.page_k_min[layer_id]
+        page_k_max = self.page_k_max[layer_id]
+        page_valid = self.page_valid[layer_id]
 
-        keys = k_buffer[phys_tok].to(torch.float32)
-        mask = tok_mask.unsqueeze(-1).unsqueeze(-1)
+        grid = (n, max_pages, head_num)
 
-        page_min = torch.where(mask, keys, torch.full_like(keys, float("inf"))).amin(
-            dim=2
+        quest_page_rep_kernel[grid](
+            page_k_min,
+            page_k_max,
+            page_valid,
+            reqs,
+            seq_lens,
+            start_page,
+            end_page,
+            req_to_token,
+            k_buffer,
+            # Strides
+            req_to_token.stride(0),
+            req_to_token.stride(1),
+            k_buffer.stride(0),
+            k_buffer.stride(1),
+            k_buffer.stride(2),
+            page_k_min.stride(0),
+            page_k_min.stride(1),
+            page_k_min.stride(2),
+            # Shapes
+            req_to_token.shape[1],
+            k_buffer.shape[0],
+            # Constants
+            PAGE_SIZE=self.page_size,
+            HEAD_NUM=head_num,
+            HEAD_DIM=head_dim,
+            BLOCK_DIM=BLOCK_DIM,
         )
-        page_max = torch.where(mask, keys, torch.full_like(keys, float("-inf"))).amax(
-            dim=2
-        )
 
-        phys_pg = (
-            req_to_token[
-                reqs.unsqueeze(1).expand(n, max_pages),
-                tok_start.clamp(0, req_to_token.shape[1] - 1),
-            ]
-            // self.page_size
-        )
-
-        idx = pg_mask.nonzero(as_tuple=False)
-        if idx.numel() == 0:
-            return
-
-        target_pages = phys_pg[idx[:, 0], idx[:, 1]].clamp(
-            0, self.page_k_min[layer_id].shape[0] - 1
-        )
-        self.page_k_min[layer_id][target_pages] = page_min[idx[:, 0], idx[:, 1]]
-        self.page_k_max[layer_id][target_pages] = page_max[idx[:, 0], idx[:, 1]]
-        self.page_valid[layer_id][target_pages] = True
         if layer_id == 0:
             logger.info(
                 f"Computed page representations for layer {layer_id}, start_page={start_page}, end_page={end_page}"
