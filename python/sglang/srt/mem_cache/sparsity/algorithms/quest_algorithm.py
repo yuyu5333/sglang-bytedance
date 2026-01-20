@@ -191,7 +191,7 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
 
         if not valid_mask.any():
             return
-        print(f"[DEBUG] [construct_representations] run _compute_page_representations")
+
         # Compute page representations by subclass
         self._compute_page_representations(
             layer_id,
