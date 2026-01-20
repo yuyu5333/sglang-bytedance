@@ -168,3 +168,38 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         )
 
         return criticality
+
+    def construct_representations(
+        self,
+        layer_id,
+        req_pool_indices,
+        seq_lens,
+        k_buffer,
+        forward_batch,
+    ) -> torch.Tensor:
+        num_pages = seq_lens // self.page_size
+        prompt_lens = self.states.prompt_lens[req_pool_indices]
+        valid_mask = (
+            ~self.states.repr_constructed[req_pool_indices]
+            & (prompt_lens >= self.states.device_buffer_cnt)
+            & (num_pages > 0)
+        )
+
+        if not valid_mask.any():
+            return
+
+        # Compute page representations by subclass
+        self._compute_page_representations(
+            layer_id,
+            req_pool_indices[valid_mask],
+            seq_lens[valid_mask],
+            0,
+            num_pages[valid_mask],
+            k_buffer,
+        )
+
+        # Update tracking states
+        if layer_id == self.end_layer - 1:
+            success_indices = req_pool_indices[valid_mask]
+            self.states.repr_constructed[success_indices] = True
+            self.states.last_constructed_page[success_indices] = num_pages[valid_mask]
