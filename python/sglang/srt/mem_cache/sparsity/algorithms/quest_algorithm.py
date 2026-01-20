@@ -17,6 +17,7 @@ from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
 from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import (
     quest_page_rep_kernel,
     quest_retrieval_score_kernel,
+    quest_combine_indices_kernel,
 )
 
 logger = logging.getLogger(__name__)
@@ -282,25 +283,17 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         
         grid = (bs, max_pages)
         
-        # Align query
-        # Queries: [bs, num_heads, head_dim] -> Kernel expects [bs, num_heads, head_dim]
-        # But we need to check if query heads match KV heads (GQA/MQA)
-        # Quest logic in _retrieve_page_scores handles GQA by averaging.
-        # We need to replicate that logic here or inside kernel.
-        # Kernel assumes HEAD_NUM matches.
-        
         q_heads = queries.shape[1]
         kv_heads = head_num
         
-        q = queries
+        GROUP_SIZE = 1
         if q_heads != kv_heads:
              if q_heads % kv_heads != 0:
                  raise ValueError(f"Query heads {q_heads} not divisible by KV heads {kv_heads}")
-             group = q_heads // kv_heads
-             q = q.view(bs, kv_heads, group, head_dim).mean(dim=2)
+             GROUP_SIZE = q_heads // kv_heads
         
         # Ensure q is contiguous for Triton
-        q = q.contiguous()
+        q = queries.contiguous()
         
         quest_retrieval_score_kernel[grid](
             scores,
@@ -324,40 +317,19 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             # Shapes
             req_to_token.shape[1],
             page_k_min.shape[0],
+            self.num_recent_pages,
             # Constants
             PAGE_SIZE=self.page_size,
             HEAD_NUM=head_num,
             HEAD_DIM=head_dim,
             BLOCK_DIM=BLOCK_DIM,
+            GROUP_SIZE=GROUP_SIZE,
         )
         
-        # Vectorized TopK selection
+        # Determine K per request
+        recent_start = (num_pages - self.num_recent_pages).clamp(min=0)
+        history_pages = recent_start.clamp(min=1)
         
-        # 1. Mask recent pages
-        # Create a mask of shape [bs, max_pages]
-        page_indices = torch.arange(max_pages, device=device).unsqueeze(0) # [1, max_pages]
-        
-        # Recent pages: [num_pages - num_recent, num_pages)
-        recent_start = (num_pages - self.num_recent_pages).clamp(min=0).unsqueeze(1)
-        # is_recent = (page_indices >= recent_start) & (page_indices < num_pages.unsqueeze(1))
-        
-        # Actually, we just need to mask them out from scores so they aren't selected by topk
-        # (They are added separately)
-        # But wait, if we mask them with -inf, they won't be in topk.
-        
-        is_recent_mask = (page_indices >= recent_start) & (page_indices < num_pages.unsqueeze(1))
-        scores.masked_fill_(is_recent_mask, float("-inf"))
-        
-        # Also mask invalid pages (already done in kernel, but safe to double check)
-        is_invalid = page_indices >= num_pages.unsqueeze(1)
-        scores.masked_fill_(is_invalid, float("-inf"))
-        
-        # 2. Select TopK
-        # k can vary per request? BaseAlgorithm allows variable k based on sparsity_ratio.
-        # Vectorized topk requires fixed k or max k.
-        # We can use max k and then mask.
-        
-        history_pages = (recent_start.squeeze(1)).clamp(min=1)
         if self.fixed_topk_page_cnt is not None:
              k_target = max(self.fixed_topk_page_cnt - self.num_recent_pages, 1)
              k_per_req = torch.full((bs,), k_target, device=device)
@@ -365,61 +337,53 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
              k_per_req = (history_pages * self.sparsity_ratio).long().clamp(min=1)
              
         k_per_req = torch.min(k_per_req, history_pages.long())
+        
+        # Apply sparse mask (if not sparse, we select 0 pages? or all? BaseAlgorithm logic says empty)
+        # But we need to handle sparse_mask in combine kernel or here.
+        # If sparse_mask is false, k=0?
+        # In original code: if not sparse_mask[i]: continue (so empty list).
+        k_per_req = k_per_req * sparse_mask.long()
+        
         max_k = int(k_per_req.max().item())
         
-        # Perform TopK with max_k
-        topk_vals, topk_indices = torch.topk(scores, k=min(max_k, max_pages), dim=1, sorted=False)
+        if max_k > 0:
+            # Perform TopK with max_k
+            # scores already has -inf for recent/invalid pages from kernel
+            topk_vals, topk_indices = torch.topk(scores, k=min(max_k, max_pages), dim=1, sorted=False)
+        else:
+            topk_indices = torch.empty((bs, 0), dtype=torch.int64, device=device)
         
-        # 3. Combine with recent pages
-        # This is tricky to do fully vectorized because output size varies significantly.
-        # However, we can construct the result tensor.
+        # Combine and Sort using Kernel
         
-        # Output is [bs, max_selected]
-        # max_selected approx max_k + num_recent
-        
-        # Let's collect indices.
-        # We can use a loop for the final combination as it's just index manipulation, 
-        # but heavy lifting (scoring/sorting) is done.
-        # Or we can try to vectorize.
-        
-        # Vectorized combination:
-        # We have topk_indices [bs, max_k]
-        # We have recent indices. Recent indices are contiguous range [recent_start, num_pages).
-        
-        # Creating a tensor of recent indices is hard because lengths vary.
-        # But we can iterate and fill.
-        
-        out_indices = torch.full((bs, max_k + self.num_recent_pages), -1, dtype=torch.int32, device=device)
+        max_out = max_k + self.num_recent_pages
+        # Initialize with INT_MAX so sort pushes padding to end
+        out_indices = torch.full((bs, max_out), 2147483647, dtype=torch.int32, device=device)
         out_lengths = torch.zeros(bs, dtype=torch.int32, device=device)
         
-        # To avoid loop, we can mask topk_indices where index >= k_per_req
+        combine_grid = (bs,)
+        combine_block_size = 128
         
-        k_mask = torch.arange(max_k, device=device).unsqueeze(0) < k_per_req.unsqueeze(1)
-        # We need to compact this...
+        quest_combine_indices_kernel[combine_grid](
+            topk_indices,
+            out_indices,
+            out_lengths,
+            seq_lens,
+            k_per_req,
+            # Strides
+            topk_indices.stride(0) if topk_indices.numel() > 0 else 0,
+            out_indices.stride(0),
+            # Constants
+            self.num_recent_pages,
+            self.page_size,
+            topk_indices.shape[1] if topk_indices.numel() > 0 else 0,
+            BLOCK_SIZE=combine_block_size
+        )
         
-        # Given the complexity of variable-length concatenation in PyTorch, 
-        # a loop for the final step is acceptable if N is small.
-        # But let's try to be efficient.
+        # Sort indices (PyTorch sort is very fast)
+        # sort(dim=1)
+        out_indices, _ = out_indices.sort(dim=1)
         
-        for i in range(bs):
-            if not sparse_mask[i]:
-                continue
-                
-            k = k_per_req[i].item()
-            curr_topk = topk_indices[i, :k]
-            
-            # Reconstruct recent indices
-            curr_num = num_pages[i].item()
-            curr_recent_start = recent_start[i].item()
-            curr_recent = torch.arange(curr_recent_start, curr_num, device=device)
-            
-            # Combine
-            combined = torch.cat([curr_topk, curr_recent])
-            # Sort
-            combined, _ = combined.sort()
-            
-            len_combined = combined.numel()
-            out_indices[i, :len_combined] = combined
-            out_lengths[i] = len_combined
-            
+        # Replace INT_MAX with -1 for padding
+        out_indices.masked_fill_(out_indices == 2147483647, -1)
+        
         return out_indices, out_lengths
