@@ -15,7 +15,10 @@ import triton
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
     BaseSparseAlgorithmImpl,
 )
-from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import quest_page_rep_kernel
+from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import (
+    quest_page_rep_kernel,
+    quest_retrieval_score_kernel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +226,6 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         if not valid_mask.any():
             return
 
-        print(f"[DEBUG] [update_representations] run _compute_page_representations")    
         # Compute page representations by subclass
         self._compute_page_representations(
             layer_id,
@@ -238,3 +240,183 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         if layer_id == self.end_layer - 1:
             success_indices = req_pool_indices[valid_mask]
             self.states.last_constructed_page[success_indices] = end_page[valid_mask]
+
+    def retrieve_topk(
+        self,
+        queries: torch.Tensor,
+        layer_id: int,
+        req_pool_indices: torch.Tensor,
+        sparse_mask: torch.Tensor,
+        **kwargs,
+    ) -> tuple:
+        bs, device = queries.shape[0], queries.device
+        
+        seq_lens_source = kwargs.get("forward_batch", None)
+        if seq_lens_source is None or not hasattr(seq_lens_source, "seq_lens"):
+            raise ValueError("forward_batch with seq_lens is required for TopK retrieval")
+        seq_lens = seq_lens_source.seq_lens.to(device)
+        
+        # Calculate dimensions
+        num_pages = (seq_lens + self.page_size - 1) // self.page_size
+        max_pages = int(num_pages.max().item())
+        
+        if max_pages == 0:
+            return (
+                torch.full((bs, 0), -1, dtype=torch.int32, device=device),
+                torch.zeros(bs, dtype=torch.int32, device=device),
+            )
+
+        # Prepare kernel arguments
+        req_to_token = self.req_to_token_pool.req_to_token
+        page_k_min = self.page_k_min[layer_id]
+        page_k_max = self.page_k_max[layer_id]
+        
+        head_num = page_k_min.shape[1]
+        head_dim = page_k_min.shape[2]
+        BLOCK_DIM = triton.next_power_of_2(head_dim)
+        
+        scores = torch.empty((bs, max_pages), dtype=torch.float32, device=device)
+        
+        grid = (bs, max_pages)
+        
+        # Align query
+        # Queries: [bs, num_heads, head_dim] -> Kernel expects [bs, num_heads, head_dim]
+        # But we need to check if query heads match KV heads (GQA/MQA)
+        # Quest logic in _retrieve_page_scores handles GQA by averaging.
+        # We need to replicate that logic here or inside kernel.
+        # Kernel assumes HEAD_NUM matches.
+        
+        q_heads = queries.shape[1]
+        kv_heads = head_num
+        
+        q = queries
+        if q_heads != kv_heads:
+             if q_heads % kv_heads != 0:
+                 raise ValueError(f"Query heads {q_heads} not divisible by KV heads {kv_heads}")
+             group = q_heads // kv_heads
+             q = q.view(bs, kv_heads, group, head_dim).mean(dim=2)
+        
+        # Ensure q is contiguous for Triton
+        q = q.contiguous()
+        
+        quest_retrieval_score_kernel[grid](
+            scores,
+            req_pool_indices,
+            seq_lens,
+            req_to_token,
+            page_k_min,
+            page_k_max,
+            q,
+            # Strides
+            scores.stride(0),
+            scores.stride(1),
+            req_to_token.stride(0),
+            req_to_token.stride(1),
+            page_k_min.stride(0),
+            page_k_min.stride(1),
+            page_k_min.stride(2),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            # Shapes
+            req_to_token.shape[1],
+            page_k_min.shape[0],
+            # Constants
+            PAGE_SIZE=self.page_size,
+            HEAD_NUM=head_num,
+            HEAD_DIM=head_dim,
+            BLOCK_DIM=BLOCK_DIM,
+        )
+        
+        # Vectorized TopK selection
+        
+        # 1. Mask recent pages
+        # Create a mask of shape [bs, max_pages]
+        page_indices = torch.arange(max_pages, device=device).unsqueeze(0) # [1, max_pages]
+        
+        # Recent pages: [num_pages - num_recent, num_pages)
+        recent_start = (num_pages - self.num_recent_pages).clamp(min=0).unsqueeze(1)
+        # is_recent = (page_indices >= recent_start) & (page_indices < num_pages.unsqueeze(1))
+        
+        # Actually, we just need to mask them out from scores so they aren't selected by topk
+        # (They are added separately)
+        # But wait, if we mask them with -inf, they won't be in topk.
+        
+        is_recent_mask = (page_indices >= recent_start) & (page_indices < num_pages.unsqueeze(1))
+        scores.masked_fill_(is_recent_mask, float("-inf"))
+        
+        # Also mask invalid pages (already done in kernel, but safe to double check)
+        is_invalid = page_indices >= num_pages.unsqueeze(1)
+        scores.masked_fill_(is_invalid, float("-inf"))
+        
+        # 2. Select TopK
+        # k can vary per request? BaseAlgorithm allows variable k based on sparsity_ratio.
+        # Vectorized topk requires fixed k or max k.
+        # We can use max k and then mask.
+        
+        history_pages = (recent_start.squeeze(1)).clamp(min=1)
+        if self.fixed_topk_page_cnt is not None:
+             k_target = max(self.fixed_topk_page_cnt - self.num_recent_pages, 1)
+             k_per_req = torch.full((bs,), k_target, device=device)
+        else:
+             k_per_req = (history_pages * self.sparsity_ratio).long().clamp(min=1)
+             
+        k_per_req = torch.min(k_per_req, history_pages.long())
+        max_k = int(k_per_req.max().item())
+        
+        # Perform TopK with max_k
+        topk_vals, topk_indices = torch.topk(scores, k=min(max_k, max_pages), dim=1, sorted=False)
+        
+        # 3. Combine with recent pages
+        # This is tricky to do fully vectorized because output size varies significantly.
+        # However, we can construct the result tensor.
+        
+        # Output is [bs, max_selected]
+        # max_selected approx max_k + num_recent
+        
+        # Let's collect indices.
+        # We can use a loop for the final combination as it's just index manipulation, 
+        # but heavy lifting (scoring/sorting) is done.
+        # Or we can try to vectorize.
+        
+        # Vectorized combination:
+        # We have topk_indices [bs, max_k]
+        # We have recent indices. Recent indices are contiguous range [recent_start, num_pages).
+        
+        # Creating a tensor of recent indices is hard because lengths vary.
+        # But we can iterate and fill.
+        
+        out_indices = torch.full((bs, max_k + self.num_recent_pages), -1, dtype=torch.int32, device=device)
+        out_lengths = torch.zeros(bs, dtype=torch.int32, device=device)
+        
+        # To avoid loop, we can mask topk_indices where index >= k_per_req
+        
+        k_mask = torch.arange(max_k, device=device).unsqueeze(0) < k_per_req.unsqueeze(1)
+        # We need to compact this...
+        
+        # Given the complexity of variable-length concatenation in PyTorch, 
+        # a loop for the final step is acceptable if N is small.
+        # But let's try to be efficient.
+        
+        for i in range(bs):
+            if not sparse_mask[i]:
+                continue
+                
+            k = k_per_req[i].item()
+            curr_topk = topk_indices[i, :k]
+            
+            # Reconstruct recent indices
+            curr_num = num_pages[i].item()
+            curr_recent_start = recent_start[i].item()
+            curr_recent = torch.arange(curr_recent_start, curr_num, device=device)
+            
+            # Combine
+            combined = torch.cat([curr_topk, curr_recent])
+            # Sort
+            combined, _ = combined.sort()
+            
+            len_combined = combined.numel()
+            out_indices[i, :len_combined] = combined
+            out_lengths[i] = len_combined
+            
+        return out_indices, out_lengths

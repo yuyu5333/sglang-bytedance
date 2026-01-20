@@ -59,11 +59,6 @@ def quest_page_rep_kernel(
     first_phys_tok = tl.load(req_to_token_ptr + offset_req_tok)
     phys_page_idx = first_phys_tok // PAGE_SIZE
     
-    # Check if phys_page_idx is valid? 
-    # Python code: target_pages = phys_pg[...].clamp(0, self.page_k_min[layer_id].shape[0] - 1)
-    # We assume output buffer is large enough or we should clamp output index too.
-    # But usually physical page index is within bounds of the allocated pool.
-    
     dim_offsets = tl.arange(0, BLOCK_DIM)
     dim_mask = dim_offsets < HEAD_DIM
     
@@ -74,10 +69,6 @@ def quest_page_rep_kernel(
     # Loop over tokens in the page
     for i in range(PAGE_SIZE):
         log_tok_idx = logical_token_start + i
-        
-        # Mask calculation from Python:
-        # tok_pos < (tok_start + self.page_size).clamp(max=seq_lens.unsqueeze(1))...
-        # Basically if log_tok_idx < seq_len
         
         if log_tok_idx < seq_len:
             # Clamp log_tok_idx for req_to_token lookup
@@ -109,3 +100,88 @@ def quest_page_rep_kernel(
     if head_idx == 0:
         tl.store(page_valid_ptr + phys_page_idx, 1)
 
+@triton.jit
+def quest_retrieval_score_kernel(
+    scores_ptr,
+    reqs_ptr,
+    seq_lens_ptr,
+    req_to_token_ptr,
+    page_k_min_ptr,
+    page_k_max_ptr,
+    queries_ptr,
+    # Strides
+    scores_stride_req,
+    scores_stride_page,
+    req_to_token_stride_req,
+    req_to_token_stride_token,
+    page_k_stride_page,
+    page_k_stride_head,
+    page_k_stride_dim,
+    queries_stride_req,
+    queries_stride_head,
+    queries_stride_dim,
+    # Shapes
+    req_to_token_num_tokens,
+    page_k_num_pages,
+    # Constants
+    PAGE_SIZE: tl.constexpr,
+    HEAD_NUM: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_DIM: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    page_idx = tl.program_id(1)
+
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    num_pages = (seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+
+    if page_idx >= num_pages:
+        # Write -inf for invalid pages
+        offset = req_idx * scores_stride_req + page_idx * scores_stride_page
+        tl.store(scores_ptr + offset, float("-inf"))
+        return
+
+    req_id = tl.load(reqs_ptr + req_idx)
+
+    # Get physical page index
+    # We need the first token of the page
+    log_tok_idx = page_idx * PAGE_SIZE
+    # Clamp for safety
+    safe_log_tok_idx = tl.minimum(log_tok_idx, req_to_token_num_tokens - 1)
+    
+    offset_req_tok = req_id * req_to_token_stride_req + safe_log_tok_idx * req_to_token_stride_token
+    phys_tok = tl.load(req_to_token_ptr + offset_req_tok)
+    phys_page_idx = phys_tok // PAGE_SIZE
+    
+    # Clamp physical page index
+    phys_page_idx = tl.minimum(phys_page_idx, page_k_num_pages - 1)
+    phys_page_idx = tl.maximum(phys_page_idx, 0)
+
+    # Compute score: sum(where(q>=0, q*k_max, q*k_min))
+    
+    acc = 0.0
+    
+    dim_offsets = tl.arange(0, BLOCK_DIM)
+    dim_mask = dim_offsets < HEAD_DIM
+    
+    for h in range(HEAD_NUM):
+        # Load Query
+        q_off = req_idx * queries_stride_req + h * queries_stride_head + dim_offsets * queries_stride_dim
+        q = tl.load(queries_ptr + q_off, mask=dim_mask, other=0.0).to(tl.float32)
+        
+        # Load K Min/Max
+        k_base = phys_page_idx * page_k_stride_page + h * page_k_stride_head
+        k_off = k_base + dim_offsets * page_k_stride_dim
+        
+        k_min = tl.load(page_k_min_ptr + k_off, mask=dim_mask, other=0.0).to(tl.float32)
+        k_max = tl.load(page_k_max_ptr + k_off, mask=dim_mask, other=0.0).to(tl.float32)
+        
+        # Compute term
+        # criticality = torch.where(q >= 0, q * k_max, q * k_min)
+        term = tl.where(q >= 0, q * k_max, q * k_min)
+        
+        acc += tl.sum(term)
+        
+    # Store score
+    offset = req_idx * scores_stride_req + page_idx * scores_stride_page
+    tl.store(scores_ptr + offset, acc)
