@@ -146,8 +146,7 @@ def quest_retrieval_score_kernel(
     # Mask recent pages
     # recent_start = max(num_pages - num_recent_pages, 0)
     recent_start = num_pages - num_recent_pages
-    if recent_start < 0:
-        recent_start = 0
+    recent_start = tl.maximum(recent_start, 0)
         
     if page_idx >= recent_start:
         offset = req_idx * scores_stride_req + page_idx * scores_stride_page
@@ -243,8 +242,7 @@ def quest_combine_indices_kernel(
     # 2. Generate Recent indices
     # range [recent_start, num_pages)
     recent_start = num_pages - num_recent_pages
-    if recent_start < 0:
-        recent_start = 0
+    recent_start = tl.maximum(recent_start, 0)
     
     num_recent = num_pages - recent_start
     
