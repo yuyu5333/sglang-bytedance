@@ -53,9 +53,7 @@ def quest_page_rep_kernel(
     # Clamp logical_token_start to be safe for req_to_token lookup
     # logic from python: tok_start.clamp(0, req_to_token.shape[1] - 1)
     
-    safe_log_tok_start = logical_token_start
-    if safe_log_tok_start >= req_to_token_num_tokens:
-        safe_log_tok_start = req_to_token_num_tokens - 1
+    safe_log_tok_start = tl.minimum(logical_token_start, req_to_token_num_tokens - 1)
         
     offset_req_tok = req_id * req_to_token_stride_req + safe_log_tok_start * req_to_token_stride_token
     first_phys_tok = tl.load(req_to_token_ptr + offset_req_tok)
@@ -83,18 +81,14 @@ def quest_page_rep_kernel(
         
         if log_tok_idx < seq_len:
             # Clamp log_tok_idx for req_to_token lookup
-            safe_log_tok_idx = log_tok_idx
-            if safe_log_tok_idx >= req_to_token_num_tokens:
-                safe_log_tok_idx = req_to_token_num_tokens - 1
+            safe_log_tok_idx = tl.minimum(log_tok_idx, req_to_token_num_tokens - 1)
             
             offset_rt = req_id * req_to_token_stride_req + safe_log_tok_idx * req_to_token_stride_token
             phys_tok = tl.load(req_to_token_ptr + offset_rt)
             
             # Clamp phys_tok for k_buffer lookup
-            if phys_tok >= k_buffer_num_tokens:
-                phys_tok = k_buffer_num_tokens - 1
-            if phys_tok < 0:
-                phys_tok = 0 # Should not happen but clamp(0, ...)
+            phys_tok = tl.minimum(phys_tok, k_buffer_num_tokens - 1)
+            phys_tok = tl.maximum(phys_tok, 0)
             
             # Load key vector
             k_ptr_base = phys_tok * k_buffer_stride_token + head_idx * k_buffer_stride_head
