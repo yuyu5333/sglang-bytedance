@@ -16,8 +16,7 @@ from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
 )
 from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import (
     quest_page_rep_kernel,
-    quest_retrieval_score_kernel,
-    quest_combine_indices_kernel,
+    quest_retrieval_score_and_combine_indices_triton
 )
 
 logger = logging.getLogger(__name__)
@@ -260,142 +259,18 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             raise ValueError("forward_batch with seq_lens is required for TopK retrieval")
         seq_lens = seq_lens_source.seq_lens.to(device)
         
-        # Calculate dimensions
-        num_pages = (seq_lens + self.page_size - 1) // self.page_size
-        max_pages = int(num_pages.max().item())
-        
-        if max_pages == 0:
-            return (
-                torch.full((bs, 0), -1, dtype=torch.int32, device=device),
-                torch.zeros(bs, dtype=torch.int32, device=device),
-            )
-
-        # Prepare kernel arguments
-        req_to_token = self.req_to_token_pool.req_to_token
-        page_k_min = self.page_k_min[layer_id]
-        page_k_max = self.page_k_max[layer_id]
-        
-        head_num = page_k_min.shape[1]
-        head_dim = page_k_min.shape[2]
-        BLOCK_DIM = triton.next_power_of_2(head_dim)
-        
-        scores = torch.empty((bs, max_pages), dtype=torch.float32, device=device)
-        
-        grid = (bs, max_pages)
-
-        # Handle 2D queries [bs, hidden_dim]
-        if queries.dim() == 2:
-            bs_q, hidden = queries.shape
-            if hidden % head_dim != 0:
-                 raise ValueError(f"Quest query hidden size {hidden} not divisible by head_dim {head_dim}")
-            q_heads = hidden // head_dim
-            q = queries.view(bs_q, q_heads, head_dim)
-        elif queries.dim() == 3:
-            q = queries
-        else:
-            raise ValueError(f"Unsupported query shape for Quest: {queries.shape}")
-        
-        q_heads = q.shape[1]
-        kv_heads = head_num
-        
-        GROUP_SIZE = 1
-        if q_heads != kv_heads:
-             if q_heads % kv_heads != 0:
-                 raise ValueError(f"Query heads {q_heads} not divisible by KV heads {kv_heads}")
-             GROUP_SIZE = q_heads // kv_heads
-        
-        # Ensure q is contiguous for Triton
-        q = q.contiguous()
-        
-        quest_retrieval_score_kernel[grid](
-            scores,
-            req_pool_indices,
+        return quest_retrieval_score_and_combine_indices_triton(
+            bs,
+            device,
             seq_lens,
-            req_to_token,
-            page_k_min,
-            page_k_max,
-            q,
-            # Strides
-            scores.stride(0),
-            scores.stride(1),
-            req_to_token.stride(0),
-            req_to_token.stride(1),
-            page_k_min.stride(0),
-            page_k_min.stride(1),
-            page_k_min.stride(2),
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            # Shapes
-            req_to_token.shape[1],
-            page_k_min.shape[0],
-            self.num_recent_pages,
-            # Constants
-            PAGE_SIZE=self.page_size,
-            HEAD_NUM=head_num,
-            HEAD_DIM=head_dim,
-            BLOCK_DIM=BLOCK_DIM,
-            GROUP_SIZE=GROUP_SIZE,
-        )
-        
-        # Determine K per request
-        recent_start = (num_pages - self.num_recent_pages).clamp(min=0)
-        history_pages = recent_start.clamp(min=1)
-        
-        if self.fixed_topk_page_cnt is not None:
-             k_target = max(self.fixed_topk_page_cnt - self.num_recent_pages, 1)
-             k_per_req = torch.full((bs,), k_target, device=device)
-        else:
-             k_per_req = (history_pages * self.sparsity_ratio).long().clamp(min=1)
-             
-        k_per_req = torch.min(k_per_req, history_pages.long())
-        
-        # Apply sparse mask (if not sparse, we select 0 pages? or all? BaseAlgorithm logic says empty)
-        # But we need to handle sparse_mask in combine kernel or here.
-        # If sparse_mask is false, k=0?
-        # In original code: if not sparse_mask[i]: continue (so empty list).
-        k_per_req = k_per_req * sparse_mask.long()
-        
-        max_k = int(k_per_req.max().item())
-        
-        if max_k > 0:
-            # Perform TopK with max_k
-            # scores already has -inf for recent/invalid pages from kernel
-            topk_vals, topk_indices = torch.topk(scores, k=min(max_k, max_pages), dim=1, sorted=False)
-        else:
-            topk_indices = torch.empty((bs, 0), dtype=torch.int64, device=device)
-        
-        # Combine and Sort using Kernel
-        
-        max_out = max_k + self.num_recent_pages
-        # Initialize with INT_MAX so sort pushes padding to end
-        out_indices = torch.full((bs, max_out), 2147483647, dtype=torch.int32, device=device)
-        out_lengths = torch.zeros(bs, dtype=torch.int32, device=device)
-        
-        combine_grid = (bs,)
-        combine_block_size = 128
-        
-        quest_combine_indices_kernel[combine_grid](
-            topk_indices,
-            out_indices,
-            out_lengths,
-            seq_lens,
-            k_per_req,
-            # Strides
-            topk_indices.stride(0) if topk_indices.numel() > 0 else 0,
-            out_indices.stride(0),
-            # Constants
-            self.num_recent_pages,
             self.page_size,
-            topk_indices.shape[1] if topk_indices.numel() > 0 else 0,
-            BLOCK_SIZE=combine_block_size
-        )
-        
-        # Sort indices (PyTorch sort is very fast)
-        # sort(dim=1)
-        out_indices, _ = out_indices.sort(dim=1)
-        
-        # Replace INT_MAX with -1 for padding
-        out_indices.masked_fill_(out_indices == 2147483647, -1)
-        
-        return out_indices, out_lengths
+            self.req_to_token_pool.req_to_token,
+            self.page_k_min[layer_id],
+            self.page_k_max[layer_id],
+            queries,
+            req_pool_indices,
+            self.num_recent_pages,
+            self.fixed_topk_page_cnt,
+            self.sparsity_ratio,
+            sparse_mask,
+            )
