@@ -279,8 +279,20 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         scores = torch.empty((bs, max_pages), dtype=torch.float32, device=device)
         
         grid = (bs, max_pages)
+
+        # Handle 2D queries [bs, hidden_dim]
+        if queries.dim() == 2:
+            bs_q, hidden = queries.shape
+            if hidden % head_dim != 0:
+                 raise ValueError(f"Quest query hidden size {hidden} not divisible by head_dim {head_dim}")
+            q_heads = hidden // head_dim
+            q = queries.view(bs_q, q_heads, head_dim)
+        elif queries.dim() == 3:
+            q = queries
+        else:
+            raise ValueError(f"Unsupported query shape for Quest: {queries.shape}")
         
-        q_heads = queries.shape[1]
+        q_heads = q.shape[1]
         kv_heads = head_num
         
         GROUP_SIZE = 1
@@ -290,7 +302,7 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
              GROUP_SIZE = q_heads // kv_heads
         
         # Ensure q is contiguous for Triton
-        q = queries.contiguous()
+        q = q.contiguous()
         
         quest_retrieval_score_kernel[grid](
             scores,
