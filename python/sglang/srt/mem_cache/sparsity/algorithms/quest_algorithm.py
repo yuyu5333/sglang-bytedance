@@ -11,6 +11,10 @@ import logging
 
 import torch
 
+from sglang.srt.mem_cache.sparsity.kernel.quest_kernels import (
+    launch_compute_page_reps,
+    launch_update_states,
+)
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
     BaseSparseAlgorithmImpl,
 )
@@ -63,6 +67,21 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
     ):
         if isinstance(start_page, int):
             start_page = torch.full_like(end_page, start_page)
+
+        if k_buffer.is_cuda:
+            launch_compute_page_reps(
+                k_buffer=k_buffer,
+                req_to_token=self.req_to_token_pool.req_to_token,
+                reqs=reqs.to(torch.int32),
+                seq_lens=seq_lens.to(torch.int32),
+                start_page=start_page.to(torch.int32),
+                end_page=end_page.to(torch.int32),
+                page_k_min=self.page_k_min[layer_id],
+                page_k_max=self.page_k_max[layer_id],
+                page_valid=self.page_valid[layer_id],
+                page_size=self.page_size,
+            )
+            return
 
         device = k_buffer.device
         req_to_token = self.req_to_token_pool.req_to_token
@@ -201,5 +220,13 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         # Update tracking states
         if layer_id == self.end_layer - 1:
             success_indices = req_pool_indices[valid_mask]
-            self.states.repr_constructed[success_indices] = True
-            self.states.last_constructed_page[success_indices] = num_pages[valid_mask]
+            if k_buffer.is_cuda:
+                launch_update_states(
+                    success_indices.to(torch.int32),
+                    self.states.repr_constructed,
+                    self.states.last_constructed_page,
+                    num_pages[valid_mask].to(self.states.last_constructed_page.dtype),
+                )
+            else:
+                self.states.repr_constructed[success_indices] = True
+                self.states.last_constructed_page[success_indices] = num_pages[valid_mask]
