@@ -203,3 +203,39 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             success_indices = req_pool_indices[valid_mask]
             self.states.repr_constructed[success_indices] = True
             self.states.last_constructed_page[success_indices] = num_pages[valid_mask]
+
+
+    def update_representations(
+        self,
+        layer_id,
+        req_pool_indices,
+        seq_lens,
+        k_buffer,
+        forward_batch,
+    ) -> torch.Tensor:
+        if not forward_batch.forward_mode.is_decode_or_idle():
+            return
+
+        start_page = self.states.last_constructed_page[req_pool_indices]
+        end_page = seq_lens // self.page_size
+        valid_mask = self.states.repr_constructed[req_pool_indices] & (
+            start_page < end_page
+        )
+
+        if not valid_mask.any():
+            return
+
+        # Compute page representations by subclass
+        self._compute_page_representations(
+            layer_id,
+            req_pool_indices[valid_mask],
+            seq_lens[valid_mask],
+            start_page[valid_mask],
+            end_page[valid_mask],
+            k_buffer,
+        )
+
+        # Update tracking states
+        if layer_id == self.end_layer - 1:
+            success_indices = req_pool_indices[valid_mask]
+            self.states.last_constructed_page[success_indices] = end_page[valid_mask]
