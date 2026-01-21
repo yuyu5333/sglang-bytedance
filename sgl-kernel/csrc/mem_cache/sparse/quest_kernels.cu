@@ -549,6 +549,16 @@ __global__ void quest_diff_and_update_kernel(
     }
     
     __syncthreads();
+
+    int32_t seq_len = seq_lens[req_idx_in_batch];
+    if (!sparse_mask[req_idx_in_batch] || seq_len <= 0) {
+        for (int i = tid; i < top_k * page_size; i += blockDim.x) {
+            int64_t out_idx = req_idx_in_batch * load_tokens_stride + i;
+            load_tokens[out_idx] = -1;
+            load_tokens_host[out_idx] = -1;
+        }
+        return;
+    }
     
     if (sparse_mask[req_idx_in_batch]) {
         // Intersection
@@ -599,7 +609,6 @@ __global__ void quest_diff_and_update_kernel(
         __syncthreads();
         
         // Generate Load Commands
-        int32_t seq_len = seq_lens[req_idx_in_batch];
         for (int i = tid; i < top_k * page_size; i += blockDim.x) {
             int page_idx = i / page_size;
             int token_offset = i % page_size;
