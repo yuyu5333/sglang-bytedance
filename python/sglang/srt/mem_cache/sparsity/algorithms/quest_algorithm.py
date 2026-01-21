@@ -20,6 +20,8 @@ from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import (
     quest_retrieval_score_and_combine_indices_triton
 )
 
+from sgl_kernel import quest_retrieval_score_and_combine_indices
+
 logger = logging.getLogger(__name__)
 
 
@@ -254,18 +256,77 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             raise ValueError("forward_batch with seq_lens is required for TopK retrieval")
         seq_lens = seq_lens_source.seq_lens.to(device)
         
-        return quest_retrieval_score_and_combine_indices_triton(
+        # Calculate max_out roughly
+        max_seq_len = torch.max(seq_lens).item()
+        max_pages = (max_seq_len + self.page_size - 1) // self.page_size
+        
+        k_val = 0
+        if self.fixed_topk_page_cnt is not None:
+            k_val = self.fixed_topk_page_cnt
+        else:
+            k_val = int(max_pages * self.sparsity_ratio) + self.num_recent_pages
+        
+        # Clamp k_val
+        if k_val > max_pages:
+            k_val = max_pages
+            
+        # Add buffer for safety and recent pages overlap
+        max_out = k_val + self.num_recent_pages + 32
+        
+        out_indices = torch.empty((bs, max_out), dtype=torch.int32, device=device)
+        out_lengths = torch.empty((bs,), dtype=torch.int32, device=device)
+        
+        """
+            bs=<class 'int'>
+            seq_lens=<class 'torch.Tensor'>
+            page_size=<class 'int'>
+            req_to_token=<class 'torch.Tensor'>
+            self.page_k_min[layer_id]=<class 'torch.Tensor'>
+            self.page_k_max[layer_id]=<class 'torch.Tensor'>
+            queries=<class 'torch.Tensor'>
+            req_pool_indices=<class 'torch.Tensor'>
+            self.num_recent_pages=<class 'int'>
+            self.fixed_topk_page_cnt=<class 'int'>
+            self.sparsity_ratio=<class 'float'>
+            sparse_mask=<class 'torch.Tensor'>
+            out_indices=<class 'torch.Tensor'>
+            out_lengths=<class 'torch.Tensor'>
+            
+            === para info ===
+            bs: Python type=<class 'int'>, value=1
+            page_size: Python type=<class 'int'>, value=64
+            num_recent_pages: Python type=<class 'int'>, value=4
+            fixed_topk_page_cnt: Python type=<class 'int'>, value=16
+            sparsity_ratio: Python type=<class 'float'>, value=0.7
+            layer_id: Python type=<class 'int'>, value=0
+
+            seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1])
+            req_to_token: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([4096, 40964])
+            page_k_min[layer_id]: Python type=<class 'torch.Tensor'>, tensor dtype=torch.float32, shape=torch.Size([6886, 8, 128])
+            page_k_max[layer_id]: Python type=<class 'torch.Tensor'>, tensor dtype=torch.float32, shape=torch.Size([6886, 8, 128])
+            queries: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bfloat16, shape=torch.Size([1, 4096])
+            req_pool_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1])
+            sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1])
+            out_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 37])
+            out_lengths: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1])
+
+        """
+
+        quest_retrieval_score_and_combine_indices(
             bs,
-            device,
-            seq_lens,
+            seq_lens.to(torch.int32),
             self.page_size,
             self.req_to_token_pool.req_to_token,
-            self.page_k_min[layer_id],
-            self.page_k_max[layer_id],
+            self.page_k_min[layer_id].to(queries.dtype),
+            self.page_k_max[layer_id].to(queries.dtype),
             queries,
-            req_pool_indices,
+            req_pool_indices.to(torch.int32),
             self.num_recent_pages,
             self.fixed_topk_page_cnt,
             self.sparsity_ratio,
-            sparse_mask,
-            )
+            sparse_mask.to(torch.int32),
+            out_indices,
+            out_lengths,
+        )
+        
+        return out_indices, out_lengths
