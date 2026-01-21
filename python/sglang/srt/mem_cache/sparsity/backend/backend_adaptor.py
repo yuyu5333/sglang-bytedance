@@ -146,9 +146,9 @@ class FlashAttentionAdaptor(BackendAdaptor):
         
         quest_update_sparse_metadata(
             current_metadata.page_table[:, :max_selected],
-            physical_pages,
-            valid_lengths.to(torch.int32),
-            sparse_mask.to(torch.int32),
+            physical_pages.to(torch.int32).contiguous(),
+            valid_lengths.to(torch.int32).contiguous(),
+            sparse_mask.to(torch.int32).contiguous(),
             current_metadata.cache_seqlens_int32,
             forward_batch.seq_lens.to(torch.int32),
             self._original_metadata["cache_seqlens_int32"],

@@ -440,6 +440,21 @@ void quest_update_sparse_metadata(
     torch::Tensor original_cache_seqlens,
     int64_t page_size
 ) {
+    TORCH_CHECK(page_table.is_cuda(), "page_table must be on CUDA");
+    TORCH_CHECK(physical_pages.is_cuda(), "physical_pages must be on CUDA");
+    TORCH_CHECK(valid_lengths.is_cuda(), "valid_lengths must be on CUDA");
+    TORCH_CHECK(sparse_mask.is_cuda(), "sparse_mask must be on CUDA");
+    TORCH_CHECK(cache_seqlens.is_cuda(), "cache_seqlens must be on CUDA");
+    
+    TORCH_CHECK(page_table.scalar_type() == torch::kInt32, "page_table must be int32");
+    TORCH_CHECK(physical_pages.scalar_type() == torch::kInt32, "physical_pages must be int32");
+    TORCH_CHECK(valid_lengths.scalar_type() == torch::kInt32, "valid_lengths must be int32");
+    TORCH_CHECK(sparse_mask.scalar_type() == torch::kInt32, "sparse_mask must be int32");
+    
+    TORCH_CHECK(physical_pages.is_contiguous(), "physical_pages must be contiguous");
+    TORCH_CHECK(valid_lengths.is_contiguous(), "valid_lengths must be contiguous");
+    TORCH_CHECK(sparse_mask.is_contiguous(), "sparse_mask must be contiguous");
+
     int64_t bs = page_table.size(0);
     int64_t pt_stride = page_table.stride(0);
     int64_t max_selected = physical_pages.size(1);
