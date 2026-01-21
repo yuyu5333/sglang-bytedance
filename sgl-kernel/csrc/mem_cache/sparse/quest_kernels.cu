@@ -521,6 +521,10 @@ __global__ void quest_diff_and_update_kernel(
     int32_t* s_curr_page_ids = s_curr_top_k + top_k;
     int32_t* s_load_mask = s_curr_page_ids + top_k;
     
+    // Shared counters for parallel compaction
+    __shared__ int s_victim_count;
+    __shared__ int s_fill_count;
+
     int tid = threadIdx.x;
     int req_idx_in_batch = blockIdx.x;
     
@@ -529,6 +533,7 @@ __global__ void quest_diff_and_update_kernel(
     int req_idx = req_pool_indices[req_idx_in_batch];
     
     // Load last_top_k and last_page_ids (cast to int32 for shared mem)
+    // Coalesced read: last_top_k is [req, layer, hot_buffer_len], iterating i is contiguous
     for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
         int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
         s_last_top_k[i] = (int32_t)last_top_k[offset];
@@ -546,9 +551,12 @@ __global__ void quest_diff_and_update_kernel(
     
     if (sparse_mask[req_idx_in_batch]) {
         // Intersection
+        // This O(top_k * hot_buffer_len) loop can be optimized if needed, 
+        // but parallel atomic fill below removes the main serial bottleneck.
         for (int i = tid; i < top_k; i += blockDim.x) {
             int val = s_curr_top_k[i];
             if (val != -1) {
+                // Brute force scan is acceptable for small sizes (<=128)
                 for (int j = 0; j < hot_buffer_len; ++j) {
                     if (s_last_top_k[j] == val) {
                         s_curr_page_ids[i] = s_last_page_ids[j];
@@ -561,23 +569,33 @@ __global__ void quest_diff_and_update_kernel(
         
         __syncthreads();
         
-        // Fill Empty Slots (Thread 0)
+        // Parallel Fill Empty Slots
+        // 1. Initialize counters
         if (tid == 0) {
-            int fill_ptr = 0;
-            int avail_ptr = 0;
-            
-            while (fill_ptr < top_k) {
-                if (s_curr_page_ids[fill_ptr] == -1 && s_curr_top_k[fill_ptr] != -1) {
-                     while (avail_ptr < hot_buffer_len && s_last_page_ids[avail_ptr] == -1) {
-                         avail_ptr++;
-                     }
-                     if (avail_ptr < hot_buffer_len) {
-                         s_curr_page_ids[fill_ptr] = s_last_page_ids[avail_ptr];
-                         s_load_mask[fill_ptr] = 1; // Need load
-                         avail_ptr++;
-                     }
+            s_victim_count = 0;
+            s_fill_count = 0;
+        }
+        __syncthreads();
+
+        // 2. Collect Victims (pages in history that were NOT reused)
+        // We reuse s_last_top_k as the victim buffer since it's no longer needed for intersection
+        for (int j = tid; j < hot_buffer_len; j += blockDim.x) {
+            if (s_last_page_ids[j] != -1) {
+                int idx = atomicAdd(&s_victim_count, 1);
+                s_last_top_k[idx] = s_last_page_ids[j];
+            }
+        }
+        
+        __syncthreads();
+
+        // 3. Assign Slots
+        for (int i = tid; i < top_k; i += blockDim.x) {
+            if (s_curr_page_ids[i] == -1 && s_curr_top_k[i] != -1) {
+                int idx = atomicAdd(&s_fill_count, 1);
+                if (idx < s_victim_count) {
+                    s_curr_page_ids[i] = s_last_top_k[idx];
+                    s_load_mask[i] = 1; // Need load
                 }
-                fill_ptr++;
             }
         }
         
