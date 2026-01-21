@@ -10,7 +10,8 @@ from sglang.srt.mem_cache.sparsity.kernel.flashattn_metadata_kernels import (
     compute_sparse_seqlens_triton,
 )
 
-from sgl_kernel import quest_update_sparse_metadata
+from sgl_kernel import quest_diff_and_update_sparse_metadata
+
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -128,32 +129,43 @@ class FlashAttentionAdaptor(BackendAdaptor):
         if not sparse_mask.any():
             return current_metadata
 
-        max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
-        page_table = self.req_to_token_pool.req_to_token[
-            forward_batch.req_pool_indices, :max_seqlen_k
-        ]
-        physical_pages = self.sparse_kv_cache_manager.swap_in_selected_pages(
-            req_pool_indices=forward_batch.req_pool_indices,
-            top_k_result=selected_indices,
-            seq_lens=forward_batch.seq_lens,
-            sparse_mask=sparse_mask,
-            page_table=page_table,
-            layer_id=layer_id,
-            page_size=page_size,
-            out_cache_loc=forward_batch.out_cache_loc,
-        )
-        max_selected = physical_pages.shape[1]
+        req_states = self.sparse_kv_cache_manager.req_states
+        batch_size = sparse_mask.shape[0]
         
-        quest_update_sparse_metadata(
-            current_metadata.page_table[:, :max_selected],
-            physical_pages.to(torch.int32).contiguous(),
+        quest_diff_and_update_sparse_metadata(
+            current_metadata.page_table,
+            req_states.last_top_k_result,
+            req_states.last_device_indices,
+            selected_indices,
+            forward_batch.req_pool_indices,
+            forward_batch.seq_lens.to(torch.int32),
             valid_lengths.to(torch.int32).contiguous(),
             sparse_mask.to(torch.int32).contiguous(),
+            req_states.req_to_tokens_host.to(torch.int32),
+            req_states.should_load_device_indices,
+            req_states.should_load_host_indices,
             current_metadata.cache_seqlens_int32,
-            forward_batch.seq_lens.to(torch.int32),
             self._original_metadata["cache_seqlens_int32"],
+            layer_id,
             page_size
         )
+
+        # Data Loading
+        topk_tokens_cnt = req_states.topk_tokens_cnt
+        swap_target_device_slots = req_states.should_load_device_indices[:batch_size, :topk_tokens_cnt]
+        swap_source_host_slots = req_states.should_load_host_indices[:batch_size, :topk_tokens_cnt]
+        
+        target_valid = swap_target_device_slots[swap_target_device_slots != -1]
+        source_valid = swap_source_host_slots[swap_source_host_slots != -1]
+        
+        if target_valid.numel() > 0:
+             self.sparse_kv_cache_manager.mem_pool_host.load_to_device_per_layer(
+                self.sparse_kv_cache_manager.mem_pool_device,
+                source_valid.flatten(),
+                target_valid.flatten(),
+                layer_id,
+                "kernel"
+             )
 
         current_metadata.cu_seqlens_k = torch.nn.functional.pad(
             torch.cumsum(

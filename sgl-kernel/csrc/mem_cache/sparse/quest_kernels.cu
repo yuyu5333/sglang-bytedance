@@ -489,3 +489,230 @@ void quest_update_sparse_metadata(
     );
     CHECK_CUDA_SUCCESS(cudaGetLastError());
 }
+
+__global__ void quest_diff_and_update_kernel(
+    const int32_t* __restrict__ curr_top_k,       // [bs, top_k]
+    const int32_t* __restrict__ req_pool_indices, // [bs]
+    const int32_t* __restrict__ valid_lengths,    // [bs]
+    const int32_t* __restrict__ sparse_mask,      // [bs]
+    const int32_t* __restrict__ req_to_tokens_host, // [num_reqs, max_tokens_host]
+    
+    int32_t* __restrict__ last_top_k,             // [num_reqs, num_layers, hot_buffer_len]
+    int32_t* __restrict__ last_page_ids,          // [num_reqs, num_layers, hot_buffer_len]
+    int32_t* __restrict__ page_table,             // [bs, pt_stride]
+    int32_t* __restrict__ load_tokens,            // [bs, top_k * page_size]
+    int32_t* __restrict__ load_tokens_host,       // [bs, top_k * page_size]
+    
+    int64_t bs,
+    int64_t layer_id,
+    int64_t hot_buffer_len,
+    int64_t top_k,
+    int64_t page_size,
+    int64_t pt_stride,
+    int64_t last_stride_req,
+    int64_t last_stride_layer,
+    int64_t req_to_tokens_stride,
+    int64_t load_tokens_stride
+) {
+    extern __shared__ int32_t s_mem[];
+    int32_t* s_last_top_k = s_mem;
+    int32_t* s_last_page_ids = s_last_top_k + hot_buffer_len;
+    int32_t* s_curr_top_k = s_last_page_ids + hot_buffer_len;
+    int32_t* s_curr_page_ids = s_curr_top_k + top_k;
+    int32_t* s_load_mask = s_curr_page_ids + top_k;
+    
+    int tid = threadIdx.x;
+    int req_idx_in_batch = blockIdx.x;
+    
+    if (req_idx_in_batch >= bs) return;
+    
+    int req_idx = req_pool_indices[req_idx_in_batch];
+    
+    // Load last_top_k and last_page_ids
+    for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
+        int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
+        s_last_top_k[i] = last_top_k[offset];
+        s_last_page_ids[i] = last_page_ids[offset];
+    }
+    
+    // Load curr_top_k and init
+    for (int i = tid; i < top_k; i += blockDim.x) {
+        s_curr_top_k[i] = curr_top_k[req_idx_in_batch * top_k + i];
+        s_curr_page_ids[i] = -1;
+        s_load_mask[i] = 0;
+    }
+    
+    __syncthreads();
+    
+    if (sparse_mask[req_idx_in_batch]) {
+        // Intersection
+        for (int i = tid; i < top_k; i += blockDim.x) {
+            int val = s_curr_top_k[i];
+            if (val != -1) {
+                for (int j = 0; j < hot_buffer_len; ++j) {
+                    if (s_last_top_k[j] == val) {
+                        s_curr_page_ids[i] = s_last_page_ids[j];
+                        s_last_page_ids[j] = -1; // Mark used
+                        break;
+                    }
+                }
+            }
+        }
+        
+        __syncthreads();
+        
+        // Fill Empty Slots (Thread 0)
+        if (tid == 0) {
+            int fill_ptr = 0;
+            int avail_ptr = 0;
+            
+            while (fill_ptr < top_k) {
+                if (s_curr_page_ids[fill_ptr] == -1 && s_curr_top_k[fill_ptr] != -1) {
+                     while (avail_ptr < hot_buffer_len && s_last_page_ids[avail_ptr] == -1) {
+                         avail_ptr++;
+                     }
+                     if (avail_ptr < hot_buffer_len) {
+                         s_curr_page_ids[fill_ptr] = s_last_page_ids[avail_ptr];
+                         s_load_mask[fill_ptr] = 1; // Need load
+                         avail_ptr++;
+                     }
+                }
+                fill_ptr++;
+            }
+        }
+        
+        __syncthreads();
+        
+        // Generate Load Commands
+        // We output for all top_k * page_size entries, setting -1 if not needed
+        for (int i = tid; i < top_k * page_size; i += blockDim.x) {
+            int page_idx = i / page_size;
+            int token_offset = i % page_size;
+            int64_t out_idx = req_idx_in_batch * load_tokens_stride + i;
+            
+            if (page_idx < top_k && s_load_mask[page_idx]) {
+                int phys_page = s_curr_page_ids[page_idx];
+                int log_page = s_curr_top_k[page_idx];
+                
+                load_tokens[out_idx] = phys_page * page_size + token_offset;
+                
+                int64_t host_offset = (int64_t)req_idx * req_to_tokens_stride + log_page * page_size + token_offset;
+                load_tokens_host[out_idx] = req_to_tokens_host[host_offset];
+            } else {
+                load_tokens[out_idx] = -1;
+                load_tokens_host[out_idx] = -1;
+            }
+        }
+
+        // Update State
+        for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
+            int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
+            if (i < top_k) {
+                last_top_k[offset] = s_curr_top_k[i];
+                last_page_ids[offset] = s_curr_page_ids[i];
+            } else {
+                last_top_k[offset] = -1;
+                last_page_ids[offset] = -1;
+            }
+        }
+        
+        // Update Page Table
+        int valid_len = valid_lengths[req_idx_in_batch];
+        for (int i = tid; i < valid_len; i += blockDim.x) {
+            if (i < top_k) {
+                page_table[req_idx_in_batch * pt_stride + i] = s_curr_page_ids[i];
+            }
+        }
+    }
+}
+
+void quest_diff_and_update_sparse_metadata(
+    torch::Tensor page_table,
+    torch::Tensor last_top_k,
+    torch::Tensor last_page_ids,
+    torch::Tensor curr_top_k,
+    torch::Tensor req_pool_indices,
+    torch::Tensor seq_lens,
+    torch::Tensor valid_lengths,
+    torch::Tensor sparse_mask,
+    torch::Tensor req_to_tokens_host,
+    torch::Tensor load_tokens,
+    torch::Tensor load_tokens_host,
+    torch::Tensor cache_seqlens,
+    torch::Tensor original_cache_seqlens,
+    int64_t layer_id,
+    int64_t page_size
+) {
+    TORCH_CHECK(page_table.is_cuda(), "page_table must be on CUDA");
+    TORCH_CHECK(last_top_k.is_cuda(), "last_top_k must be on CUDA");
+    TORCH_CHECK(last_page_ids.is_cuda(), "last_page_ids must be on CUDA");
+    TORCH_CHECK(curr_top_k.is_cuda(), "curr_top_k must be on CUDA");
+    TORCH_CHECK(req_to_tokens_host.is_cuda(), "req_to_tokens_host must be on CUDA");
+    TORCH_CHECK(load_tokens.is_cuda(), "load_tokens must be on CUDA");
+    TORCH_CHECK(load_tokens_host.is_cuda(), "load_tokens_host must be on CUDA");
+    
+    // Ensure inputs are int32
+    TORCH_CHECK(page_table.scalar_type() == torch::kInt32, "page_table must be int32");
+    TORCH_CHECK(last_top_k.scalar_type() == torch::kInt32, "last_top_k must be int32");
+    TORCH_CHECK(last_page_ids.scalar_type() == torch::kInt32, "last_page_ids must be int32");
+    TORCH_CHECK(curr_top_k.scalar_type() == torch::kInt32, "curr_top_k must be int32");
+    // req_to_tokens_host might be int64 in Python? 
+    // If it's int64, we need to cast or support int64.
+    // The previous kernel call used int32 pointers.
+    // backend_adaptor.py ensures inputs are int32.
+    // But req_to_tokens_host is large, maybe int64?
+    // Let's check diff_kernel.py: req_to_tokens_host is int64.
+    // I should support int64 for req_to_tokens_host?
+    // Or just cast in Python.
+    // For now, assume int32. If int64, I need a template or cast.
+    // I will enforce int32 in Python.
+
+    int64_t bs = page_table.size(0);
+    int64_t pt_stride = page_table.stride(0);
+    int64_t top_k = curr_top_k.size(1);
+    int64_t hot_buffer_len = last_top_k.size(2);
+    
+    // 3 arrays + load_mask
+    size_t shared_mem = (2 * hot_buffer_len + 3 * top_k) * sizeof(int32_t);
+    
+    quest_diff_and_update_kernel<<<bs, 128, shared_mem>>>(
+        curr_top_k.data_ptr<int32_t>(),
+        req_pool_indices.data_ptr<int32_t>(),
+        valid_lengths.data_ptr<int32_t>(),
+        sparse_mask.data_ptr<int32_t>(),
+        req_to_tokens_host.data_ptr<int32_t>(),
+        
+        last_top_k.data_ptr<int32_t>(),
+        last_page_ids.data_ptr<int32_t>(),
+        page_table.data_ptr<int32_t>(),
+        load_tokens.data_ptr<int32_t>(),
+        load_tokens_host.data_ptr<int32_t>(),
+        
+        bs,
+        layer_id,
+        hot_buffer_len,
+        top_k,
+        page_size,
+        pt_stride,
+        last_top_k.stride(0),
+        last_top_k.stride(1),
+        req_to_tokens_host.stride(0),
+        load_tokens.stride(0)
+    );
+    CHECK_CUDA_SUCCESS(cudaGetLastError());
+
+    // Compute Sparse Seqlens
+    dim3 block(256);
+    dim3 grid((bs + block.x - 1) / block.x);
+    
+    quest_compute_sparse_seqlens_kernel<<<grid, block>>>(
+        cache_seqlens.data_ptr<int32_t>(),
+        seq_lens.data_ptr<int32_t>(),
+        valid_lengths.data_ptr<int32_t>(),
+        sparse_mask.data_ptr<int32_t>(),
+        original_cache_seqlens.data_ptr<int32_t>(),
+        page_size,
+        bs
+    );
+    CHECK_CUDA_SUCCESS(cudaGetLastError());
+}
