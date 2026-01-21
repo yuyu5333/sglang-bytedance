@@ -219,7 +219,9 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
     int64_t num_recent_pages,
     std::optional<int64_t> fixed_topk_page_cnt,
     double sparsity_ratio,
-    torch::Tensor sparse_mask) 
+    torch::Tensor sparse_mask,
+    torch::Tensor out_indices,
+    torch::Tensor out_lengths) 
 {
     auto device = queries.device();
     
@@ -228,10 +230,10 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
     int64_t max_pages = (max_seq_len + page_size - 1) / page_size;
     
     if (max_pages == 0) {
-        return {
-            torch::full({bs, 0}, -1, torch::dtype(torch::kInt32).device(device)),
-            torch::zeros({bs}, torch::dtype(torch::kInt32).device(device))
-        };
+        // Fill outputs with defaults
+        out_indices.fill_(-1);
+        out_lengths.zero_();
+        return {out_indices, out_lengths};
     }
 
     // Allocate temp buffers
@@ -318,20 +320,12 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
     );
     
     // Determine Output Size
-    int64_t k_val = 0;
-    if (fixed_topk_page_cnt.has_value()) {
-        k_val = fixed_topk_page_cnt.value();
-    } else {
-        // Estimate max K needed?
-        // Max possible pages * sparsity + recent
-        k_val = (int64_t)(max_pages * sparsity_ratio) + num_recent_pages;
-    }
-    // Safety clamp
-    if (k_val > max_pages) k_val = max_pages;
-    int64_t max_out = k_val + num_recent_pages + 32; // Buffer
+    // Use the shape of out_indices provided by Python
+    int64_t max_out = out_indices.size(1);
 
-    auto out_indices = torch::full({bs, max_out}, -1, torch::dtype(torch::kInt32).device(device));
-    auto out_lengths = torch::zeros({bs}, torch::dtype(torch::kInt32).device(device));
+    // Initialize outputs
+    out_indices.fill_(-1);
+    out_lengths.zero_();
     
     // Combine Kernel
     quest_combine_kernel<<<bs, 128>>>(

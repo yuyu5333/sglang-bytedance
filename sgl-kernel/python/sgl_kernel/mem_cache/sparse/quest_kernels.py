@@ -14,6 +14,8 @@ def quest_retrieval_score_and_combine_indices(
     fixed_topk_page_cnt: Optional[int],
     sparsity_ratio: float,
     sparse_mask: torch.Tensor,
+    out_indices: torch.Tensor,
+    out_lengths: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Call the optimized CUDA kernel for Quest retrieval score calculation and index combination.
@@ -31,6 +33,8 @@ def quest_retrieval_score_and_combine_indices(
         fixed_topk_page_cnt: Fixed number of top-k pages (optional)
         sparsity_ratio: Sparsity ratio for dynamic top-k
         sparse_mask: Sparse mask [bs] (optional, pass empty tensor if not used)
+        out_indices: Output indices tensor [bs, max_out] (int32)
+        out_lengths: Output lengths tensor [bs] (int32)
         
     Returns:
         out_indices: Combined indices [bs, max_out]
@@ -49,5 +53,7 @@ def quest_retrieval_score_and_combine_indices(
         num_recent_pages,
         fixed_topk_page_cnt,
         sparsity_ratio,
-        sparse_mask
+        sparse_mask,
+        out_indices,
+        out_lengths
     )
