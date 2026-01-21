@@ -267,7 +267,7 @@ void quest_retrieval_score_and_combine_indices(
         // Fill outputs with defaults
         out_indices.fill_(-1);
         out_lengths.zero_();
-        return {out_indices, out_lengths};
+        return;
     }
 
     // Allocate temp buffers

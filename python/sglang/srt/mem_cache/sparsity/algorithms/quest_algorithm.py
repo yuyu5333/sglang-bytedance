@@ -275,24 +275,6 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         
         out_indices = torch.empty((bs, max_out), dtype=torch.int32, device=device)
         out_lengths = torch.empty((bs,), dtype=torch.int32, device=device)
-
-        # print all params type
-        print(f"[DEBUG] [retrieve_topk] all data type: \n \
-            bs={type(bs)}\n \
-            seq_lens={type(seq_lens)}\n \
-            page_size={type(self.page_size)}\n \
-            req_to_token={type(self.req_to_token_pool.req_to_token)}\n \
-            self.page_k_min[layer_id]={type(self.page_k_min[layer_id])}\n \
-            self.page_k_max[layer_id]={type(self.page_k_max[layer_id])}\n \
-            queries={type(queries)}\n \
-            req_pool_indices={type(req_pool_indices)}\n \
-            self.num_recent_pages={type(self.num_recent_pages)}\n \
-            self.fixed_topk_page_cnt={type(self.fixed_topk_page_cnt)}\n \
-            self.sparsity_ratio={type(self.sparsity_ratio)}\n \
-            sparse_mask={type(sparse_mask)}\n \
-            out_indices={type(out_indices)}\n \
-            out_lengths={type(out_lengths)}\n \
-            ")
         
         """
             bs=<class 'int'>

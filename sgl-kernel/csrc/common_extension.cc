@@ -628,7 +628,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def(
       "quest_retrieval_score_and_combine_indices(int bs, Tensor seq_lens, int page_size, Tensor req_to_token, Tensor "
       "page_k_min, Tensor page_k_max, Tensor queries, Tensor req_pool_indices, int num_recent_pages, int? "
-      "fixed_topk_page_cnt, float sparsity_ratio, Tensor sparse_mask, Tensor(a!) out_indices, Tensor(b!) out_lengths) -> (Tensor(a!), Tensor(b!))");
+      "fixed_topk_page_cnt, float sparsity_ratio, Tensor sparse_mask, Tensor! out_indices, Tensor! out_lengths) -> ()");
   m.impl("quest_retrieval_score_and_combine_indices", torch::kCUDA, &quest_retrieval_score_and_combine_indices);
 }
 
