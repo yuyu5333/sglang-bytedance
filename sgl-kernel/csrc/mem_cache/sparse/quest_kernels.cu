@@ -1,10 +1,12 @@
 #include "utils.h"
 #include <cub/cub.cuh>
 #include "quest_kernels.h"
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 // Kernel to compute scores and initialize indices for sorting
 template<typename T>
-__global__ void quest_score_kernel(
+__global__ void quest_score_kernel_opt(
     float* __restrict__ scores,           // [bs, max_pages]
     int32_t* __restrict__ indices,        // [bs, max_pages]
     const int32_t* __restrict__ seq_lens, // [bs]
@@ -29,40 +31,71 @@ __global__ void quest_score_kernel(
     int64_t queries_stride_head,
     int64_t queries_stride_dim
 ) {
-    int64_t req_idx = blockIdx.x;
-    int64_t page_rel_idx = blockIdx.y * blockDim.x + threadIdx.x;
+    // Dynamic shared memory for Q_avg
+    // Size: kv_heads * head_dim * sizeof(float)
+    extern __shared__ float s_q_avg[];
 
-    if (req_idx >= gridDim.x) return;
+    int64_t req_idx = blockIdx.x;
+    int64_t tid = threadIdx.x;
     
-    int64_t seq_len = seq_lens[req_idx];
-    int64_t num_pages = (seq_len + page_size - 1) / page_size;
+    // 1. Compute/Load Q_avg into Shared Memory
+    // All threads in block cooperate to compute Q_avg for the single request req_idx
+    int64_t num_features = kv_heads * head_dim;
+    int64_t group_size = q_heads / kv_heads;
+
+    for (int64_t i = tid; i < num_features; i += blockDim.x) {
+        int64_t h = i / head_dim;
+        int64_t d = i % head_dim;
+        
+        float q_sum = 0.0f;
+        for (int64_t g = 0; g < group_size; ++g) {
+            int64_t q_h = h * group_size + g;
+            int64_t q_offset = req_idx * queries_stride_req + 
+                               q_h * queries_stride_head + 
+                               d * queries_stride_dim;
+            q_sum += (float)queries[q_offset];
+        }
+        s_q_avg[i] = q_sum / group_size;
+    }
     
+    __syncthreads();
+
+    // 2. Process Pages (Warp per Page)
+    // Map warps to pages
+    int64_t warp_id = tid / 32;
+    int64_t lane_id = tid % 32;
+    int64_t warps_per_block = blockDim.x / 32;
+    
+    // Each warp handles one page_rel_idx
+    int64_t page_rel_idx = blockIdx.y * warps_per_block + warp_id;
+    
+    // Bounds check
+    if (page_rel_idx >= max_pages) return;
+
     int64_t out_idx = req_idx * max_pages + page_rel_idx;
-    
+
     // Default initialization for indices
-    if (page_rel_idx < max_pages) {
+    if (lane_id == 0) {
         indices[out_idx] = page_rel_idx;
     }
 
-    if (page_rel_idx >= num_pages) {
-        if (page_rel_idx < max_pages) {
+    // Check validity
+    int64_t seq_len = seq_lens[req_idx];
+    int64_t num_pages = (seq_len + page_size - 1) / page_size;
+    int64_t recent_start = num_pages - num_recent_pages;
+    if (recent_start < 0) recent_start = 0;
+
+    bool valid = (page_rel_idx < num_pages) && (page_rel_idx < recent_start);
+
+    if (!valid) {
+        if (lane_id == 0) {
             scores[out_idx] = -INFINITY;
         }
         return;
     }
 
-    int64_t recent_start = num_pages - num_recent_pages;
-    if (recent_start < 0) recent_start = 0;
-
-    if (page_rel_idx >= recent_start) {
-        scores[out_idx] = -INFINITY;
-        return;
-    }
-
     // Compute Score
     int32_t req_id = req_pool_indices[req_idx];
-    
-    // Get physical page index
     int64_t log_tok_idx = page_rel_idx * page_size;
     int64_t safe_log_tok_idx = log_tok_idx;
     if (safe_log_tok_idx >= req_to_token_num_tokens) safe_log_tok_idx = req_to_token_num_tokens - 1;
@@ -72,38 +105,39 @@ __global__ void quest_score_kernel(
     int32_t phys_page_idx = phys_tok / page_size;
 
     float score_acc = 0.0f;
-    int64_t group_size = q_heads / kv_heads;
+    int64_t k_base_offset = phys_page_idx * page_k_stride_page;
 
-    for (int64_t h = 0; h < kv_heads; ++h) {
-        for (int64_t d = 0; d < head_dim; ++d) {
-            // Average query over group
-            float q_avg = 0.0f;
-            for (int64_t g = 0; g < group_size; ++g) {
-                int64_t q_h = h * group_size + g;
-                int64_t q_offset = req_idx * queries_stride_req + 
-                                   q_h * queries_stride_head + 
-                                   d * queries_stride_dim;
-                q_avg += (float)queries[q_offset];
-            }
-            q_avg /= group_size;
-
-            // Load K min/max
-            int64_t k_offset = phys_page_idx * page_k_stride_page + 
-                               h * page_k_stride_head + 
-                               d * page_k_stride_dim;
-            
-            float k_min_val = (float)page_k_min[k_offset];
-            float k_max_val = (float)page_k_max[k_offset];
-
-            if (q_avg >= 0) {
-                score_acc += q_avg * k_max_val;
-            } else {
-                score_acc += q_avg * k_min_val;
-            }
+    // Iterate over features (kv_heads * head_dim)
+    // Coalesced access: threads 0..31 read consecutive addresses
+    for (int64_t i = lane_id; i < num_features; i += 32) {
+        float q_val = s_q_avg[i];
+        
+        // Calculate k_offset assuming contiguous layout or strided
+        // i = h * head_dim + d
+        int64_t h = i / head_dim;
+        int64_t d = i % head_dim;
+        int64_t k_offset = k_base_offset + h * page_k_stride_head + d * page_k_stride_dim;
+        
+        float k_val;
+        // Optimization: Conditional Load
+        // Only load max or min based on q sign
+        if (q_val >= 0.0f) {
+            k_val = (float)page_k_max[k_offset];
+        } else {
+            k_val = (float)page_k_min[k_offset];
         }
+        
+        score_acc += q_val * k_val;
     }
-
-    scores[out_idx] = score_acc;
+    
+    // Warp Reduction
+    for (int offset = 16; offset > 0; offset /= 2) {
+        score_acc += __shfl_down_sync(0xffffffff, score_acc, offset);
+    }
+    
+    if (lane_id == 0) {
+        scores[out_idx] = score_acc;
+    }
 }
 
 // Combine indices kernel
@@ -256,12 +290,16 @@ void quest_retrieval_score_and_combine_indices(
         TORCH_CHECK(queries.size(2) == head_dim, "Query head_dim mismatch");
     }
 
-    dim3 block(128);
-    dim3 grid(bs, (max_pages + block.x - 1) / block.x);
+    dim3 block(256);
+    int warps_per_block = block.x / 32;
+    int pages_per_block = warps_per_block;
+    dim3 grid(bs, (max_pages + pages_per_block - 1) / pages_per_block);
     
+    size_t shared_mem_size = kv_heads * head_dim * sizeof(float);
+
     // Dispatch
-    DISPATCH_FLOAT_TYPES(queries.scalar_type(), "quest_score_kernel", [&] {
-        quest_score_kernel<scalar_t><<<grid, block>>>(
+    DISPATCH_FLOAT_TYPES(queries.scalar_type(), "quest_score_kernel_opt", [&] {
+        quest_score_kernel_opt<scalar_t><<<grid, block, shared_mem_size>>>(
             scores.data_ptr<float>(),
             indices.data_ptr<int32_t>(),
             seq_lens.data_ptr<int32_t>(),
