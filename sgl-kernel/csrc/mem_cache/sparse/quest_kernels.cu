@@ -514,12 +514,13 @@ __global__ void quest_diff_and_update_kernel(
     int64_t req_to_tokens_stride,
     int64_t load_tokens_stride
 ) {
-    extern __shared__ int32_t s_mem[];
-    int32_t* s_last_top_k = s_mem;
-    int32_t* s_last_page_ids = s_last_top_k + hot_buffer_len;
-    int32_t* s_curr_top_k = s_last_page_ids + hot_buffer_len;
-    int32_t* s_curr_page_ids = s_curr_top_k + top_k;
-    int32_t* s_load_mask = s_curr_page_ids + top_k;
+    // Use int64_t for shared memory to prevent precision loss / sign extension issues
+    extern __shared__ int64_t s_mem[];
+    int64_t* s_last_top_k = s_mem;
+    int64_t* s_last_page_ids = s_last_top_k + hot_buffer_len;
+    int64_t* s_curr_top_k = s_last_page_ids + hot_buffer_len;
+    int64_t* s_curr_page_ids = s_curr_top_k + top_k;
+    int64_t* s_load_mask = s_curr_page_ids + top_k;
     
     // Shared counters for parallel compaction
     __shared__ int s_victim_count;
@@ -532,17 +533,16 @@ __global__ void quest_diff_and_update_kernel(
     
     int req_idx = req_pool_indices[req_idx_in_batch];
     
-    // Load last_top_k and last_page_ids (cast to int32 for shared mem)
-    // Coalesced read: last_top_k is [req, layer, hot_buffer_len], iterating i is contiguous
+    // Load last_top_k and last_page_ids (int64 -> int64)
     for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
         int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
-        s_last_top_k[i] = (int32_t)last_top_k[offset];
-        s_last_page_ids[i] = (int32_t)last_page_ids[offset];
+        s_last_top_k[i] = last_top_k[offset];
+        s_last_page_ids[i] = last_page_ids[offset];
     }
     
-    // Load curr_top_k and init
+    // Load curr_top_k and init (int32 -> int64)
     for (int i = tid; i < top_k; i += blockDim.x) {
-        s_curr_top_k[i] = curr_top_k[req_idx_in_batch * top_k + i];
+        s_curr_top_k[i] = (int64_t)curr_top_k[req_idx_in_batch * top_k + i];
         s_curr_page_ids[i] = -1;
         s_load_mask[i] = 0;
     }
@@ -551,12 +551,9 @@ __global__ void quest_diff_and_update_kernel(
     
     if (sparse_mask[req_idx_in_batch]) {
         // Intersection
-        // This O(top_k * hot_buffer_len) loop can be optimized if needed, 
-        // but parallel atomic fill below removes the main serial bottleneck.
         for (int i = tid; i < top_k; i += blockDim.x) {
-            int val = s_curr_top_k[i];
+            int64_t val = s_curr_top_k[i];
             if (val != -1) {
-                // Brute force scan is acceptable for small sizes (<=128)
                 for (int j = 0; j < hot_buffer_len; ++j) {
                     if (s_last_top_k[j] == val) {
                         s_curr_page_ids[i] = s_last_page_ids[j];
@@ -578,7 +575,6 @@ __global__ void quest_diff_and_update_kernel(
         __syncthreads();
 
         // 2. Collect Victims (pages in history that were NOT reused)
-        // We reuse s_last_top_k as the victim buffer since it's no longer needed for intersection
         for (int j = tid; j < hot_buffer_len; j += blockDim.x) {
             if (s_last_page_ids[j] != -1) {
                 int idx = atomicAdd(&s_victim_count, 1);
@@ -602,17 +598,17 @@ __global__ void quest_diff_and_update_kernel(
         __syncthreads();
         
         // Generate Load Commands
-        // We output for all top_k * page_size entries, setting -1 if not needed
         for (int i = tid; i < top_k * page_size; i += blockDim.x) {
             int page_idx = i / page_size;
             int token_offset = i % page_size;
             int64_t out_idx = req_idx_in_batch * load_tokens_stride + i;
             
             if (page_idx < top_k && s_load_mask[page_idx]) {
-                int phys_page = s_curr_page_ids[page_idx];
-                int log_page = s_curr_top_k[page_idx];
+                int64_t phys_page = s_curr_page_ids[page_idx];
+                int64_t log_page = s_curr_top_k[page_idx];
                 
-                load_tokens[out_idx] = (int64_t)(phys_page * page_size + token_offset);
+                // Use int64 arithmetic for address calculation
+                load_tokens[out_idx] = phys_page * page_size + token_offset;
                 
                 int64_t host_offset = (int64_t)req_idx * req_to_tokens_stride + log_page * page_size + token_offset;
                 load_tokens_host[out_idx] = req_to_tokens_host[host_offset];
@@ -622,23 +618,25 @@ __global__ void quest_diff_and_update_kernel(
             }
         }
 
-        // Update State (cast back to int64)
+        // Update State (int64 -> int64)
         for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
             int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
             if (i < top_k) {
-                last_top_k[offset] = (int64_t)s_curr_top_k[i];
-                last_page_ids[offset] = (int64_t)s_curr_page_ids[i];
+                last_top_k[offset] = s_curr_top_k[i];
+                last_page_ids[offset] = s_curr_page_ids[i];
             } else {
                 last_top_k[offset] = -1;
                 last_page_ids[offset] = -1;
             }
         }
         
-        // Update Page Table
+        // Update Page Table (int64 -> int32)
+        // Note: SGLang page table is int32, so we must truncate.
+        // Assumes physical pages fit in int32.
         int valid_len = valid_lengths[req_idx_in_batch];
         for (int i = tid; i < valid_len; i += blockDim.x) {
             if (i < top_k) {
-                page_table[req_idx_in_batch * pt_stride + i] = s_curr_page_ids[i];
+                page_table[req_idx_in_batch * pt_stride + i] = (int32_t)s_curr_page_ids[i];
             }
         }
     }
@@ -669,7 +667,6 @@ void quest_diff_and_update_sparse_metadata(
     TORCH_CHECK(load_tokens.is_cuda(), "load_tokens must be on CUDA");
     TORCH_CHECK(load_tokens_host.is_cuda(), "load_tokens_host must be on CUDA");
     
-    // Ensure inputs are int32 where expected, int64 where expected
     TORCH_CHECK(page_table.scalar_type() == torch::kInt32, "page_table must be int32");
     TORCH_CHECK(curr_top_k.scalar_type() == torch::kInt32, "curr_top_k must be int32");
     
@@ -684,8 +681,8 @@ void quest_diff_and_update_sparse_metadata(
     int64_t top_k = curr_top_k.size(1);
     int64_t hot_buffer_len = last_top_k.size(2);
     
-    // 3 arrays + load_mask
-    size_t shared_mem = (2 * hot_buffer_len + 3 * top_k) * sizeof(int32_t);
+    // Use int64 for shared memory size calculation
+    size_t shared_mem = (2 * hot_buffer_len + 3 * top_k) * sizeof(int64_t);
     
     quest_diff_and_update_kernel<<<bs, 128, shared_mem>>>(
         curr_top_k.data_ptr<int32_t>(),
