@@ -494,6 +494,7 @@ __global__ void quest_diff_and_update_kernel(
     const int32_t* __restrict__ curr_top_k,       // [bs, top_k]
     const int32_t* __restrict__ req_pool_indices, // [bs]
     const int32_t* __restrict__ valid_lengths,    // [bs]
+    const int32_t* __restrict__ seq_lens,         // [bs]
     const int32_t* __restrict__ sparse_mask,      // [bs]
     const int64_t* __restrict__ req_to_tokens_host, // [num_reqs, max_tokens_host]
     
@@ -598,12 +599,22 @@ __global__ void quest_diff_and_update_kernel(
         __syncthreads();
         
         // Generate Load Commands
+        int32_t seq_len = seq_lens[req_idx_in_batch];
         for (int i = tid; i < top_k * page_size; i += blockDim.x) {
             int page_idx = i / page_size;
             int token_offset = i % page_size;
             int64_t out_idx = req_idx_in_batch * load_tokens_stride + i;
             
+            bool need_load = false;
             if (page_idx < top_k && s_load_mask[page_idx]) {
+                int64_t log_page = s_curr_top_k[page_idx];
+                // Check if this token is within seq_len
+                if (log_page * page_size + token_offset < seq_len) {
+                    need_load = true;
+                }
+            }
+
+            if (need_load) {
                 int64_t phys_page = s_curr_page_ids[page_idx];
                 int64_t log_page = s_curr_top_k[page_idx];
                 
@@ -688,6 +699,7 @@ void quest_diff_and_update_sparse_metadata(
         curr_top_k.data_ptr<int32_t>(),
         req_pool_indices.data_ptr<int32_t>(),
         valid_lengths.data_ptr<int32_t>(),
+        seq_lens.data_ptr<int32_t>(),
         sparse_mask.data_ptr<int32_t>(),
         req_to_tokens_host.data_ptr<int64_t>(),
         
