@@ -46,7 +46,7 @@ using fptr_t = int64_t;
 /*
  * From csrc/mem_cache/sparse
  */
-std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indices(
+void quest_retrieval_score_and_combine_indices(
     int64_t bs,
     torch::Tensor seq_lens,
     int64_t page_size,

@@ -41,7 +41,7 @@ def quest_retrieval_score_and_combine_indices(
         out_lengths: Output lengths [bs]
     """
     
-    return torch.ops.sgl_kernel.quest_retrieval_score_and_combine_indices(
+    return torch.ops.sgl_kernel.quest_retrieval_score_and_combine_indices.default(
         bs,
         seq_lens,
         page_size,

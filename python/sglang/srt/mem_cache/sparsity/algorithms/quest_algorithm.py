@@ -276,19 +276,73 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         out_indices = torch.empty((bs, max_out), dtype=torch.int32, device=device)
         out_lengths = torch.empty((bs,), dtype=torch.int32, device=device)
 
+        # print all params type
+        print(f"[DEBUG] [retrieve_topk] all data type: \n \
+            bs={type(bs)}\n \
+            seq_lens={type(seq_lens)}\n \
+            page_size={type(self.page_size)}\n \
+            req_to_token={type(self.req_to_token_pool.req_to_token)}\n \
+            self.page_k_min[layer_id]={type(self.page_k_min[layer_id])}\n \
+            self.page_k_max[layer_id]={type(self.page_k_max[layer_id])}\n \
+            queries={type(queries)}\n \
+            req_pool_indices={type(req_pool_indices)}\n \
+            self.num_recent_pages={type(self.num_recent_pages)}\n \
+            self.fixed_topk_page_cnt={type(self.fixed_topk_page_cnt)}\n \
+            self.sparsity_ratio={type(self.sparsity_ratio)}\n \
+            sparse_mask={type(sparse_mask)}\n \
+            out_indices={type(out_indices)}\n \
+            out_lengths={type(out_lengths)}\n \
+            ")
+        
+        """
+            bs=<class 'int'>
+            seq_lens=<class 'torch.Tensor'>
+            page_size=<class 'int'>
+            req_to_token=<class 'torch.Tensor'>
+            self.page_k_min[layer_id]=<class 'torch.Tensor'>
+            self.page_k_max[layer_id]=<class 'torch.Tensor'>
+            queries=<class 'torch.Tensor'>
+            req_pool_indices=<class 'torch.Tensor'>
+            self.num_recent_pages=<class 'int'>
+            self.fixed_topk_page_cnt=<class 'int'>
+            self.sparsity_ratio=<class 'float'>
+            sparse_mask=<class 'torch.Tensor'>
+            out_indices=<class 'torch.Tensor'>
+            out_lengths=<class 'torch.Tensor'>
+            
+            === para info ===
+            bs: Python type=<class 'int'>, value=1
+            page_size: Python type=<class 'int'>, value=64
+            num_recent_pages: Python type=<class 'int'>, value=4
+            fixed_topk_page_cnt: Python type=<class 'int'>, value=16
+            sparsity_ratio: Python type=<class 'float'>, value=0.7
+            layer_id: Python type=<class 'int'>, value=0
+
+            seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1])
+            req_to_token: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([4096, 40964])
+            page_k_min[layer_id]: Python type=<class 'torch.Tensor'>, tensor dtype=torch.float32, shape=torch.Size([6886, 8, 128])
+            page_k_max[layer_id]: Python type=<class 'torch.Tensor'>, tensor dtype=torch.float32, shape=torch.Size([6886, 8, 128])
+            queries: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bfloat16, shape=torch.Size([1, 4096])
+            req_pool_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1])
+            sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1])
+            out_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 37])
+            out_lengths: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1])
+
+        """
+
         quest_retrieval_score_and_combine_indices(
             bs,
-            seq_lens,
+            seq_lens.to(torch.int32),
             self.page_size,
             self.req_to_token_pool.req_to_token,
-            self.page_k_min[layer_id],
-            self.page_k_max[layer_id],
+            self.page_k_min[layer_id].to(queries.dtype),
+            self.page_k_max[layer_id].to(queries.dtype),
             queries,
-            req_pool_indices,
+            req_pool_indices.to(torch.int32),
             self.num_recent_pages,
             self.fixed_topk_page_cnt,
             self.sparsity_ratio,
-            sparse_mask,
+            sparse_mask.to(torch.int32),
             out_indices,
             out_lengths,
         )

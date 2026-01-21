@@ -207,7 +207,7 @@ __global__ void quest_combine_kernel(
     }
 }
 
-std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indices(
+void quest_retrieval_score_and_combine_indices(
     int64_t bs,
     torch::Tensor seq_lens,
     int64_t page_size,
@@ -344,6 +344,4 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
     );
     
     CHECK_CUDA_SUCCESS(cudaGetLastError());
-
-    return {out_indices, out_lengths};
 }
