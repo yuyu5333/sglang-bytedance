@@ -132,55 +132,18 @@ class FlashAttentionAdaptor(BackendAdaptor):
         req_states = self.sparse_kv_cache_manager.req_states
         batch_size = sparse_mask.shape[0]
 
-        if False:
-            print(f"layer_id: Python type={type(layer_id)}, value={layer_id}")
-            print(f"page_size: Python type={type(page_size)}, value={page_size}")
-
-            print(f"page_table: Python type={type(current_metadata.page_table)}, tensor dtype={current_metadata.page_table.dtype}, shape={current_metadata.page_table.shape}, continue?={current_metadata.page_table.is_contiguous()}")
-            print(f"last_top_k_result: Python type={type(req_states.last_top_k_result)}, tensor dtype={req_states.last_top_k_result.dtype}, shape={req_states.last_top_k_result.shape}, continue?={req_states.last_top_k_result.is_contiguous()}")
-            print(f"last_device_indices: Python type={type(req_states.last_device_indices)}, tensor dtype={req_states.last_device_indices.dtype}, shape={req_states.last_device_indices.shape}, continue?={req_states.last_device_indices.is_contiguous()}")
-            print(f"selected_indices: Python type={type(selected_indices)}, tensor dtype={selected_indices.dtype}, shape={selected_indices.shape}, continue?={selected_indices.is_contiguous()}")
-            print(f"req_pool_indices: Python type={type(forward_batch.req_pool_indices)}, tensor dtype={forward_batch.req_pool_indices.dtype}, shape={forward_batch.req_pool_indices.shape}, continue?={forward_batch.req_pool_indices.is_contiguous()}")
-            print(f"seq_lens: Python type={type(forward_batch.seq_lens)}, tensor dtype={forward_batch.seq_lens.dtype}, shape={forward_batch.seq_lens.shape}, continue?={forward_batch.seq_lens.is_contiguous()}")
-            print(f"valid_lengths: Python type={type(valid_lengths)}, tensor dtype={valid_lengths.dtype}, shape={valid_lengths.shape}, continue?={valid_lengths.is_contiguous()}")
-            print(f"sparse_mask: Python type={type(sparse_mask)}, tensor dtype={sparse_mask.dtype}, shape={sparse_mask.shape}, continue?={sparse_mask.is_contiguous()}")
-            print(f"req_to_tokens_host: Python type={type(req_states.req_to_tokens_host)}, tensor dtype={req_states.req_to_tokens_host.dtype}, shape={req_states.req_to_tokens_host.shape}, continue?={req_states.req_to_tokens_host.is_contiguous()}")
-            print(f"should_load_device_indices: Python type={type(req_states.should_load_device_indices)}, tensor dtype={req_states.should_load_device_indices.dtype}, shape={req_states.should_load_device_indices.shape}, continue?={req_states.should_load_device_indices.is_contiguous()}")
-            print(f"should_load_host_indices: Python type={type(req_states.should_load_host_indices)}, tensor dtype={req_states.should_load_host_indices.dtype}, shape={req_states.should_load_host_indices.shape}, continue?={req_states.should_load_host_indices.is_contiguous()}")
-            print(f"cache_seqlens_int32 (current): Python type={type(current_metadata.cache_seqlens_int32)}, tensor dtype={current_metadata.cache_seqlens_int32.dtype}, shape={current_metadata.cache_seqlens_int32.shape}, continue?={current_metadata.cache_seqlens_int32.is_contiguous()}")
-            print(f"cache_seqlens_int32 (original): Python type={type(self._original_metadata['cache_seqlens_int32'])}, tensor dtype={self._original_metadata['cache_seqlens_int32'].dtype}, shape={self._original_metadata['cache_seqlens_int32'].shape}, continue?={self._original_metadata['cache_seqlens_int32'].is_contiguous()}")
-
-        """
-        layer_id: Python type=<class 'int'>, value=0
-        page_size: Python type=<class 'int'>, value=64
-
-        page_table: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 40]), continue?=True
-        last_top_k_result: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
-        last_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
-        selected_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 52]), continue?=True
-        req_pool_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
-        seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
-        valid_lengths: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
-        sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1]), continue?=True
-        req_to_tokens_host: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 40964]), continue?=True
-        should_load_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 2048]), continue?=True
-        should_load_host_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 2048]), continue?=True
-        cache_seqlens_int32 (current): Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
-        cache_seqlens_int32 (original): Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
-        """
-
         quest_diff_and_update_sparse_metadata(
             current_metadata.page_table,
-            req_states.last_top_k_result.contiguous(),
-            req_states.last_device_indices.contiguous(),
-            selected_indices,
+            req_states.last_top_k_result,
+            req_states.last_device_indices,
+            selected_indices.contiguous(),
             forward_batch.req_pool_indices.to(torch.int32).contiguous(),
             forward_batch.seq_lens.to(torch.int32).contiguous(),
-            valid_lengths,
+            valid_lengths.contiguous(),
             sparse_mask.to(torch.int32).contiguous(),
-            req_states.req_to_tokens_host.contiguous(),
-            req_states.should_load_device_indices.contiguous(),
-            req_states.should_load_host_indices.contiguous(),
+            req_states.req_to_tokens_host,
+            req_states.should_load_device_indices,
+            req_states.should_load_host_indices,
             current_metadata.cache_seqlens_int32,
             self._original_metadata["cache_seqlens_int32"],
             layer_id,
@@ -203,6 +166,75 @@ class FlashAttentionAdaptor(BackendAdaptor):
                 layer_id,
                 "kernel"
              )
+
+        current_metadata.cu_seqlens_k = torch.nn.functional.pad(
+            torch.cumsum(
+                current_metadata.cache_seqlens_int32, dim=0, dtype=torch.int32
+            ),
+            (1, 0),
+        )
+        current_metadata.max_seq_len_k = int(current_metadata.cache_seqlens_int32.max())
+        return current_metadata
+
+
+    def adapt_for_attn_metadata_python(
+        self,
+        selected_indices: torch.Tensor,
+        valid_lengths: torch.Tensor,
+        sparse_mask: torch.Tensor,
+        current_metadata: Any,
+        forward_batch: "ForwardBatch",
+        req_to_token: torch.Tensor,
+        page_size: int,
+        layer_id: int,
+        **kwargs,
+    ) -> Any:
+        """
+        Adapt FlashAttention metadata for sparse KVCache access.
+
+        Modifies page_table, cache_seqlens, and related metadata to redirect
+        FlashAttention to only process selected sparse pages.
+
+        # TODO: Optimize performance
+        """
+        if self._original_metadata is None:
+            return current_metadata
+
+        if not sparse_mask.any():
+            return current_metadata
+
+        max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
+        page_table = self.req_to_token_pool.req_to_token[
+            forward_batch.req_pool_indices, :max_seqlen_k
+        ]
+        physical_pages = self.sparse_kv_cache_manager.swap_in_selected_pages(
+            req_pool_indices=forward_batch.req_pool_indices,
+            top_k_result=selected_indices,
+            seq_lens=forward_batch.seq_lens,
+            sparse_mask=sparse_mask,
+            page_table=page_table,
+            layer_id=layer_id,
+            page_size=page_size,
+            out_cache_loc=forward_batch.out_cache_loc,
+        )
+        max_selected = physical_pages.shape[1]
+        valid_mask = torch.arange(max_selected, device=physical_pages.device).unsqueeze(
+            0
+        ) < valid_lengths.unsqueeze(1)
+        update_mask = sparse_mask.unsqueeze(1) & valid_mask
+
+        current_metadata.page_table[:, :max_selected] = torch.where(
+            update_mask, physical_pages, current_metadata.page_table[:, :max_selected]
+        )
+
+        seq_lens = forward_batch.seq_lens
+        positions_in_page = (seq_lens - 1) % page_size
+        diff = page_size - positions_in_page - 1
+        sparse_seq_lens = (valid_lengths * page_size - diff).to(torch.int32)
+
+        current_metadata.cache_seqlens_int32 = torch.where(
+            sparse_mask, sparse_seq_lens, self._original_metadata["cache_seqlens_int32"]
+        )
 
         current_metadata.cu_seqlens_k = torch.nn.functional.pad(
             torch.cumsum(
