@@ -238,11 +238,22 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
     auto scores = torch::empty({bs, max_pages}, torch::dtype(torch::kFloat32).device(device));
     auto indices = torch::empty({bs, max_pages}, torch::dtype(torch::kInt32).device(device));
     
-    // Launch Score Kernel
-    int64_t q_heads = queries.size(1);
-    int64_t head_dim = queries.size(2);
+    // Handle Queries Shape
+    int64_t head_dim = page_k_min.size(2);
     int64_t kv_heads = page_k_min.size(1);
+    int64_t q_heads;
     
+    torch::Tensor q_view = queries;
+    if (queries.dim() == 2) {
+        int64_t hidden_dim = queries.size(1);
+        TORCH_CHECK(hidden_dim % head_dim == 0, "Query hidden dim must be divisible by head_dim");
+        q_heads = hidden_dim / head_dim;
+        q_view = queries.view({bs, q_heads, head_dim});
+    } else {
+        q_heads = queries.size(1);
+        TORCH_CHECK(queries.size(2) == head_dim, "Query head_dim mismatch");
+    }
+
     dim3 block(128);
     dim3 grid(bs, (max_pages + block.x - 1) / block.x);
     
@@ -255,7 +266,7 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
             req_to_token.data_ptr<int32_t>(),
             page_k_min.data_ptr<scalar_t>(),
             page_k_max.data_ptr<scalar_t>(),
-            queries.data_ptr<scalar_t>(),
+            q_view.data_ptr<scalar_t>(),
             req_pool_indices.data_ptr<int32_t>(),
             num_recent_pages,
             max_pages,
@@ -269,9 +280,9 @@ std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indic
             page_k_min.stride(0),
             page_k_min.stride(1),
             page_k_min.stride(2),
-            queries.stride(0),
-            queries.stride(1),
-            queries.stride(2)
+            q_view.stride(0),
+            q_view.stride(1),
+            q_view.stride(2)
         );
     });
     
