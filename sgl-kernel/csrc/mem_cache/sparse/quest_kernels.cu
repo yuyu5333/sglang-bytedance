@@ -495,13 +495,13 @@ __global__ void quest_diff_and_update_kernel(
     const int32_t* __restrict__ req_pool_indices, // [bs]
     const int32_t* __restrict__ valid_lengths,    // [bs]
     const int32_t* __restrict__ sparse_mask,      // [bs]
-    const int32_t* __restrict__ req_to_tokens_host, // [num_reqs, max_tokens_host]
+    const int64_t* __restrict__ req_to_tokens_host, // [num_reqs, max_tokens_host]
     
-    int32_t* __restrict__ last_top_k,             // [num_reqs, num_layers, hot_buffer_len]
-    int32_t* __restrict__ last_page_ids,          // [num_reqs, num_layers, hot_buffer_len]
+    int64_t* __restrict__ last_top_k,             // [num_reqs, num_layers, hot_buffer_len]
+    int64_t* __restrict__ last_page_ids,          // [num_reqs, num_layers, hot_buffer_len]
     int32_t* __restrict__ page_table,             // [bs, pt_stride]
-    int32_t* __restrict__ load_tokens,            // [bs, top_k * page_size]
-    int32_t* __restrict__ load_tokens_host,       // [bs, top_k * page_size]
+    int64_t* __restrict__ load_tokens,            // [bs, top_k * page_size]
+    int64_t* __restrict__ load_tokens_host,       // [bs, top_k * page_size]
     
     int64_t bs,
     int64_t layer_id,
@@ -528,11 +528,11 @@ __global__ void quest_diff_and_update_kernel(
     
     int req_idx = req_pool_indices[req_idx_in_batch];
     
-    // Load last_top_k and last_page_ids
+    // Load last_top_k and last_page_ids (cast to int32 for shared mem)
     for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
         int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
-        s_last_top_k[i] = last_top_k[offset];
-        s_last_page_ids[i] = last_page_ids[offset];
+        s_last_top_k[i] = (int32_t)last_top_k[offset];
+        s_last_page_ids[i] = (int32_t)last_page_ids[offset];
     }
     
     // Load curr_top_k and init
@@ -594,7 +594,7 @@ __global__ void quest_diff_and_update_kernel(
                 int phys_page = s_curr_page_ids[page_idx];
                 int log_page = s_curr_top_k[page_idx];
                 
-                load_tokens[out_idx] = phys_page * page_size + token_offset;
+                load_tokens[out_idx] = (int64_t)(phys_page * page_size + token_offset);
                 
                 int64_t host_offset = (int64_t)req_idx * req_to_tokens_stride + log_page * page_size + token_offset;
                 load_tokens_host[out_idx] = req_to_tokens_host[host_offset];
@@ -604,12 +604,12 @@ __global__ void quest_diff_and_update_kernel(
             }
         }
 
-        // Update State
+        // Update State (cast back to int64)
         for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
             int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
             if (i < top_k) {
-                last_top_k[offset] = s_curr_top_k[i];
-                last_page_ids[offset] = s_curr_page_ids[i];
+                last_top_k[offset] = (int64_t)s_curr_top_k[i];
+                last_page_ids[offset] = (int64_t)s_curr_page_ids[i];
             } else {
                 last_top_k[offset] = -1;
                 last_page_ids[offset] = -1;
@@ -651,21 +651,15 @@ void quest_diff_and_update_sparse_metadata(
     TORCH_CHECK(load_tokens.is_cuda(), "load_tokens must be on CUDA");
     TORCH_CHECK(load_tokens_host.is_cuda(), "load_tokens_host must be on CUDA");
     
-    // Ensure inputs are int32
+    // Ensure inputs are int32 where expected, int64 where expected
     TORCH_CHECK(page_table.scalar_type() == torch::kInt32, "page_table must be int32");
-    TORCH_CHECK(last_top_k.scalar_type() == torch::kInt32, "last_top_k must be int32");
-    TORCH_CHECK(last_page_ids.scalar_type() == torch::kInt32, "last_page_ids must be int32");
     TORCH_CHECK(curr_top_k.scalar_type() == torch::kInt32, "curr_top_k must be int32");
-    // req_to_tokens_host might be int64 in Python? 
-    // If it's int64, we need to cast or support int64.
-    // The previous kernel call used int32 pointers.
-    // backend_adaptor.py ensures inputs are int32.
-    // But req_to_tokens_host is large, maybe int64?
-    // Let's check diff_kernel.py: req_to_tokens_host is int64.
-    // I should support int64 for req_to_tokens_host?
-    // Or just cast in Python.
-    // For now, assume int32. If int64, I need a template or cast.
-    // I will enforce int32 in Python.
+    
+    TORCH_CHECK(last_top_k.scalar_type() == torch::kInt64, "last_top_k must be int64");
+    TORCH_CHECK(last_page_ids.scalar_type() == torch::kInt64, "last_page_ids must be int64");
+    TORCH_CHECK(req_to_tokens_host.scalar_type() == torch::kInt64, "req_to_tokens_host must be int64");
+    TORCH_CHECK(load_tokens.scalar_type() == torch::kInt64, "load_tokens must be int64");
+    TORCH_CHECK(load_tokens_host.scalar_type() == torch::kInt64, "load_tokens_host must be int64");
 
     int64_t bs = page_table.size(0);
     int64_t pt_stride = page_table.stride(0);
@@ -680,13 +674,13 @@ void quest_diff_and_update_sparse_metadata(
         req_pool_indices.data_ptr<int32_t>(),
         valid_lengths.data_ptr<int32_t>(),
         sparse_mask.data_ptr<int32_t>(),
-        req_to_tokens_host.data_ptr<int32_t>(),
+        req_to_tokens_host.data_ptr<int64_t>(),
         
-        last_top_k.data_ptr<int32_t>(),
-        last_page_ids.data_ptr<int32_t>(),
+        last_top_k.data_ptr<int64_t>(),
+        last_page_ids.data_ptr<int64_t>(),
         page_table.data_ptr<int32_t>(),
-        load_tokens.data_ptr<int32_t>(),
-        load_tokens_host.data_ptr<int32_t>(),
+        load_tokens.data_ptr<int64_t>(),
+        load_tokens_host.data_ptr<int64_t>(),
         
         bs,
         layer_id,
