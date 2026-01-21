@@ -10,6 +10,8 @@ from sglang.srt.mem_cache.sparsity.kernel.flashattn_metadata_kernels import (
     compute_sparse_seqlens_triton,
 )
 
+from sgl_kernel import quest_update_sparse_metadata
+
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
@@ -141,44 +143,17 @@ class FlashAttentionAdaptor(BackendAdaptor):
             out_cache_loc=forward_batch.out_cache_loc,
         )
         max_selected = physical_pages.shape[1]
-        if (is_cuda() or is_hip()) and triton.runtime.driver.active is not None:
-            update_page_table_triton(
-                current_metadata.page_table[:, :max_selected],
-                physical_pages,
-                valid_lengths.to(torch.int32),
-                sparse_mask.to(torch.int32),
-            )
-        else:
-            valid_mask = (
-                torch.arange(max_selected, device=physical_pages.device)
-                .unsqueeze(0)
-                < valid_lengths.unsqueeze(1)
-            )
-            update_mask = sparse_mask.unsqueeze(1) & valid_mask
-            current_metadata.page_table[:, :max_selected] = torch.where(
-                update_mask,
-                physical_pages,
-                current_metadata.page_table[:, :max_selected],
-            )
-
-        seq_lens = forward_batch.seq_lens
-        positions_in_page = (seq_lens - 1) % page_size
-        diff = page_size - positions_in_page - 1
-        if (is_cuda() or is_hip()) and triton.runtime.driver.active is not None:
-            current_metadata.cache_seqlens_int32 = compute_sparse_seqlens_triton(
-                seq_lens.to(torch.int32),
-                valid_lengths.to(torch.int32),
-                sparse_mask.to(torch.int32),
-                self._original_metadata["cache_seqlens_int32"],
-                page_size,
-            )
-        else:
-            sparse_seq_lens = (valid_lengths * page_size - diff).to(torch.int32)
-            current_metadata.cache_seqlens_int32 = torch.where(
-                sparse_mask,
-                sparse_seq_lens,
-                self._original_metadata["cache_seqlens_int32"],
-            )
+        
+        quest_update_sparse_metadata(
+            current_metadata.page_table[:, :max_selected],
+            physical_pages,
+            valid_lengths.to(torch.int32),
+            sparse_mask.to(torch.int32),
+            current_metadata.cache_seqlens_int32,
+            forward_batch.seq_lens.to(torch.int32),
+            self._original_metadata["cache_seqlens_int32"],
+            page_size
+        )
 
         current_metadata.cu_seqlens_k = torch.nn.functional.pad(
             torch.cumsum(

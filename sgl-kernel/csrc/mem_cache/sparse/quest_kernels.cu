@@ -383,3 +383,94 @@ void quest_retrieval_score_and_combine_indices(
     
     CHECK_CUDA_SUCCESS(cudaGetLastError());
 }
+
+__global__ void quest_update_page_table_kernel(
+    int32_t* __restrict__ page_table,       // [bs, pt_stride]
+    const int32_t* __restrict__ physical_pages, // [bs, max_selected]
+    const int32_t* __restrict__ valid_lengths,  // [bs]
+    const int32_t* __restrict__ sparse_mask,    // [bs]
+    int64_t max_selected,
+    int64_t pt_stride
+) {
+    int64_t req_idx = blockIdx.x;
+    if (sparse_mask[req_idx] == 0) return;
+    
+    int32_t valid_len = valid_lengths[req_idx];
+    
+    for (int64_t i = threadIdx.x; i < max_selected; i += blockDim.x) {
+        if (i < valid_len) {
+            page_table[req_idx * pt_stride + i] = physical_pages[req_idx * max_selected + i];
+        }
+    }
+}
+
+__global__ void quest_compute_sparse_seqlens_kernel(
+    int32_t* __restrict__ current_cache_seqlens, // [bs]
+    const int32_t* __restrict__ seq_lens,        // [bs]
+    const int32_t* __restrict__ valid_lengths,   // [bs]
+    const int32_t* __restrict__ sparse_mask,     // [bs]
+    const int32_t* __restrict__ original_cache_seqlens, // [bs]
+    int page_size,
+    int64_t bs
+) {
+    int64_t req_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (req_idx >= bs) return;
+
+    if (sparse_mask[req_idx]) {
+        int32_t sl = seq_lens[req_idx];
+        // Python: positions_in_page = (seq_lens - 1) % page_size
+        int32_t positions_in_page = (sl - 1) % page_size;
+        // Python: diff = page_size - positions_in_page - 1
+        int32_t diff = page_size - positions_in_page - 1;
+        int32_t vl = valid_lengths[req_idx];
+        // Python: sparse_seq_lens = (valid_lengths * page_size - diff)
+        current_cache_seqlens[req_idx] = vl * page_size - diff;
+    } else {
+        current_cache_seqlens[req_idx] = original_cache_seqlens[req_idx];
+    }
+}
+
+void quest_update_sparse_metadata(
+    torch::Tensor page_table,
+    torch::Tensor physical_pages,
+    torch::Tensor valid_lengths,
+    torch::Tensor sparse_mask,
+    torch::Tensor cache_seqlens,
+    torch::Tensor seq_lens,
+    torch::Tensor original_cache_seqlens,
+    int64_t page_size
+) {
+    int64_t bs = page_table.size(0);
+    int64_t pt_stride = page_table.stride(0);
+    int64_t max_selected = physical_pages.size(1);
+    
+    auto device = page_table.device();
+    
+    // Update Page Table
+    // Grid: bs blocks (one per request)
+    // Block: 128 threads (to cover max_selected in loop)
+    quest_update_page_table_kernel<<<bs, 128>>>(
+        page_table.data_ptr<int32_t>(),
+        physical_pages.data_ptr<int32_t>(),
+        valid_lengths.data_ptr<int32_t>(),
+        sparse_mask.data_ptr<int32_t>(),
+        max_selected,
+        pt_stride
+    );
+    CHECK_CUDA_SUCCESS(cudaGetLastError());
+
+    // Compute Sparse Seqlens
+    dim3 block(256);
+    dim3 grid((bs + block.x - 1) / block.x);
+    
+    quest_compute_sparse_seqlens_kernel<<<grid, block>>>(
+        cache_seqlens.data_ptr<int32_t>(),
+        seq_lens.data_ptr<int32_t>(),
+        valid_lengths.data_ptr<int32_t>(),
+        sparse_mask.data_ptr<int32_t>(),
+        original_cache_seqlens.data_ptr<int32_t>(),
+        page_size,
+        bs
+    );
+    CHECK_CUDA_SUCCESS(cudaGetLastError());
+}

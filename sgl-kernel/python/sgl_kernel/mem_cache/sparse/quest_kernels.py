@@ -16,7 +16,7 @@ def quest_retrieval_score_and_combine_indices(
     sparse_mask: torch.Tensor,
     out_indices: torch.Tensor,
     out_lengths: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> None:
     """
     Call the optimized CUDA kernel for Quest retrieval score calculation and index combination.
     
@@ -35,10 +35,6 @@ def quest_retrieval_score_and_combine_indices(
         sparse_mask: Sparse mask [bs] (optional, pass empty tensor if not used)
         out_indices: Output indices tensor [bs, max_out] (int32)
         out_lengths: Output lengths tensor [bs] (int32)
-        
-    Returns:
-        out_indices: Combined indices [bs, max_out]
-        out_lengths: Output lengths [bs]
     """
     
     return torch.ops.sgl_kernel.quest_retrieval_score_and_combine_indices.default(
@@ -56,4 +52,39 @@ def quest_retrieval_score_and_combine_indices(
         sparse_mask,
         out_indices,
         out_lengths
+    )
+
+def quest_update_sparse_metadata(
+    page_table: torch.Tensor,
+    physical_pages: torch.Tensor,
+    valid_lengths: torch.Tensor,
+    sparse_mask: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    original_cache_seqlens: torch.Tensor,
+    page_size: int,
+) -> None:
+    """
+    Call the optimized CUDA kernel for Quest sparse metadata update.
+    
+    Args:
+        page_table: Page table [bs, max_selected, max_tokens]
+        physical_pages: Physical pages [bs, max_selected, max_tokens]
+        valid_lengths: Valid lengths [bs]
+        sparse_mask: Sparse mask [bs] (optional, pass empty tensor if not used)
+        cache_seqlens: Cache sequence lengths [bs]
+        seq_lens: Sequence lengths [bs]
+        original_cache_seqlens: Original cache sequence lengths [bs]
+        page_size: Page size
+    """
+    
+    return torch.ops.sgl_kernel.quest_update_sparse_metadata.default(
+        page_table,
+        physical_pages,
+        valid_lengths,
+        sparse_mask,
+        cache_seqlens,
+        seq_lens,
+        original_cache_seqlens,
+        page_size
     )

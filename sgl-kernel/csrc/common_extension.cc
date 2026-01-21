@@ -630,6 +630,11 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "page_k_min, Tensor page_k_max, Tensor queries, Tensor req_pool_indices, int num_recent_pages, int? "
       "fixed_topk_page_cnt, float sparsity_ratio, Tensor sparse_mask, Tensor! out_indices, Tensor! out_lengths) -> ()");
   m.impl("quest_retrieval_score_and_combine_indices", torch::kCUDA, &quest_retrieval_score_and_combine_indices);
+
+  m.def(
+      "quest_update_sparse_metadata(Tensor! page_table, Tensor physical_pages, Tensor valid_lengths, Tensor sparse_mask, "
+      "Tensor! cache_seqlens, Tensor seq_lens, Tensor original_cache_seqlens, int page_size) -> ()");
+  m.impl("quest_update_sparse_metadata", torch::kCUDA, &quest_update_sparse_metadata);
 }
 
 REGISTER_EXTENSION(common_ops)
