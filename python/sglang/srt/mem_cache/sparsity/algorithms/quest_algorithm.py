@@ -20,6 +20,8 @@ from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import (
     quest_retrieval_score_and_combine_indices_triton
 )
 
+from sgl_kernel import quest_retrieval_score_and_combine_indices
+
 logger = logging.getLogger(__name__)
 
 
@@ -254,9 +256,8 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             raise ValueError("forward_batch with seq_lens is required for TopK retrieval")
         seq_lens = seq_lens_source.seq_lens.to(device)
         
-        return quest_retrieval_score_and_combine_indices_triton(
+        return quest_retrieval_score_and_combine_indices(
             bs,
-            device,
             seq_lens,
             self.page_size,
             self.req_to_token_pool.req_to_token,
@@ -268,4 +269,4 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             self.fixed_topk_page_cnt,
             self.sparsity_ratio,
             sparse_mask,
-            )
+        )

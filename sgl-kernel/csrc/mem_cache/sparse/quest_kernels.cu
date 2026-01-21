@@ -1,0 +1,344 @@
+#include "utils.h"
+#include <cub/cub.cuh>
+#include "quest_kernels.h"
+
+// Kernel to compute scores and initialize indices for sorting
+template<typename T>
+__global__ void quest_score_kernel(
+    float* __restrict__ scores,           // [bs, max_pages]
+    int32_t* __restrict__ indices,        // [bs, max_pages]
+    const int32_t* __restrict__ seq_lens, // [bs]
+    const int32_t* __restrict__ req_to_token, // [req_pool_size, max_tokens]
+    const T* __restrict__ page_k_min,     // [total_pages, kv_heads, head_dim]
+    const T* __restrict__ page_k_max,     // [total_pages, kv_heads, head_dim]
+    const T* __restrict__ queries,        // [bs, q_heads, head_dim]
+    const int32_t* __restrict__ req_pool_indices, // [bs]
+    int64_t num_recent_pages,
+    int64_t max_pages,
+    int64_t page_size,
+    int64_t kv_heads,
+    int64_t q_heads,
+    int64_t head_dim,
+    int64_t req_to_token_stride_req,
+    int64_t req_to_token_stride_token,
+    int64_t req_to_token_num_tokens,
+    int64_t page_k_stride_page,
+    int64_t page_k_stride_head,
+    int64_t page_k_stride_dim,
+    int64_t queries_stride_req,
+    int64_t queries_stride_head,
+    int64_t queries_stride_dim
+) {
+    int64_t req_idx = blockIdx.x;
+    int64_t page_rel_idx = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (req_idx >= gridDim.x) return;
+    
+    int64_t seq_len = seq_lens[req_idx];
+    int64_t num_pages = (seq_len + page_size - 1) / page_size;
+    
+    int64_t out_idx = req_idx * max_pages + page_rel_idx;
+    
+    // Default initialization for indices
+    if (page_rel_idx < max_pages) {
+        indices[out_idx] = page_rel_idx;
+    }
+
+    if (page_rel_idx >= num_pages) {
+        if (page_rel_idx < max_pages) {
+            scores[out_idx] = -INFINITY;
+        }
+        return;
+    }
+
+    int64_t recent_start = num_pages - num_recent_pages;
+    if (recent_start < 0) recent_start = 0;
+
+    if (page_rel_idx >= recent_start) {
+        scores[out_idx] = -INFINITY;
+        return;
+    }
+
+    // Compute Score
+    int32_t req_id = req_pool_indices[req_idx];
+    
+    // Get physical page index
+    int64_t log_tok_idx = page_rel_idx * page_size;
+    int64_t safe_log_tok_idx = log_tok_idx;
+    if (safe_log_tok_idx >= req_to_token_num_tokens) safe_log_tok_idx = req_to_token_num_tokens - 1;
+    
+    int64_t offset_req_tok = (int64_t)req_id * req_to_token_stride_req + safe_log_tok_idx * req_to_token_stride_token;
+    int32_t phys_tok = req_to_token[offset_req_tok];
+    int32_t phys_page_idx = phys_tok / page_size;
+
+    float score_acc = 0.0f;
+    int64_t group_size = q_heads / kv_heads;
+
+    for (int64_t h = 0; h < kv_heads; ++h) {
+        for (int64_t d = 0; d < head_dim; ++d) {
+            // Average query over group
+            float q_avg = 0.0f;
+            for (int64_t g = 0; g < group_size; ++g) {
+                int64_t q_h = h * group_size + g;
+                int64_t q_offset = req_idx * queries_stride_req + 
+                                   q_h * queries_stride_head + 
+                                   d * queries_stride_dim;
+                q_avg += (float)queries[q_offset];
+            }
+            q_avg /= group_size;
+
+            // Load K min/max
+            int64_t k_offset = phys_page_idx * page_k_stride_page + 
+                               h * page_k_stride_head + 
+                               d * page_k_stride_dim;
+            
+            float k_min_val = (float)page_k_min[k_offset];
+            float k_max_val = (float)page_k_max[k_offset];
+
+            if (q_avg >= 0) {
+                score_acc += q_avg * k_max_val;
+            } else {
+                score_acc += q_avg * k_min_val;
+            }
+        }
+    }
+
+    scores[out_idx] = score_acc;
+}
+
+// Combine indices kernel
+// - Selects top K from sorted indices
+// - Adds recent pages
+// - Sorts the result row (optional, but usually required for attention kernels)
+__global__ void quest_combine_kernel(
+    const int32_t* __restrict__ sorted_indices, // [bs, max_pages] (sorted by score desc)
+    int32_t* __restrict__ out_indices,          // [bs, max_out]
+    int32_t* __restrict__ out_lengths,          // [bs]
+    const int32_t* __restrict__ seq_lens,
+    int64_t num_recent_pages,
+    int64_t max_pages,
+    int64_t max_out,
+    int64_t page_size,
+    bool fixed_k_mode,
+    int64_t fixed_k_val,
+    double sparsity_ratio,
+    const int32_t* __restrict__ sparse_mask
+) {
+    int64_t req_idx = blockIdx.x;
+    if (req_idx >= gridDim.x) return;
+
+    int32_t seq_len = seq_lens[req_idx];
+    int32_t num_pages = (seq_len + page_size - 1) / page_size;
+    
+    // Determine K
+    int64_t recent_start = num_pages - num_recent_pages;
+    if (recent_start < 0) recent_start = 0;
+    
+    int64_t history_pages = recent_start;
+    if (history_pages < 1) history_pages = 1; // Clamp min=1
+
+    int64_t k_target;
+    if (fixed_k_mode) {
+        k_target = fixed_k_val - num_recent_pages;
+        if (k_target < 1) k_target = 1;
+    } else {
+        k_target = (int64_t)(history_pages * sparsity_ratio);
+        if (k_target < 1) k_target = 1;
+    }
+    
+    if (k_target > history_pages) k_target = history_pages;
+    if (sparse_mask && sparse_mask[req_idx] == 0) {
+        k_target = 0; // Or handle mask logic. Python: k_per_req * sparse_mask
+    }
+    
+    // Limit by max_pages
+    if (k_target > max_pages) k_target = max_pages;
+    if (k_target > history_pages) k_target = history_pages; // Redundant but safe
+
+    int64_t out_cnt = 0;
+    int32_t* my_out = out_indices + req_idx * max_out;
+
+    // 1. Copy Top K
+    // Since sorted_indices are valid indices into the page list (0..max_pages-1),
+    // and we masked invalid/recent pages with -inf, they should be at the end.
+    // However, we must ensure we don't pick padding or recent pages if they floated up (unlikely with -inf).
+    // The indices in sorted_indices are relative page indices (0..num_pages-1).
+    
+    const int32_t* my_sorted = sorted_indices + req_idx * max_pages;
+    
+    for (int64_t i = 0; i < k_target; ++i) {
+        if (i < max_pages) {
+            int32_t p_idx = my_sorted[i];
+            // Verify it is not a recent page (shouldn't be due to -inf score)
+            // Verify it is within range
+            if (p_idx >= 0 && p_idx < recent_start) {
+                my_out[out_cnt++] = p_idx;
+            }
+        }
+    }
+
+    // 2. Add Recent Pages
+    for (int64_t i = 0; i < num_recent_pages; ++i) {
+        int32_t p_idx = recent_start + i;
+        if (p_idx < num_pages) {
+             my_out[out_cnt++] = p_idx;
+        }
+    }
+
+    // 3. Store Length
+    out_lengths[req_idx] = out_cnt;
+
+    // 4. Pad rest with -1
+    for (int64_t i = out_cnt; i < max_out; ++i) {
+        my_out[i] = -1;
+    }
+
+    // 5. Sort the output indices (ascending) for this request
+    // Bubble sort is fine for small K (e.g. < 256)
+    // If out_cnt is large, this is slow. But usually out_cnt is small.
+    for (int64_t i = 0; i < out_cnt; ++i) {
+        for (int64_t j = 0; j < out_cnt - 1 - i; ++j) {
+            if (my_out[j] > my_out[j + 1]) {
+                int32_t tmp = my_out[j];
+                my_out[j] = my_out[j + 1];
+                my_out[j + 1] = tmp;
+            }
+        }
+    }
+}
+
+std::tuple<torch::Tensor, torch::Tensor> quest_retrieval_score_and_combine_indices(
+    int64_t bs,
+    torch::Tensor seq_lens,
+    int64_t page_size,
+    torch::Tensor req_to_token,
+    torch::Tensor page_k_min,
+    torch::Tensor page_k_max,
+    torch::Tensor queries,
+    torch::Tensor req_pool_indices,
+    int64_t num_recent_pages,
+    std::optional<int64_t> fixed_topk_page_cnt,
+    double sparsity_ratio,
+    torch::Tensor sparse_mask) 
+{
+    auto device = queries.device();
+    
+    // Calculate max_pages
+    int32_t max_seq_len = torch::max(seq_lens).item<int32_t>();
+    int64_t max_pages = (max_seq_len + page_size - 1) / page_size;
+    
+    if (max_pages == 0) {
+        return {
+            torch::full({bs, 0}, -1, torch::dtype(torch::kInt32).device(device)),
+            torch::zeros({bs}, torch::dtype(torch::kInt32).device(device))
+        };
+    }
+
+    // Allocate temp buffers
+    auto scores = torch::empty({bs, max_pages}, torch::dtype(torch::kFloat32).device(device));
+    auto indices = torch::empty({bs, max_pages}, torch::dtype(torch::kInt32).device(device));
+    
+    // Launch Score Kernel
+    int64_t q_heads = queries.size(1);
+    int64_t head_dim = queries.size(2);
+    int64_t kv_heads = page_k_min.size(1);
+    
+    dim3 block(128);
+    dim3 grid(bs, (max_pages + block.x - 1) / block.x);
+    
+    // Dispatch
+    DISPATCH_FLOAT_TYPES(queries.scalar_type(), "quest_score_kernel", [&] {
+        quest_score_kernel<scalar_t><<<grid, block>>>(
+            scores.data_ptr<float>(),
+            indices.data_ptr<int32_t>(),
+            seq_lens.data_ptr<int32_t>(),
+            req_to_token.data_ptr<int32_t>(),
+            page_k_min.data_ptr<scalar_t>(),
+            page_k_max.data_ptr<scalar_t>(),
+            queries.data_ptr<scalar_t>(),
+            req_pool_indices.data_ptr<int32_t>(),
+            num_recent_pages,
+            max_pages,
+            page_size,
+            kv_heads,
+            q_heads,
+            head_dim,
+            req_to_token.stride(0),
+            req_to_token.stride(1),
+            req_to_token.size(1),
+            page_k_min.stride(0),
+            page_k_min.stride(1),
+            page_k_min.stride(2),
+            queries.stride(0),
+            queries.stride(1),
+            queries.stride(2)
+        );
+    });
+    
+    CHECK_CUDA_SUCCESS(cudaGetLastError());
+
+    // Sort Pairs (Descending Scores)
+    // Create offsets for segmented sort
+    auto offsets = torch::arange(0, (bs + 1) * max_pages, max_pages, torch::dtype(torch::kInt32).device(device));
+    
+    // CUB Sort
+    void* d_temp_storage = NULL;
+    size_t temp_storage_bytes = 0;
+    
+    // 1. Determine temp storage size
+    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_temp_storage, temp_storage_bytes,
+        scores.data_ptr<float>(), scores.data_ptr<float>(),
+        indices.data_ptr<int32_t>(), indices.data_ptr<int32_t>(),
+        bs * max_pages, bs,
+        offsets.data_ptr<int32_t>(), offsets.data_ptr<int32_t>() + 1
+    );
+    
+    auto temp_storage = torch::empty({(int64_t)temp_storage_bytes}, torch::dtype(torch::kByte).device(device));
+    d_temp_storage = temp_storage.data_ptr();
+    
+    // 2. Run Sort
+    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_temp_storage, temp_storage_bytes,
+        scores.data_ptr<float>(), scores.data_ptr<float>(),
+        indices.data_ptr<int32_t>(), indices.data_ptr<int32_t>(),
+        bs * max_pages, bs,
+        offsets.data_ptr<int32_t>(), offsets.data_ptr<int32_t>() + 1
+    );
+    
+    // Determine Output Size
+    int64_t k_val = 0;
+    if (fixed_topk_page_cnt.has_value()) {
+        k_val = fixed_topk_page_cnt.value();
+    } else {
+        // Estimate max K needed?
+        // Max possible pages * sparsity + recent
+        k_val = (int64_t)(max_pages * sparsity_ratio) + num_recent_pages;
+    }
+    // Safety clamp
+    if (k_val > max_pages) k_val = max_pages;
+    int64_t max_out = k_val + num_recent_pages + 32; // Buffer
+
+    auto out_indices = torch::full({bs, max_out}, -1, torch::dtype(torch::kInt32).device(device));
+    auto out_lengths = torch::zeros({bs}, torch::dtype(torch::kInt32).device(device));
+    
+    // Combine Kernel
+    quest_combine_kernel<<<bs, 128>>>(
+        indices.data_ptr<int32_t>(),
+        out_indices.data_ptr<int32_t>(),
+        out_lengths.data_ptr<int32_t>(),
+        seq_lens.data_ptr<int32_t>(),
+        num_recent_pages,
+        max_pages,
+        max_out,
+        page_size,
+        fixed_topk_page_cnt.has_value(),
+        fixed_topk_page_cnt.has_value() ? fixed_topk_page_cnt.value() : 0,
+        sparsity_ratio,
+        sparse_mask.defined() ? sparse_mask.data_ptr<int32_t>() : nullptr
+    );
+    
+    CHECK_CUDA_SUCCESS(cudaGetLastError());
+
+    return {out_indices, out_lengths};
+}
