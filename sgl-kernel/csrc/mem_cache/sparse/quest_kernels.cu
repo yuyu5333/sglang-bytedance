@@ -615,14 +615,20 @@ __global__ void quest_diff_and_update_kernel(
             }
 
             if (need_load) {
-                int64_t phys_page = s_curr_page_ids[page_idx];
                 int64_t log_page = s_curr_top_k[page_idx];
-                
-                // Use int64 arithmetic for address calculation
-                load_tokens[out_idx] = phys_page * page_size + token_offset;
-                
                 int64_t host_offset = (int64_t)req_idx * req_to_tokens_stride + log_page * page_size + token_offset;
-                load_tokens_host[out_idx] = req_to_tokens_host[host_offset];
+                int64_t host_token = req_to_tokens_host[host_offset];
+
+                if (host_token != -1) {
+                    int64_t phys_page = s_curr_page_ids[page_idx];
+                    
+                    // Use int64 arithmetic for address calculation
+                    load_tokens[out_idx] = phys_page * page_size + token_offset;
+                    load_tokens_host[out_idx] = host_token;
+                } else {
+                    load_tokens[out_idx] = -1;
+                    load_tokens_host[out_idx] = -1;
+                }
             } else {
                 load_tokens[out_idx] = -1;
                 load_tokens_host[out_idx] = -1;
