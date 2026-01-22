@@ -161,5 +161,10 @@ class FlashAttentionAdaptor(BackendAdaptor):
             ),
             (1, 0),
         )
-        current_metadata.max_seq_len_k = int(current_metadata.cache_seqlens_int32.max())
+        if getattr(forward_batch, "_sparse_all", False):
+            current_metadata.max_seq_len_k = min(
+                int(self._original_metadata["max_seq_len_k"]), int(topk_tokens_cnt)
+            )
+        else:
+            current_metadata.max_seq_len_k = int(self._original_metadata["max_seq_len_k"])
         return current_metadata
