@@ -561,7 +561,19 @@ __global__ void quest_diff_and_update_kernel(
         load_tokens_host[out_idx] = -1;
     }
     
-    if (sparse_mask[req_idx_in_batch] && seq_len > 0) {
+    if (!sparse_mask[req_idx_in_batch] || seq_len <= 0) {
+        int valid_len = valid_lengths[req_idx_in_batch];
+        for (int i = tid; i < top_k; i += blockDim.x) {
+            int64_t log_page = s_curr_top_k[i];
+            if (i < valid_len && log_page >= 0 && log_page < pt_stride) {
+                s_curr_page_ids[i] = (int64_t)page_table[req_idx_in_batch * pt_stride + log_page];
+            } else {
+                s_curr_page_ids[i] = -1;
+            }
+            s_load_mask[i] = 0;
+        }
+        __syncthreads();
+    } else {
         // Intersection
         for (int i = tid; i < top_k; i += blockDim.x) {
             int64_t val = s_curr_top_k[i];
