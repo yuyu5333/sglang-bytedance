@@ -132,7 +132,11 @@ class FlashAttentionAdaptor(BackendAdaptor):
         topk_tokens_cnt = req_states.topk_tokens_cnt
         topk_pages = topk_tokens_cnt // page_size
         physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages].contiguous()
-        topk_page_indices = selected_indices[:, :topk_pages].contiguous()
+        if selected_indices.shape[1] < topk_pages:
+            raise ValueError(
+                f"selected_indices has insufficient columns: {selected_indices.shape[1]} < {topk_pages}"
+            )
+        topk_page_indices = selected_indices[:, :topk_pages].to(torch.int32).contiguous()
 
         sparse_mask_i32 = kwargs.get("sparse_mask_i32", None)
         if sparse_mask_i32 is None:
@@ -143,6 +147,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
         seq_lens_i32 = kwargs.get("seq_lens_i32", None)
         if seq_lens_i32 is None:
             seq_lens_i32 = forward_batch.seq_lens.to(torch.int32)
+        valid_lengths_i32 = valid_lengths.to(torch.int32)
 
         invoke_sparse_diff_cuda_kernel(
             current_metadata.page_table,
@@ -151,7 +156,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
             topk_page_indices,
             req_pool_indices_i32.contiguous(),
             seq_lens_i32.contiguous(),
-            valid_lengths.contiguous(),
+            valid_lengths_i32.contiguous(),
             sparse_mask_i32.contiguous(),
             req_states.req_to_tokens_host,
             physical_pages,
@@ -187,7 +192,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
         update_sparse_metadata(
             current_metadata.page_table,
             physical_pages,
-            valid_lengths.contiguous(),
+            valid_lengths_i32.contiguous(),
             sparse_mask_i32.contiguous(),
             current_metadata.cache_seqlens_int32,
             seq_lens_i32.contiguous(),
@@ -201,10 +206,5 @@ class FlashAttentionAdaptor(BackendAdaptor):
             ),
             (1, 0),
         )
-        if getattr(forward_batch, "_sparse_all", False):
-            current_metadata.max_seq_len_k = min(
-                int(self._original_metadata["max_seq_len_k"]), int(topk_tokens_cnt)
-            )
-        else:
-            current_metadata.max_seq_len_k = int(self._original_metadata["max_seq_len_k"])
+        current_metadata.max_seq_len_k = int(current_metadata.cache_seqlens_int32.max().item())
         return current_metadata

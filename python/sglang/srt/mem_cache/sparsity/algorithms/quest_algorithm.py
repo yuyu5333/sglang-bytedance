@@ -32,8 +32,6 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         self.page_k_min = {}
         self.page_k_max = {}
         self.page_valid = {}
-        self._page_k_min_cast_cache = {}
-        self._page_k_max_cast_cache = {}
 
     def _initialize_representation_pools(
         self, start_layer: int, end_layer: int, total_num_pages: int
@@ -332,17 +330,8 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         page_k_min = self.page_k_min[layer_id]
         page_k_max = self.page_k_max[layer_id]
         if page_k_min.dtype != queries.dtype:
-            casted = self._page_k_min_cast_cache.get((layer_id, queries.dtype), None)
-            if casted is None:
-                casted = page_k_min.to(queries.dtype)
-                self._page_k_min_cast_cache[(layer_id, queries.dtype)] = casted
-            page_k_min = casted
-        if page_k_max.dtype != queries.dtype:
-            casted = self._page_k_max_cast_cache.get((layer_id, queries.dtype), None)
-            if casted is None:
-                casted = page_k_max.to(queries.dtype)
-                self._page_k_max_cast_cache[(layer_id, queries.dtype)] = casted
-            page_k_max = casted
+            page_k_min = page_k_min.to(queries.dtype)
+            page_k_max = page_k_max.to(queries.dtype)
 
         quest_retrieval_score_and_combine_indices(
             bs,
