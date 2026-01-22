@@ -54,7 +54,7 @@ def quest_retrieval_score_and_combine_indices(
         out_lengths
     )
 
-def quest_diff_and_update_sparse_metadata(
+def invoke_sparse_diff_cuda_kernel(
     page_table: torch.Tensor,
     last_top_k: torch.Tensor,
     last_page_ids: torch.Tensor,
@@ -94,7 +94,7 @@ def quest_diff_and_update_sparse_metadata(
         page_size: Page size
     """
     
-    return torch.ops.sgl_kernel.quest_diff_and_update_sparse_metadata.default(
+    return torch.ops.sgl_kernel.invoke_sparse_diff_cuda_kernel.default(
         page_table,
         last_top_k,
         last_page_ids,
@@ -113,7 +113,7 @@ def quest_diff_and_update_sparse_metadata(
         page_size
     )
 
-def quest_update_sparse_metadata(
+def update_sparse_metadata(
     page_table: torch.Tensor,
     physical_pages: torch.Tensor,
     valid_lengths: torch.Tensor,
@@ -126,7 +126,7 @@ def quest_update_sparse_metadata(
     """
     Call the optimized CUDA kernel to update page_table and cache_seqlens.
     """
-    return torch.ops.sgl_kernel.quest_update_sparse_metadata.default(
+    return torch.ops.sgl_kernel.update_sparse_metadata.default(
         page_table,
         physical_pages,
         valid_lengths,

@@ -62,7 +62,7 @@ void quest_retrieval_score_and_combine_indices(
     torch::Tensor out_indices,
     torch::Tensor out_lengths);
 
-void quest_diff_and_update_sparse_metadata(
+void invoke_sparse_diff_cuda_kernel(
     torch::Tensor page_table,
     torch::Tensor last_top_k,
     torch::Tensor last_page_ids,
@@ -80,7 +80,7 @@ void quest_diff_and_update_sparse_metadata(
     int64_t layer_id,
     int64_t page_size);
 
-void quest_update_sparse_metadata(
+void update_sparse_metadata(
     torch::Tensor page_table,
     torch::Tensor physical_pages,
     torch::Tensor valid_lengths,
