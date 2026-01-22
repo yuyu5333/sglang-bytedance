@@ -135,15 +135,16 @@ class FlashAttentionAdaptor(BackendAdaptor):
         topk_tokens_cnt = req_states.topk_tokens_cnt
         topk_pages = topk_tokens_cnt // page_size
         physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages]
+        topk_page_indices = selected_indices[:, :topk_pages].to(torch.int32).contiguous()
 
         quest_diff_and_update_sparse_metadata(
             current_metadata.page_table,
             req_states.last_top_k_result,
             req_states.last_device_indices,
-            selected_indices.contiguous(),
+            topk_page_indices,
             forward_batch.req_pool_indices.to(torch.int32).contiguous(),
             forward_batch.seq_lens.to(torch.int32).contiguous(),
-            valid_lengths.contiguous(),
+            valid_lengths.to(torch.int32).contiguous(),
             sparse_mask.to(torch.int32).contiguous(),
             req_states.req_to_tokens_host,
             physical_pages,
