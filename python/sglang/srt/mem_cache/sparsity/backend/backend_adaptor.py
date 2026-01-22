@@ -134,7 +134,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
 
         topk_tokens_cnt = req_states.topk_tokens_cnt
         topk_pages = topk_tokens_cnt // page_size
-        physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages]
+        physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages].contiguous()
         topk_page_indices = selected_indices[:, :topk_pages].to(torch.int32).contiguous()
 
         invoke_sparse_diff_cuda_kernel(
