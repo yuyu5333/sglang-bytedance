@@ -496,7 +496,7 @@ void update_sparse_metadata(
     CHECK_CUDA_SUCCESS(cudaGetLastError());
 }
 
-__global__ void quest_diff_and_update_kernel(
+__global__ void sparse_diff_kernel(
     const int32_t* __restrict__ curr_top_k,       // [bs, top_k]
     const int32_t* __restrict__ req_pool_indices, // [bs]
     const int32_t* __restrict__ valid_lengths,    // [bs]
@@ -788,7 +788,7 @@ void invoke_sparse_diff_cuda_kernel(
     // Use int64 for shared memory size calculation
     size_t shared_mem = (2 * hot_buffer_len + 3 * top_k) * sizeof(int64_t);
     
-    quest_diff_and_update_kernel<<<bs, 128, shared_mem>>>(
+    sparse_diff_kernel<<<bs, 128, shared_mem>>>(
         curr_top_k.data_ptr<int32_t>(),
         req_pool_indices.data_ptr<int32_t>(),
         valid_lengths.data_ptr<int32_t>(),
