@@ -528,6 +528,8 @@ __global__ void quest_diff_and_update_kernel(
     // Shared counters for parallel compaction
     __shared__ int s_victim_count;
     __shared__ int s_fill_count;
+    using BlockScan = cub::BlockScan<int, 128>;
+    __shared__ typename BlockScan::TempStorage scan_storage;
 
     int tid = threadIdx.x;
     int req_idx_in_batch = blockIdx.x;
@@ -551,8 +553,15 @@ __global__ void quest_diff_and_update_kernel(
     }
     
     __syncthreads();
+
+    int32_t seq_len = seq_lens[req_idx_in_batch];
+    for (int i = tid; i < top_k * page_size; i += blockDim.x) {
+        int64_t out_idx = (int64_t)req_idx_in_batch * load_tokens_stride + i;
+        load_tokens[out_idx] = -1;
+        load_tokens_host[out_idx] = -1;
+    }
     
-    if (sparse_mask[req_idx_in_batch]) {
+    if (sparse_mask[req_idx_in_batch] && seq_len > 0) {
         // Intersection
         for (int i = tid; i < top_k; i += blockDim.x) {
             int64_t val = s_curr_top_k[i];
@@ -568,84 +577,100 @@ __global__ void quest_diff_and_update_kernel(
         }
         
         __syncthreads();
-        
-        // Parallel Fill Empty Slots
-        // 1. Initialize counters
+
+        int64_t local_top_k = -1;
+        int64_t local_page_id = -1;
+        int keep = 0;
+        if (tid < hot_buffer_len) {
+            local_top_k = s_last_top_k[tid];
+            local_page_id = s_last_page_ids[tid];
+            keep = (local_page_id != -1);
+        }
+
+        int prefix = 0;
+        int remaining = 0;
+        BlockScan(scan_storage).ExclusiveSum(keep, prefix, remaining);
+        if (keep) {
+            s_last_top_k[prefix] = local_top_k;
+            s_last_page_ids[prefix] = local_page_id;
+        }
         if (tid == 0) {
-            s_victim_count = 0;
+            s_victim_count = remaining;
             s_fill_count = 0;
         }
         __syncthreads();
 
-        // 2. Collect Victims (pages in history that were NOT reused)
-        for (int j = tid; j < hot_buffer_len; j += blockDim.x) {
-            if (s_last_page_ids[j] != -1) {
-                int idx = atomicAdd(&s_victim_count, 1);
-                s_last_top_k[idx] = s_last_page_ids[j];
-            }
-        }
-        
-        __syncthreads();
+        if (tid == 0) {
+            int used = 0;
+            int valid_len = valid_lengths[req_idx_in_batch];
+            for (int i = 0; i < top_k; ++i) {
+                if (i >= valid_len || s_curr_top_k[i] == -1) {
+                    s_curr_top_k[i] = -1;
+                    s_curr_page_ids[i] = -1;
+                    s_load_mask[i] = 0;
+                    continue;
+                }
 
-        // 3. Assign Slots
-        for (int i = tid; i < top_k; i += blockDim.x) {
-            if (s_curr_page_ids[i] == -1 && s_curr_top_k[i] != -1) {
-                int idx = atomicAdd(&s_fill_count, 1);
-                if (idx < s_victim_count) {
-                    s_curr_page_ids[i] = s_last_top_k[idx];
-                    s_load_mask[i] = 1; // Need load
+                if (s_curr_page_ids[i] == -1) {
+                    if (used < s_victim_count) {
+                        s_curr_page_ids[i] = s_last_page_ids[used];
+                        s_load_mask[i] = 1;
+                        ++used;
+                    } else {
+                        s_curr_page_ids[i] = -1;
+                        s_load_mask[i] = 0;
+                    }
+                } else {
+                    s_load_mask[i] = 0;
                 }
             }
+            s_fill_count = used;
         }
-        
         __syncthreads();
-        
+
         // Generate Load Commands
-        int32_t seq_len = seq_lens[req_idx_in_batch];
         for (int i = tid; i < top_k * page_size; i += blockDim.x) {
             int page_idx = i / page_size;
             int token_offset = i % page_size;
             int64_t out_idx = req_idx_in_batch * load_tokens_stride + i;
             
-            bool need_load = false;
             if (page_idx < top_k && s_load_mask[page_idx]) {
                 int64_t log_page = s_curr_top_k[page_idx];
-                // Check if this token is within seq_len
-                if (log_page * page_size + token_offset < seq_len) {
-                    need_load = true;
+                if (log_page != -1 && log_page * page_size + token_offset < seq_len) {
+                    int64_t host_offset =
+                        (int64_t)req_idx * req_to_tokens_stride + log_page * page_size + token_offset;
+                    int64_t host_token = req_to_tokens_host[host_offset];
+                    if (host_token != -1) {
+                        int64_t phys_page = s_curr_page_ids[page_idx];
+                        load_tokens[out_idx] = phys_page * page_size + token_offset;
+                        load_tokens_host[out_idx] = host_token;
+                    }
                 }
-            }
-
-            if (need_load) {
-                int64_t log_page = s_curr_top_k[page_idx];
-                int64_t host_offset = (int64_t)req_idx * req_to_tokens_stride + log_page * page_size + token_offset;
-                int64_t host_token = req_to_tokens_host[host_offset];
-
-                if (host_token != -1) {
-                    int64_t phys_page = s_curr_page_ids[page_idx];
-                    
-                    // Use int64 arithmetic for address calculation
-                    load_tokens[out_idx] = phys_page * page_size + token_offset;
-                    load_tokens_host[out_idx] = host_token;
-                } else {
-                    load_tokens[out_idx] = -1;
-                    load_tokens_host[out_idx] = -1;
-                }
-            } else {
-                load_tokens[out_idx] = -1;
-                load_tokens_host[out_idx] = -1;
             }
         }
 
         // Update State (int64 -> int64)
+        int victims_used = s_fill_count;
+        int valid_len = valid_lengths[req_idx_in_batch];
         for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
             int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
             if (i < top_k) {
-                last_top_k[offset] = s_curr_top_k[i];
-                last_page_ids[offset] = s_curr_page_ids[i];
+                if (i < valid_len && s_curr_top_k[i] != -1) {
+                    last_top_k[offset] = s_curr_top_k[i];
+                    last_page_ids[offset] = s_curr_page_ids[i];
+                } else {
+                    last_top_k[offset] = -1;
+                    last_page_ids[offset] = -1;
+                }
             } else {
-                last_top_k[offset] = -1;
-                last_page_ids[offset] = -1;
+                int src = victims_used + (i - top_k);
+                if (src < s_victim_count) {
+                    last_top_k[offset] = s_last_top_k[src];
+                    last_page_ids[offset] = s_last_page_ids[src];
+                } else {
+                    last_top_k[offset] = -1;
+                    last_page_ids[offset] = -1;
+                }
             }
         }
     }
@@ -691,6 +716,10 @@ void quest_diff_and_update_sparse_metadata(
     TORCH_CHECK(page_table.scalar_type() == torch::kInt32, "page_table must be int32");
     TORCH_CHECK(curr_top_k.scalar_type() == torch::kInt32, "curr_top_k must be int32");
     TORCH_CHECK(physical_pages.scalar_type() == torch::kInt32, "physical_pages must be int32");
+    TORCH_CHECK(req_pool_indices.scalar_type() == torch::kInt32, "req_pool_indices must be int32");
+    TORCH_CHECK(seq_lens.scalar_type() == torch::kInt32, "seq_lens must be int32");
+    TORCH_CHECK(valid_lengths.scalar_type() == torch::kInt32, "valid_lengths must be int32");
+    TORCH_CHECK(sparse_mask.scalar_type() == torch::kInt32, "sparse_mask must be int32");
     
     TORCH_CHECK(last_top_k.scalar_type() == torch::kInt64, "last_top_k must be int64");
     TORCH_CHECK(last_page_ids.scalar_type() == torch::kInt64, "last_page_ids must be int64");
@@ -702,6 +731,14 @@ void quest_diff_and_update_sparse_metadata(
     int64_t pt_stride = page_table.stride(0);
     int64_t top_k = curr_top_k.size(1);
     int64_t hot_buffer_len = last_top_k.size(2);
+
+    TORCH_CHECK(hot_buffer_len >= top_k, "hot_buffer_len must be >= top_k");
+    TORCH_CHECK(physical_pages.size(0) == bs, "physical_pages batch mismatch");
+    TORCH_CHECK(physical_pages.size(1) == top_k, "physical_pages second dim must equal top_k");
+    TORCH_CHECK(load_tokens.size(0) >= bs, "load_tokens batch must be >= bs");
+    TORCH_CHECK(load_tokens_host.size(0) >= bs, "load_tokens_host batch must be >= bs");
+    TORCH_CHECK(load_tokens.size(1) >= top_k * page_size, "load_tokens second dim too small");
+    TORCH_CHECK(load_tokens_host.size(1) >= top_k * page_size, "load_tokens_host second dim too small");
     
     // Use int64 for shared memory size calculation
     size_t shared_mem = (2 * hot_buffer_len + 3 * top_k) * sizeof(int64_t);
