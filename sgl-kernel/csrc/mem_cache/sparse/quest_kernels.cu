@@ -501,6 +501,7 @@ __global__ void quest_diff_and_update_kernel(
     int64_t* __restrict__ last_top_k,             // [num_reqs, num_layers, hot_buffer_len]
     int64_t* __restrict__ last_page_ids,          // [num_reqs, num_layers, hot_buffer_len]
     int32_t* __restrict__ page_table,             // [bs, pt_stride]
+    int32_t* __restrict__ physical_pages,         // [bs, top_k]
     int64_t* __restrict__ load_tokens,            // [bs, top_k * page_size]
     int64_t* __restrict__ load_tokens_host,       // [bs, top_k * page_size]
     
@@ -513,7 +514,8 @@ __global__ void quest_diff_and_update_kernel(
     int64_t last_stride_req,
     int64_t last_stride_layer,
     int64_t req_to_tokens_stride,
-    int64_t load_tokens_stride
+    int64_t load_tokens_stride,
+    int64_t physical_pages_stride
 ) {
     // Use int64_t for shared memory to prevent precision loss / sign extension issues
     extern __shared__ int64_t s_mem[];
@@ -549,16 +551,6 @@ __global__ void quest_diff_and_update_kernel(
     }
     
     __syncthreads();
-
-    int32_t seq_len = seq_lens[req_idx_in_batch];
-    if (!sparse_mask[req_idx_in_batch] || seq_len <= 0) {
-        for (int i = tid; i < top_k * page_size; i += blockDim.x) {
-            int64_t out_idx = req_idx_in_batch * load_tokens_stride + i;
-            load_tokens[out_idx] = -1;
-            load_tokens_host[out_idx] = -1;
-        }
-        return;
-    }
     
     if (sparse_mask[req_idx_in_batch]) {
         // Intersection
@@ -609,6 +601,7 @@ __global__ void quest_diff_and_update_kernel(
         __syncthreads();
         
         // Generate Load Commands
+        int32_t seq_len = seq_lens[req_idx_in_batch];
         for (int i = tid; i < top_k * page_size; i += blockDim.x) {
             int page_idx = i / page_size;
             int token_offset = i % page_size;
@@ -655,15 +648,15 @@ __global__ void quest_diff_and_update_kernel(
                 last_page_ids[offset] = -1;
             }
         }
-        
-        // Update Page Table (int64 -> int32)
-        // Note: SGLang page table is int32, so we must truncate.
-        // Assumes physical pages fit in int32.
-        int valid_len = valid_lengths[req_idx_in_batch];
-        for (int i = tid; i < valid_len; i += blockDim.x) {
-            if (i < top_k) {
-                page_table[req_idx_in_batch * pt_stride + i] = (int32_t)s_curr_page_ids[i];
-            }
+    }
+
+    int valid_len = valid_lengths[req_idx_in_batch];
+    for (int i = tid; i < top_k; i += blockDim.x) {
+        int64_t out_idx = req_idx_in_batch * physical_pages_stride + i;
+        if (sparse_mask[req_idx_in_batch] && i < valid_len) {
+            physical_pages[out_idx] = (int32_t)s_curr_page_ids[i];
+        } else {
+            physical_pages[out_idx] = -1;
         }
     }
 }
@@ -678,6 +671,7 @@ void quest_diff_and_update_sparse_metadata(
     torch::Tensor valid_lengths,
     torch::Tensor sparse_mask,
     torch::Tensor req_to_tokens_host,
+    torch::Tensor physical_pages,
     torch::Tensor load_tokens,
     torch::Tensor load_tokens_host,
     torch::Tensor cache_seqlens,
@@ -690,11 +684,13 @@ void quest_diff_and_update_sparse_metadata(
     TORCH_CHECK(last_page_ids.is_cuda(), "last_page_ids must be on CUDA");
     TORCH_CHECK(curr_top_k.is_cuda(), "curr_top_k must be on CUDA");
     TORCH_CHECK(req_to_tokens_host.is_cuda(), "req_to_tokens_host must be on CUDA");
+    TORCH_CHECK(physical_pages.is_cuda(), "physical_pages must be on CUDA");
     TORCH_CHECK(load_tokens.is_cuda(), "load_tokens must be on CUDA");
     TORCH_CHECK(load_tokens_host.is_cuda(), "load_tokens_host must be on CUDA");
     
     TORCH_CHECK(page_table.scalar_type() == torch::kInt32, "page_table must be int32");
     TORCH_CHECK(curr_top_k.scalar_type() == torch::kInt32, "curr_top_k must be int32");
+    TORCH_CHECK(physical_pages.scalar_type() == torch::kInt32, "physical_pages must be int32");
     
     TORCH_CHECK(last_top_k.scalar_type() == torch::kInt64, "last_top_k must be int64");
     TORCH_CHECK(last_page_ids.scalar_type() == torch::kInt64, "last_page_ids must be int64");
@@ -721,6 +717,7 @@ void quest_diff_and_update_sparse_metadata(
         last_top_k.data_ptr<int64_t>(),
         last_page_ids.data_ptr<int64_t>(),
         page_table.data_ptr<int32_t>(),
+        physical_pages.data_ptr<int32_t>(),
         load_tokens.data_ptr<int64_t>(),
         load_tokens_host.data_ptr<int64_t>(),
         
@@ -733,22 +730,9 @@ void quest_diff_and_update_sparse_metadata(
         last_top_k.stride(0),
         last_top_k.stride(1),
         req_to_tokens_host.stride(0),
-        load_tokens.stride(0)
+        load_tokens.stride(0),
+        physical_pages.stride(0)
     );
     CHECK_CUDA_SUCCESS(cudaGetLastError());
 
-    // Compute Sparse Seqlens
-    dim3 block(256);
-    dim3 grid((bs + block.x - 1) / block.x);
-    
-    quest_compute_sparse_seqlens_kernel<<<grid, block>>>(
-        cache_seqlens.data_ptr<int32_t>(),
-        seq_lens.data_ptr<int32_t>(),
-        valid_lengths.data_ptr<int32_t>(),
-        sparse_mask.data_ptr<int32_t>(),
-        original_cache_seqlens.data_ptr<int32_t>(),
-        page_size,
-        bs
-    );
-    CHECK_CUDA_SUCCESS(cudaGetLastError());
 }

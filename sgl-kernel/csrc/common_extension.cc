@@ -634,8 +634,13 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def(
       "quest_diff_and_update_sparse_metadata(Tensor! page_table, Tensor! last_top_k, Tensor! last_page_ids, Tensor "
       "curr_top_k, Tensor req_pool_indices, Tensor seq_lens, Tensor valid_lengths, Tensor sparse_mask, Tensor req_to_tokens_host, "
-      "Tensor! load_tokens, Tensor! load_tokens_host, Tensor! cache_seqlens, Tensor original_cache_seqlens, int layer_id, int page_size) -> ()");
+      "Tensor! physical_pages, Tensor! load_tokens, Tensor! load_tokens_host, Tensor! cache_seqlens, Tensor original_cache_seqlens, int layer_id, int page_size) -> ()");
   m.impl("quest_diff_and_update_sparse_metadata", torch::kCUDA, &quest_diff_and_update_sparse_metadata);
+
+  m.def(
+      "quest_update_sparse_metadata(Tensor! page_table, Tensor physical_pages, Tensor valid_lengths, Tensor sparse_mask, "
+      "Tensor! cache_seqlens, Tensor seq_lens, Tensor original_cache_seqlens, int page_size) -> ()");
+  m.impl("quest_update_sparse_metadata", torch::kCUDA, &quest_update_sparse_metadata);
 }
 
 REGISTER_EXTENSION(common_ops)

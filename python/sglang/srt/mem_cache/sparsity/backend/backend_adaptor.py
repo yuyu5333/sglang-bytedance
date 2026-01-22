@@ -10,7 +10,7 @@ from sglang.srt.mem_cache.sparsity.kernel.flashattn_metadata_kernels import (
     compute_sparse_seqlens_triton,
 )
 
-from sgl_kernel import quest_diff_and_update_sparse_metadata
+from sgl_kernel import quest_diff_and_update_sparse_metadata, quest_update_sparse_metadata
 
 
 if TYPE_CHECKING:
@@ -132,6 +132,10 @@ class FlashAttentionAdaptor(BackendAdaptor):
         req_states = self.sparse_kv_cache_manager.req_states
         batch_size = sparse_mask.shape[0]
 
+        topk_tokens_cnt = req_states.topk_tokens_cnt
+        topk_pages = topk_tokens_cnt // page_size
+        physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages]
+
         quest_diff_and_update_sparse_metadata(
             current_metadata.page_table,
             req_states.last_top_k_result,
@@ -142,6 +146,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
             valid_lengths.contiguous(),
             sparse_mask.to(torch.int32).contiguous(),
             req_states.req_to_tokens_host,
+            physical_pages,
             req_states.should_load_device_indices,
             req_states.should_load_host_indices,
             current_metadata.cache_seqlens_int32,
@@ -151,7 +156,6 @@ class FlashAttentionAdaptor(BackendAdaptor):
         )
 
         # Data Loading
-        topk_tokens_cnt = req_states.topk_tokens_cnt
         swap_target_device_slots = req_states.should_load_device_indices[:batch_size, :topk_tokens_cnt]
         swap_source_host_slots = req_states.should_load_host_indices[:batch_size, :topk_tokens_cnt]
         
@@ -166,6 +170,17 @@ class FlashAttentionAdaptor(BackendAdaptor):
                 layer_id,
                 "kernel"
              )
+
+        quest_update_sparse_metadata(
+            current_metadata.page_table,
+            physical_pages,
+            valid_lengths.to(torch.int32).contiguous(),
+            sparse_mask.to(torch.int32).contiguous(),
+            current_metadata.cache_seqlens_int32,
+            forward_batch.seq_lens.to(torch.int32).contiguous(),
+            self._original_metadata["cache_seqlens_int32"],
+            page_size
+        )
 
         current_metadata.cu_seqlens_k = torch.nn.functional.pad(
             torch.cumsum(

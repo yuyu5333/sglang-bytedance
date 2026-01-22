@@ -30,9 +30,20 @@ void quest_diff_and_update_sparse_metadata(
     torch::Tensor valid_lengths,
     torch::Tensor sparse_mask,
     torch::Tensor req_to_tokens_host,
+    torch::Tensor physical_pages,
     torch::Tensor load_tokens,
     torch::Tensor load_tokens_host,
     torch::Tensor cache_seqlens,
     torch::Tensor original_cache_seqlens,
     int64_t layer_id,
+    int64_t page_size);
+
+void quest_update_sparse_metadata(
+    torch::Tensor page_table,
+    torch::Tensor physical_pages,
+    torch::Tensor valid_lengths,
+    torch::Tensor sparse_mask,
+    torch::Tensor cache_seqlens,
+    torch::Tensor seq_lens,
+    torch::Tensor original_cache_seqlens,
     int64_t page_size);

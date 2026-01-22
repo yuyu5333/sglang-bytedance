@@ -64,6 +64,7 @@ def quest_diff_and_update_sparse_metadata(
     valid_lengths: torch.Tensor,
     sparse_mask: torch.Tensor,
     req_to_tokens_host: torch.Tensor,
+    physical_pages: torch.Tensor,
     load_tokens: torch.Tensor,
     load_tokens_host: torch.Tensor,
     cache_seqlens: torch.Tensor,
@@ -84,6 +85,7 @@ def quest_diff_and_update_sparse_metadata(
         valid_lengths: Valid lengths [bs]
         sparse_mask: Sparse mask [bs]
         req_to_tokens_host: Mapping from request to host tokens
+        physical_pages: Output tensor for physical page indices [bs, top_k]
         load_tokens: Output tensor for tokens to load to device [bs, top_k * page_size]
         load_tokens_host: Output tensor for host tokens source [bs, top_k * page_size]
         cache_seqlens: Cache sequence lengths [bs]
@@ -102,10 +104,35 @@ def quest_diff_and_update_sparse_metadata(
         valid_lengths,
         sparse_mask,
         req_to_tokens_host,
+        physical_pages,
         load_tokens,
         load_tokens_host,
         cache_seqlens,
         original_cache_seqlens,
         layer_id,
+        page_size
+    )
+
+def quest_update_sparse_metadata(
+    page_table: torch.Tensor,
+    physical_pages: torch.Tensor,
+    valid_lengths: torch.Tensor,
+    sparse_mask: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    original_cache_seqlens: torch.Tensor,
+    page_size: int,
+) -> None:
+    """
+    Call the optimized CUDA kernel to update page_table and cache_seqlens.
+    """
+    return torch.ops.sgl_kernel.quest_update_sparse_metadata.default(
+        page_table,
+        physical_pages,
+        valid_lengths,
+        sparse_mask,
+        cache_seqlens,
+        seq_lens,
+        original_cache_seqlens,
         page_size
     )
