@@ -390,7 +390,8 @@ __global__ void quest_update_page_table_kernel(
     const int32_t* __restrict__ valid_lengths,  // [bs]
     const int32_t* __restrict__ sparse_mask,    // [bs]
     int64_t max_selected,
-    int64_t pt_stride
+    int64_t pt_stride,
+    int64_t pt_cols
 ) {
     int64_t req_idx = blockIdx.x;
     if (sparse_mask[req_idx] == 0) return;
@@ -398,7 +399,7 @@ __global__ void quest_update_page_table_kernel(
     int32_t valid_len = valid_lengths[req_idx];
     
     for (int64_t i = threadIdx.x; i < max_selected; i += blockDim.x) {
-        if (i < valid_len) {
+        if (i < valid_len && i < pt_cols) {
             page_table[req_idx * pt_stride + i] = physical_pages[req_idx * max_selected + i];
         }
     }
@@ -454,9 +455,13 @@ void quest_update_sparse_metadata(
     TORCH_CHECK(physical_pages.is_contiguous(), "physical_pages must be contiguous");
     TORCH_CHECK(valid_lengths.is_contiguous(), "valid_lengths must be contiguous");
     TORCH_CHECK(sparse_mask.is_contiguous(), "sparse_mask must be contiguous");
+    TORCH_CHECK(page_table.is_contiguous(), "page_table must be contiguous");
+    TORCH_CHECK(seq_lens.is_contiguous(), "seq_lens must be contiguous");
+    TORCH_CHECK(original_cache_seqlens.is_contiguous(), "original_cache_seqlens must be contiguous");
 
     int64_t bs = page_table.size(0);
     int64_t pt_stride = page_table.stride(0);
+    int64_t pt_cols = page_table.size(1);
     int64_t max_selected = physical_pages.size(1);
     
     auto device = page_table.device();
@@ -470,7 +475,8 @@ void quest_update_sparse_metadata(
         valid_lengths.data_ptr<int32_t>(),
         sparse_mask.data_ptr<int32_t>(),
         max_selected,
-        pt_stride
+        pt_stride,
+        pt_cols
     );
     CHECK_CUDA_SUCCESS(cudaGetLastError());
 
@@ -511,6 +517,7 @@ __global__ void quest_diff_and_update_kernel(
     int64_t top_k,
     int64_t page_size,
     int64_t pt_stride,
+    int64_t pt_cols,
     int64_t last_stride_req,
     int64_t last_stride_layer,
     int64_t req_to_tokens_stride,
@@ -565,7 +572,7 @@ __global__ void quest_diff_and_update_kernel(
         int valid_len = valid_lengths[req_idx_in_batch];
         for (int i = tid; i < top_k; i += blockDim.x) {
             int64_t log_page = s_curr_top_k[i];
-            if (i < valid_len && log_page >= 0 && log_page < pt_stride) {
+            if (i < valid_len && log_page >= 0 && log_page < pt_cols) {
                 s_curr_page_ids[i] = (int64_t)page_table[req_idx_in_batch * pt_stride + log_page];
             } else {
                 s_curr_page_ids[i] = -1;
@@ -613,8 +620,21 @@ __global__ void quest_diff_and_update_kernel(
         __syncthreads();
 
         if (tid == 0) {
-            int used = 0;
             int valid_len = valid_lengths[req_idx_in_batch];
+            int fill_needed = 0;
+            for (int i = 0; i < top_k; ++i) {
+                if (i >= valid_len || s_curr_top_k[i] == -1) {
+                    continue;
+                }
+                if (s_curr_page_ids[i] == -1) {
+                    ++fill_needed;
+                }
+            }
+
+            int used = 0;
+            int remaining_after_used = (int)s_victim_count - fill_needed;
+            if (remaining_after_used < 0) remaining_after_used = 0;
+
             for (int i = 0; i < top_k; ++i) {
                 if (i >= valid_len || s_curr_top_k[i] == -1) {
                     s_curr_top_k[i] = -1;
@@ -624,8 +644,9 @@ __global__ void quest_diff_and_update_kernel(
                 }
 
                 if (s_curr_page_ids[i] == -1) {
-                    if (used < s_victim_count) {
-                        s_curr_page_ids[i] = s_last_page_ids[used];
+                    int victim_idx = remaining_after_used + used;
+                    if (victim_idx < s_victim_count) {
+                        s_curr_page_ids[i] = s_last_page_ids[victim_idx];
                         s_load_mask[i] = 1;
                         ++used;
                     } else {
@@ -664,6 +685,8 @@ __global__ void quest_diff_and_update_kernel(
         // Update State (int64 -> int64)
         int victims_used = s_fill_count;
         int valid_len = valid_lengths[req_idx_in_batch];
+        int remaining_after_used = s_victim_count - victims_used;
+        if (remaining_after_used < 0) remaining_after_used = 0;
         for (int i = tid; i < hot_buffer_len; i += blockDim.x) {
             int64_t offset = (int64_t)req_idx * last_stride_req + layer_id * last_stride_layer + i;
             if (i < top_k) {
@@ -675,8 +698,8 @@ __global__ void quest_diff_and_update_kernel(
                     last_page_ids[offset] = -1;
                 }
             } else {
-                int src = victims_used + (i - top_k);
-                if (src < s_victim_count) {
+                int src = (i - top_k);
+                if (src < remaining_after_used) {
                     last_top_k[offset] = s_last_top_k[src];
                     last_page_ids[offset] = s_last_page_ids[src];
                 } else {
@@ -738,9 +761,19 @@ void quest_diff_and_update_sparse_metadata(
     TORCH_CHECK(req_to_tokens_host.scalar_type() == torch::kInt64, "req_to_tokens_host must be int64");
     TORCH_CHECK(load_tokens.scalar_type() == torch::kInt64, "load_tokens must be int64");
     TORCH_CHECK(load_tokens_host.scalar_type() == torch::kInt64, "load_tokens_host must be int64");
+    TORCH_CHECK(page_table.is_contiguous(), "page_table must be contiguous");
+    TORCH_CHECK(curr_top_k.is_contiguous(), "curr_top_k must be contiguous");
+    TORCH_CHECK(req_pool_indices.is_contiguous(), "req_pool_indices must be contiguous");
+    TORCH_CHECK(seq_lens.is_contiguous(), "seq_lens must be contiguous");
+    TORCH_CHECK(valid_lengths.is_contiguous(), "valid_lengths must be contiguous");
+    TORCH_CHECK(sparse_mask.is_contiguous(), "sparse_mask must be contiguous");
+    TORCH_CHECK(req_to_tokens_host.is_contiguous(), "req_to_tokens_host must be contiguous");
+    TORCH_CHECK(load_tokens.is_contiguous(), "load_tokens must be contiguous");
+    TORCH_CHECK(load_tokens_host.is_contiguous(), "load_tokens_host must be contiguous");
 
     int64_t bs = page_table.size(0);
     int64_t pt_stride = page_table.stride(0);
+    int64_t pt_cols = page_table.size(1);
     int64_t top_k = curr_top_k.size(1);
     int64_t hot_buffer_len = last_top_k.size(2);
 
@@ -776,6 +809,7 @@ void quest_diff_and_update_sparse_metadata(
         top_k,
         page_size,
         pt_stride,
+        pt_cols,
         last_top_k.stride(0),
         last_top_k.stride(1),
         req_to_tokens_host.stride(0),
