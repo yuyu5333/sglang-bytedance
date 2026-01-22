@@ -132,21 +132,58 @@ class FlashAttentionAdaptor(BackendAdaptor):
         page_table = self.req_to_token_pool.req_to_token[
             forward_batch.req_pool_indices, :max_seqlen_k
         ]
-        physical_pages = self.sparse_kv_cache_manager.swap_in_selected_pages(
-            req_pool_indices=forward_batch.req_pool_indices,
-            top_k_result=selected_indices,
-            seq_lens=forward_batch.seq_lens,
-            sparse_mask=sparse_mask,
-            page_table=page_table,
-            layer_id=layer_id,
-            page_size=page_size,
-            out_cache_loc=forward_batch.out_cache_loc,
-        )
-        max_selected = physical_pages.shape[1]
         
-        quest_update_sparse_metadata(
-            current_metadata.page_table[:, :max_selected],
-            physical_pages.to(torch.int32).contiguous(),
+        ### Swap in selected pages
+        
+        batch_size = sparse_mask.shape[0]
+
+        invoke_sparse_diff_kernel(
+            self.sparse_kv_cache_manager.req_states.last_top_k_result,
+            selected_indices,
+            self.sparse_kv_cache_manager.req_states.last_device_indices,
+            self.sparse_kv_cache_manager.req_states.curr_device_indices,
+            self.sparse_kv_cache_manager.bitmap,
+            self.sparse_kv_cache_manager.req_states.req_to_tokens_host,
+            self.sparse_kv_cache_manager.req_states.should_load_device_indices,
+            self.sparse_kv_cache_manager.req_states.should_load_host_indices,
+            forward_batch.seq_lens,
+            forward_batch.req_pool_indices,
+            sparse_mask,
+            page_table,
+            layer_id,
+            self.sparse_kv_cache_manager.req_states.topk_tokens_cnt,
+            self.sparse_kv_cache_manager.req_states.device_buffer_cnt,
+            page_size,
+        )
+
+        # Data Loading
+        swap_target_device_slots = self.sparse_kv_cache_manager.req_states.should_load_device_indices[:batch_size, :self.sparse_kv_cache_manager.topk_tokens_cnt]
+        swap_source_host_slots = self.sparse_kv_cache_manager.req_states.should_load_host_indices[:batch_size, :self.sparse_kv_cache_manager.topk_tokens_cnt]
+
+        flat_target = swap_target_device_slots.reshape(-1)
+        flat_source = swap_source_host_slots.reshape(-1)
+        valid_pos = torch.nonzero(
+            flat_target.ne(-1) & flat_source.ne(-1), as_tuple=False
+        ).squeeze(1)
+
+        if valid_pos.numel() > 0:
+            target_valid = flat_target.index_select(0, valid_pos)
+            source_valid = flat_source.index_select(0, valid_pos)
+            self.sparse_kv_cache_manager.mem_pool_host.load_to_device_per_layer(
+                self.sparse_kv_cache_manager.mem_pool_device,
+                source_valid,
+                target_valid,
+                layer_id,
+                "kernel"
+            )
+
+        physical_pages = self.sparse_kv_cache_manager.req_states.curr_device_indices[
+            :batch_size, : self.sparse_kv_cache_manager.req_states.topk_tokens_cnt // page_size
+        ]
+
+        update_sparse_metadata(
+            current_metadata.page_table,
+            physical_pages,
             valid_lengths.to(torch.int32).contiguous(),
             sparse_mask.to(torch.int32).contiguous(),
             current_metadata.cache_seqlens_int32,
