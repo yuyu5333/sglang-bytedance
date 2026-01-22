@@ -137,11 +137,11 @@ class FlashAttentionAdaptor(BackendAdaptor):
         physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages]
         topk_page_indices = selected_indices[:, :topk_pages].to(torch.int32).contiguous()
 
-        if True:
+        if False:
             print(f"page_table: Python type={type(current_metadata.page_table)}, tensor dtype={current_metadata.page_table.dtype}, shape={current_metadata.page_table.shape}, continue?={current_metadata.page_table.is_contiguous()}")
             print(f"last_top_k_result: Python type={type(req_states.last_top_k_result)}, tensor dtype={req_states.last_top_k_result.dtype}, shape={req_states.last_top_k_result.shape}, continue?={req_states.last_top_k_result.is_contiguous()}")
             print(f"last_device_indices: Python type={type(req_states.last_device_indices)}, tensor dtype={req_states.last_device_indices.dtype}, shape={req_states.last_device_indices.shape}, continue?={req_states.last_device_indices.is_contiguous()}")
-            print(f"topk_page_indices: Python type={type(topk_page_indices)}, tensor dtype={topk_page_page_indices.dtype}, shape={topk_page_page_indices.shape}, continue?={topk_page_indices.is_contiguous()}")
+            print(f"topk_page_indices: Python type={type(topk_page_indices)}, tensor dtype={topk_page_indices.dtype}, shape={topk_page_indices.shape}, continue?={topk_page_indices.is_contiguous()}")
             print(f"req_pool_indices: Python type={type(forward_batch.req_pool_indices)}, tensor dtype={forward_batch.req_pool_indices.dtype}, shape={forward_batch.req_pool_indices.shape}, continue?={forward_batch.req_pool_indices.is_contiguous()}")
             print(f"seq_lens: Python type={type(forward_batch.seq_lens)}, tensor dtype={forward_batch.seq_lens.dtype}, shape={forward_batch.seq_lens.shape}, continue?={forward_batch.seq_lens.is_contiguous()}")
             print(f"valid_lengths: Python type={type(valid_lengths)}, tensor dtype={valid_lengths.dtype}, shape={valid_lengths.shape}, continue?={valid_lengths.is_contiguous()}")
@@ -155,19 +155,37 @@ class FlashAttentionAdaptor(BackendAdaptor):
             print(f"\nlayer_id: Python type={type(layer_id)}, value={layer_id}")
             print(f"page_size: Python type={type(page_size)}, value={page_size}")
 
+            # page_table: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 43]), continue?=True
+            # last_top_k_result: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
+            # last_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
+            # topk_page_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 16]), continue?=True
+            # req_pool_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
+            # seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
+            # valid_lengths: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
+            # sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1]), continue?=True
+            # req_to_tokens_host: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 40964]), continue?=True
+            # physical_pages: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 16]), continue?=True
+            # should_load_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 2048]), continue?=True
+            # should_load_host_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 2048]), continue?=True
+            # cache_seqlens_int32 (current): Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
+            # cache_seqlens_int32 (original): Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
+
+            # layer_id: Python type=<class 'int'>, value=35
+            # page_size: Python type=<class 'int'>, value=64
+
         quest_diff_and_update_sparse_metadata(
             current_metadata.page_table,
-            req_states.last_top_k_result,
-            req_states.last_device_indices,
+            req_states.last_top_k_result.to(torch.int32),
+            req_states.last_device_indices.to(torch.int32),
             topk_page_indices,
             forward_batch.req_pool_indices.to(torch.int32).contiguous(),
             forward_batch.seq_lens.to(torch.int32).contiguous(),
             valid_lengths.to(torch.int32).contiguous(),
             sparse_mask.to(torch.int32).contiguous(),
-            req_states.req_to_tokens_host,
+            req_states.req_to_tokens_host.to(torch.int32),
             physical_pages,
-            req_states.should_load_device_indices,
-            req_states.should_load_host_indices,
+            req_states.should_load_device_indices.to(torch.int32),
+            req_states.should_load_host_indices.to(torch.int32),
             current_metadata.cache_seqlens_int32,
             self._original_metadata["cache_seqlens_int32"],
             layer_id,
@@ -190,15 +208,24 @@ class FlashAttentionAdaptor(BackendAdaptor):
                 "kernel"
              )
 
-        if True:
+        if False:
             print(f"page_table: Python type={type(current_metadata.page_table)}, tensor dtype={current_metadata.page_table.dtype}, shape={current_metadata.page_table.shape}, continue?={current_metadata.page_table.is_contiguous()}")
             print(f"physical_pages: Python type={type(physical_pages)}, tensor dtype={physical_pages.dtype}, shape={physical_pages.shape}, continue?={physical_pages.is_contiguous()}")
             print(f"valid_lengths: Python type={type(valid_lengths)}, tensor dtype={valid_lengths.dtype}, shape={valid_lengths.shape}, continue?={valid_lengths.is_contiguous()}")
+            print(f"sparse_mask: Python type={type(sparse_mask)}, tensor dtype={sparse_mask.dtype}, shape={sparse_mask.shape}, continue?={sparse_mask.is_contiguous()}")
             print(f"seq_lens: Python type={type(forward_batch.seq_lens)}, tensor dtype={forward_batch.seq_lens.dtype}, shape={forward_batch.seq_lens.shape}, continue?={forward_batch.seq_lens.is_contiguous()}")
             print(f"cache_seqlens_int32 (current): Python type={type(current_metadata.cache_seqlens_int32)}, tensor dtype={current_metadata.cache_seqlens_int32.dtype}, shape={current_metadata.cache_seqlens_int32.shape}, continue?={current_metadata.cache_seqlens_int32.is_contiguous()}")
-            print(f"sparse_mask: Python type={type(sparse_mask)}, tensor dtype={sparse_mask.dtype}, shape={sparse_mask.shape}, continue?={sparse_mask.is_contiguous()}")
             print(f"cache_seqlens_int32 (original): Python type={type(self._original_metadata['cache_seqlens_int32'])}, tensor dtype={self._original_metadata['cache_seqlens_int32'].dtype}, shape={self._original_metadata['cache_seqlens_int32'].shape}, continue?={self._original_metadata['cache_seqlens_int32'].is_contiguous()}")
             print(f"page_size: Python type={type(page_size)}, value={page_size}")
+
+            # page_table: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 43]), continue?=True
+            # physical_pages: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 16]), continue?=True
+            # valid_lengths: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
+            # sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1]), continue?=True
+            # seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
+            # cache_seqlens_int32 (current): Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
+            # cache_seqlens_int32 (original): Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1]), continue?=True
+            # page_size: Python type=<class 'int'>, value=64
 
         quest_update_sparse_metadata(
             current_metadata.page_table,
