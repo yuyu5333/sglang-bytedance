@@ -126,26 +126,33 @@ class FlashAttentionAdaptor(BackendAdaptor):
         if self._original_metadata is None:
             return current_metadata
 
-        if not sparse_mask.any():
-            return current_metadata
-
         req_states = self.sparse_kv_cache_manager.req_states
         batch_size = sparse_mask.shape[0]
 
         topk_tokens_cnt = req_states.topk_tokens_cnt
         topk_pages = topk_tokens_cnt // page_size
         physical_pages = req_states.curr_device_indices[:batch_size, :topk_pages].contiguous()
-        topk_page_indices = selected_indices[:, :topk_pages].to(torch.int32).contiguous()
+        topk_page_indices = selected_indices[:, :topk_pages].contiguous()
+
+        sparse_mask_i32 = kwargs.get("sparse_mask_i32", None)
+        if sparse_mask_i32 is None:
+            sparse_mask_i32 = sparse_mask.to(torch.int32)
+        req_pool_indices_i32 = kwargs.get("req_pool_indices_i32", None)
+        if req_pool_indices_i32 is None:
+            req_pool_indices_i32 = forward_batch.req_pool_indices.to(torch.int32)
+        seq_lens_i32 = kwargs.get("seq_lens_i32", None)
+        if seq_lens_i32 is None:
+            seq_lens_i32 = forward_batch.seq_lens.to(torch.int32)
 
         invoke_sparse_diff_cuda_kernel(
             current_metadata.page_table,
             req_states.last_top_k_result.contiguous(),
             req_states.last_device_indices.contiguous(),
             topk_page_indices,
-            forward_batch.req_pool_indices.to(torch.int32).contiguous(),
-            forward_batch.seq_lens.to(torch.int32).contiguous(),
-            valid_lengths.to(torch.int32).contiguous(),
-            sparse_mask.to(torch.int32).contiguous(),
+            req_pool_indices_i32.contiguous(),
+            seq_lens_i32.contiguous(),
+            valid_lengths.contiguous(),
+            sparse_mask_i32.contiguous(),
             req_states.req_to_tokens_host,
             physical_pages,
             req_states.should_load_device_indices,
@@ -180,10 +187,10 @@ class FlashAttentionAdaptor(BackendAdaptor):
         update_sparse_metadata(
             current_metadata.page_table,
             physical_pages,
-            valid_lengths.to(torch.int32).contiguous(),
-            sparse_mask.to(torch.int32).contiguous(),
+            valid_lengths.contiguous(),
+            sparse_mask_i32.contiguous(),
             current_metadata.cache_seqlens_int32,
-            forward_batch.seq_lens.to(torch.int32).contiguous(),
+            seq_lens_i32.contiguous(),
             self._original_metadata["cache_seqlens_int32"],
             page_size
         )
@@ -194,5 +201,10 @@ class FlashAttentionAdaptor(BackendAdaptor):
             ),
             (1, 0),
         )
-        current_metadata.max_seq_len_k = int(current_metadata.cache_seqlens_int32.max())
+        if getattr(forward_batch, "_sparse_all", False):
+            current_metadata.max_seq_len_k = min(
+                int(self._original_metadata["max_seq_len_k"]), int(topk_tokens_cnt)
+            )
+        else:
+            current_metadata.max_seq_len_k = int(self._original_metadata["max_seq_len_k"])
         return current_metadata

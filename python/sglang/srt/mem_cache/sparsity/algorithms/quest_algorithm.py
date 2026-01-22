@@ -33,6 +33,8 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         self.page_k_min = {}
         self.page_k_max = {}
         self.page_valid = {}
+        self._page_k_min_cast_cache = {}
+        self._page_k_max_cast_cache = {}
 
     def _initialize_representation_pools(
         self, start_layer: int, end_layer: int, total_num_pages: int
@@ -254,10 +256,14 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         seq_lens_source = kwargs.get("forward_batch", None)
         if seq_lens_source is None or not hasattr(seq_lens_source, "seq_lens"):
             raise ValueError("forward_batch with seq_lens is required for TopK retrieval")
-        seq_lens = seq_lens_source.seq_lens.to(device)
+        seq_lens = seq_lens_source.seq_lens
         
         # Calculate max_out roughly
-        max_seq_len = torch.max(seq_lens).item()
+        seq_lens_cpu = getattr(seq_lens_source, "seq_lens_cpu", None)
+        if seq_lens_cpu is not None:
+            max_seq_len = seq_lens_cpu.max().item()
+        else:
+            max_seq_len = int(torch.max(seq_lens).item())
         max_pages = (max_seq_len + self.page_size - 1) // self.page_size
         
         k_val = 0
@@ -312,19 +318,46 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
 
         """
 
+        seq_lens_i32 = kwargs.get("seq_lens_i32", None)
+        if seq_lens_i32 is None:
+            seq_lens_i32 = seq_lens.to(torch.int32)
+
+        req_pool_indices_i32 = kwargs.get("req_pool_indices_i32", None)
+        if req_pool_indices_i32 is None:
+            req_pool_indices_i32 = req_pool_indices.to(torch.int32)
+
+        sparse_mask_i32 = kwargs.get("sparse_mask_i32", None)
+        if sparse_mask_i32 is None:
+            sparse_mask_i32 = sparse_mask.to(torch.int32)
+
+        page_k_min = self.page_k_min[layer_id]
+        page_k_max = self.page_k_max[layer_id]
+        if page_k_min.dtype != queries.dtype:
+            casted = self._page_k_min_cast_cache.get((layer_id, queries.dtype), None)
+            if casted is None:
+                casted = page_k_min.to(queries.dtype)
+                self._page_k_min_cast_cache[(layer_id, queries.dtype)] = casted
+            page_k_min = casted
+        if page_k_max.dtype != queries.dtype:
+            casted = self._page_k_max_cast_cache.get((layer_id, queries.dtype), None)
+            if casted is None:
+                casted = page_k_max.to(queries.dtype)
+                self._page_k_max_cast_cache[(layer_id, queries.dtype)] = casted
+            page_k_max = casted
+
         quest_retrieval_score_and_combine_indices(
             bs,
-            seq_lens.to(torch.int32),
+            seq_lens_i32,
             self.page_size,
             self.req_to_token_pool.req_to_token,
-            self.page_k_min[layer_id].to(queries.dtype),
-            self.page_k_max[layer_id].to(queries.dtype),
+            page_k_min,
+            page_k_max,
             queries,
-            req_pool_indices.to(torch.int32),
+            req_pool_indices_i32,
             self.num_recent_pages,
             self.fixed_topk_page_cnt,
             self.sparsity_ratio,
-            sparse_mask.to(torch.int32),
+            sparse_mask_i32,
             out_indices,
             out_lengths,
         )
