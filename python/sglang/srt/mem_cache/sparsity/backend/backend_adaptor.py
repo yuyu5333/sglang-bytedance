@@ -159,18 +159,23 @@ class FlashAttentionAdaptor(BackendAdaptor):
         # Data Loading
         swap_target_device_slots = req_states.should_load_device_indices[:batch_size, :topk_tokens_cnt]
         swap_source_host_slots = req_states.should_load_host_indices[:batch_size, :topk_tokens_cnt]
-        
-        target_valid = swap_target_device_slots[swap_target_device_slots != -1]
-        source_valid = swap_source_host_slots[swap_source_host_slots != -1]
-        
-        if target_valid.numel() > 0:
-             self.sparse_kv_cache_manager.mem_pool_host.load_to_device_per_layer(
+
+        flat_target = swap_target_device_slots.reshape(-1)
+        flat_source = swap_source_host_slots.reshape(-1)
+        valid_pos = torch.nonzero(
+            flat_target.ne(-1) & flat_source.ne(-1), as_tuple=False
+        ).squeeze(1)
+
+        if valid_pos.numel() > 0:
+            target_valid = flat_target.index_select(0, valid_pos)
+            source_valid = flat_source.index_select(0, valid_pos)
+            self.sparse_kv_cache_manager.mem_pool_host.load_to_device_per_layer(
                 self.sparse_kv_cache_manager.mem_pool_device,
-                source_valid.flatten(),
-                target_valid.flatten(),
+                source_valid,
+                target_valid,
                 layer_id,
                 "kernel"
-             )
+            )
 
         update_sparse_metadata(
             current_metadata.page_table,
