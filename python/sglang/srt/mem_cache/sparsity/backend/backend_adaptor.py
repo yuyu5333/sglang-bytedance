@@ -163,7 +163,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
         )
         if getattr(forward_batch, "_sparse_all", False):
             current_metadata.max_seq_len_k = min(
-                int(self._original_metadata["max_seq_len_k"]), int(topk_tokens_cnt)
+                int(self._original_metadata["max_seq_len_k"]), int(self.sparse_kv_cache_manager.req_states.topk_tokens_cnt)
             )
         else:
             current_metadata.max_seq_len_k = int(self._original_metadata["max_seq_len_k"])
