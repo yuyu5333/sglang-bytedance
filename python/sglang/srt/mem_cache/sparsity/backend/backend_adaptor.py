@@ -11,6 +11,7 @@ from sglang.srt.mem_cache.sparsity.kernel.flashattn_metadata_kernels import (
 )
 
 from sgl_kernel import quest_update_sparse_metadata
+from sglang.srt.mem_cache.sparsity.kernel.diff_kernel import invoke_sparse_diff_kernel
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -157,8 +158,8 @@ class FlashAttentionAdaptor(BackendAdaptor):
         )
 
         # Data Loading
-        swap_target_device_slots = self.sparse_kv_cache_manager.req_states.should_load_device_indices[:batch_size, :self.sparse_kv_cache_manager.topk_tokens_cnt]
-        swap_source_host_slots = self.sparse_kv_cache_manager.req_states.should_load_host_indices[:batch_size, :self.sparse_kv_cache_manager.topk_tokens_cnt]
+        swap_target_device_slots = self.sparse_kv_cache_manager.req_states.should_load_device_indices[:batch_size, :self.sparse_kv_cache_manager.req_states.topk_tokens_cnt]
+        swap_source_host_slots = self.sparse_kv_cache_manager.req_states.should_load_host_indices[:batch_size, :self.sparse_kv_cache_manager.req_states.topk_tokens_cnt]
 
         flat_target = swap_target_device_slots.reshape(-1)
         flat_source = swap_source_host_slots.reshape(-1)
@@ -181,7 +182,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
             :batch_size, : self.sparse_kv_cache_manager.req_states.topk_tokens_cnt // page_size
         ]
 
-        update_sparse_metadata(
+        quest_update_sparse_metadata(
             current_metadata.page_table,
             physical_pages,
             valid_lengths.to(torch.int32).contiguous(),
