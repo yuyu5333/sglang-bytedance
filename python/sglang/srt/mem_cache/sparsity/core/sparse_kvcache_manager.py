@@ -20,6 +20,8 @@ from sglang.srt.mem_cache.sparsity.kernel.diff_kernel import invoke_sparse_diff_
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_device_module
 
+from sgl_kernel import sparse_page_wise_diff
+
 if TYPE_CHECKING:
     pass
 
@@ -115,24 +117,50 @@ class SparseKVCacheManager:
         """
         batch_size = sparse_mask.shape[0]
 
-        invoke_sparse_diff_kernel(
-            self.req_states.last_top_k_result,
-            top_k_result,
-            self.req_states.last_device_indices,
-            self.req_states.curr_device_indices,
-            self.bitmap,
-            self.req_states.req_to_tokens_host,
-            self.req_states.should_load_device_indices,
-            self.req_states.should_load_host_indices,
-            seq_lens,
-            req_pool_indices,
-            sparse_mask,
-            page_table,
-            layer_id,
-            self.req_states.topk_tokens_cnt,
-            self.req_states.device_buffer_cnt,
-            page_size,
-        )
+        if self.req_states.topk_tokens_cnt % page_size == 0 and self.req_states.device_buffer_cnt % page_size == 0:
+            top_k_page = self.req_states.topk_tokens_cnt // page_size
+            hot_buffer_page = self.req_states.device_buffer_cnt // page_size
+        
+        if top_k_page <= 256 and hot_buffer_page <= 256:
+            sparse_page_wise_diff(
+                self.req_states.last_top_k_result,
+                top_k_result,
+                self.req_states.last_device_indices,
+                self.req_states.curr_device_indices,
+                self.bitmap,
+                self.req_states.req_to_tokens_host,
+                self.req_states.should_load_device_indices,
+                self.req_states.should_load_host_indices,
+                seq_lens,
+                req_pool_indices,
+                sparse_mask,
+                page_table,
+                layer_id,
+                self.req_states.topk_tokens_cnt,
+                self.req_states.device_buffer_cnt,
+                page_size,
+            )
+
+        else:
+            invoke_sparse_diff_kernel(
+                self.req_states.last_top_k_result,
+                top_k_result,
+                self.req_states.last_device_indices,
+                self.req_states.curr_device_indices,
+                self.bitmap,
+                self.req_states.req_to_tokens_host,
+                self.req_states.should_load_device_indices,
+                self.req_states.should_load_host_indices,
+                seq_lens,
+                req_pool_indices,
+                sparse_mask,
+                page_table,
+                layer_id,
+                self.req_states.topk_tokens_cnt,
+                self.req_states.device_buffer_cnt,
+                page_size,
+            )
+
         swap_target_device_slots = self.req_states.should_load_device_indices[
             :batch_size, : self.req_states.topk_tokens_cnt
         ]
