@@ -183,8 +183,8 @@ class SparseKVCacheManager:
             if valid_pos.numel() > 0:
                 target_valid = flat_target.index_select(0, valid_pos)
                 source_valid = flat_source.index_select(0, valid_pos)
-                self.sparse_kv_cache_manager.mem_pool_host.load_to_device_per_layer(
-                    self.sparse_kv_cache_manager.mem_pool_device,
+                self.mem_pool_host.load_to_device_per_layer(
+                    self.mem_pool_device,
                     source_valid,
                     target_valid,
                     layer_id,
