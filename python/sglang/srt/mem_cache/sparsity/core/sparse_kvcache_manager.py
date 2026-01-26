@@ -144,7 +144,6 @@ class SparseKVCacheManager:
                     int64_t hot_buffer_len,
                     int64_t page_size);
 
-                Start invoke_sparse_diff_kernel para
                 last_top_k_result: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
                 top_k_result: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 52]), continue?=True
                 last_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
@@ -162,9 +161,7 @@ class SparseKVCacheManager:
                 topk_tokens_cnt: Python type=<class 'int'>, value=1024
                 device_buffer_cnt: Python type=<class 'int'>, value=2048
                 page_size: Python type=<class 'int'>, value=64
-                End invoke_sparse_diff_kernel para
                 """
-
 
                 print(f"Start invoke_sparse_diff_kernel para")
                 print(f"last_top_k_result: Python type={type(self.req_states.last_top_k_result)}, tensor dtype={self.req_states.last_top_k_result.dtype}, shape={self.req_states.last_top_k_result.shape}, continue?={self.req_states.last_top_k_result.is_contiguous()}")
