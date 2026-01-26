@@ -321,14 +321,14 @@ void sparse_page_wise_diff(
   CHECK_LAST_DIM_CONTIGUOUS(page_table);
 
   TORCH_CHECK(last_top_k_idx.scalar_type() == at::kLong, "last_top_k_idx must be int64");
-  TORCH_CHECK(top_k_idx.scalar_type() == at::kLong, "top_k_idx must be int64");
+  TORCH_CHECK(top_k_idx.scalar_type() == at::kInt, "top_k_idx must be int32");
   TORCH_CHECK(last_page_ids.scalar_type() == at::kLong, "last_page_ids must be int64");
   TORCH_CHECK(req_to_tokens_host.scalar_type() == at::kLong, "req_to_tokens_host must be int64");
   TORCH_CHECK(load_tokens.scalar_type() == at::kLong, "load_tokens must be int64");
   TORCH_CHECK(load_tokens_host.scalar_type() == at::kLong, "load_tokens_host must be int64");
   TORCH_CHECK(seq_lens.scalar_type() == at::kLong, "seq_lens must be int64");
   TORCH_CHECK(req_pool_indices.scalar_type() == at::kLong, "req_pool_indices must be int64");
-  TORCH_CHECK(page_table.scalar_type() == at::kLong, "page_table must be int64");
+  TORCH_CHECK(page_table.scalar_type() == at::kInt, "page_table must be int32");
 
   TORCH_CHECK(diff_map.scalar_type() == at::kShort || diff_map.scalar_type() == at::kInt, "diff_map must be int16 or int32");
   TORCH_CHECK(
