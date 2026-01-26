@@ -234,10 +234,17 @@ __global__ void sparse_page_wise_diff_kernel(
                       if (mask_topk) page_ids_base[i] = static_cast<PageOutT>(r_page);
                       last_page_ids_base[i] = r_page;
                       last_top_k_base[i] = r_topk;
-                      s_load_pages[fpos] = r_page; 
-                      s_host_pages[fpos] = -1;
+                      
+                      // Only generate load token if not padding
+                      if (mask_topk && top_k_base[i] >= 0) {
+                          s_load_pages[fpos] = r_page;
+                          s_host_pages[fpos] = top_k_base[i];
+                      } else {
+                          s_load_pages[fpos] = -1;
+                          s_host_pages[fpos] = -1;
+                      }
                   } else {
-                      // Host Load
+                      // Host Load but no Recycled Page (Should not happen if cache is sufficient)
                       if (mask_topk) {
                          // Load corresponding top_k_base[i]
                          s_host_pages[fpos] = top_k_base[i];
@@ -246,6 +253,7 @@ __global__ void sparse_page_wise_diff_kernel(
                       } else {
                          last_page_ids_base[i] = -1;
                          last_top_k_base[i] = -1;
+                         s_host_pages[fpos] = -1;
                       }
                       s_load_pages[fpos] = -1;
                   }
