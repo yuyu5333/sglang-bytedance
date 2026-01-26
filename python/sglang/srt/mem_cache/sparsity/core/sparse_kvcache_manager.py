@@ -122,6 +122,69 @@ class SparseKVCacheManager:
             hot_buffer_page = self.req_states.device_buffer_cnt // page_size
         
         if top_k_page <= 256 and hot_buffer_page <= 256:
+            
+            if True:
+
+                """
+                void sparse_page_wise_diff(
+                    torch::Tensor last_top_k_idx,
+                    torch::Tensor top_k_idx,
+                    torch::Tensor last_page_ids,
+                    torch::Tensor page_ids,
+                    torch::Tensor diff_map,
+                    torch::Tensor req_to_tokens_host,
+                    torch::Tensor load_tokens,
+                    torch::Tensor load_tokens_host,
+                    torch::Tensor seq_lens,
+                    torch::Tensor req_pool_indices,
+                    torch::Tensor sparse_mask,
+                    torch::Tensor page_table,
+                    int64_t layer_id,
+                    int64_t top_k,
+                    int64_t hot_buffer_len,
+                    int64_t page_size);
+
+                Start invoke_sparse_diff_kernel para
+                last_top_k_result: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
+                top_k_result: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 52]), continue?=True
+                last_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 37, 32]), continue?=True
+                curr_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([4096, 32]), continue?=True
+                bitmap: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int16, shape=torch.Size([4096, 40960]), continue?=True
+                req_to_tokens_host: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 40964]), continue?=True
+                should_load_device_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 2048]), continue?=True
+                should_load_host_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([4096, 2048]), continue?=True
+                seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
+                req_pool_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1]), continue?=True
+                sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1]), continue?=True
+                page_table: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 2522]), continue?=True
+
+                layer_id: Python type=<class 'int'>, value=0
+                topk_tokens_cnt: Python type=<class 'int'>, value=1024
+                device_buffer_cnt: Python type=<class 'int'>, value=2048
+                page_size: Python type=<class 'int'>, value=64
+                End invoke_sparse_diff_kernel para
+                """
+
+
+                print(f"Start invoke_sparse_diff_kernel para")
+                print(f"last_top_k_result: Python type={type(self.req_states.last_top_k_result)}, tensor dtype={self.req_states.last_top_k_result.dtype}, shape={self.req_states.last_top_k_result.shape}, continue?={self.req_states.last_top_k_result.is_contiguous()}")
+                print(f"top_k_result: Python type={type(top_k_result)}, tensor dtype={top_k_result.dtype}, shape={top_k_result.shape}, continue?={top_k_result.is_contiguous()}")
+                print(f"last_device_indices: Python type={type(self.req_states.last_device_indices)}, tensor dtype={self.req_states.last_device_indices.dtype}, shape={self.req_states.last_device_indices.shape}, continue?={self.req_states.last_device_indices.is_contiguous()}")
+                print(f"curr_device_indices: Python type={type(self.req_states.curr_device_indices)}, tensor dtype={self.req_states.curr_device_indices.dtype}, shape={self.req_states.curr_device_indices.shape}, continue?={self.req_states.curr_device_indices.is_contiguous()}")
+                print(f"bitmap: Python type={type(self.bitmap)}, tensor dtype={self.bitmap.dtype}, shape={self.bitmap.shape}, continue?={self.bitmap.is_contiguous()}")
+                print(f"req_to_tokens_host: Python type={type(self.req_states.req_to_tokens_host)}, tensor dtype={self.req_states.req_to_tokens_host.dtype}, shape={self.req_states.req_to_tokens_host.shape}, continue?={self.req_states.req_to_tokens_host.is_contiguous()}")
+                print(f"should_load_device_indices: Python type={type(self.req_states.should_load_device_indices)}, tensor dtype={self.req_states.should_load_device_indices.dtype}, shape={self.req_states.should_load_device_indices.shape}, continue?={self.req_states.should_load_device_indices.is_contiguous()}")
+                print(f"should_load_host_indices: Python type={type(self.req_states.should_load_host_indices)}, tensor dtype={self.req_states.should_load_host_indices.dtype}, shape={self.req_states.should_load_host_indices.shape}, continue?={self.req_states.should_load_host_indices.is_contiguous()}")
+                print(f"seq_lens: Python type={type(seq_lens)}, tensor dtype={seq_lens.dtype}, shape={seq_lens.shape}, continue?={seq_lens.is_contiguous()}")
+                print(f"req_pool_indices: Python type={type(req_pool_indices)}, tensor dtype={req_pool_indices.dtype}, shape={req_pool_indices.shape}, continue?={req_pool_indices.is_contiguous()}")
+                print(f"sparse_mask: Python type={type(sparse_mask)}, tensor dtype={sparse_mask.dtype}, shape={sparse_mask.shape}, continue?={sparse_mask.is_contiguous()}")
+                print(f"page_table: Python type={type(page_table)}, tensor dtype={page_table.dtype}, shape={page_table.shape}, continue?={page_table.is_contiguous()}")
+                print(f"\nlayer_id: Python type={type(layer_id)}, value={layer_id}")
+                print(f"topk_tokens_cnt: Python type={type(self.req_states.topk_tokens_cnt)}, value={self.req_states.topk_tokens_cnt}")
+                print(f"device_buffer_cnt: Python type={type(self.req_states.device_buffer_cnt)}, value={self.req_states.device_buffer_cnt}")
+                print(f"page_size: Python type={type(page_size)}, value={page_size}")
+                print(f"End invoke_sparse_diff_kernel para")
+                
             sparse_page_wise_diff(
                 self.req_states.last_top_k_result,
                 top_k_result,
