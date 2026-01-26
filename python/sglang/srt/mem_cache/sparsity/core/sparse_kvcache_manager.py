@@ -169,42 +169,25 @@ class SparseKVCacheManager:
             :batch_size, : self.req_states.topk_tokens_cnt
         ]
 
-        flat_target = swap_target_device_slots.reshape(-1)
-        flat_source = swap_source_host_slots.reshape(-1)
-        valid_pos = torch.nonzero(
-            flat_target.ne(-1) & flat_source.ne(-1), as_tuple=False
-        ).squeeze(1)
+        swap_target_device_slots = swap_target_device_slots[
+            swap_target_device_slots != -1
+        ]
+        swap_source_host_slots = swap_source_host_slots[swap_source_host_slots != -1]
+        
 
         assert (
-            flat_target.numel() == flat_source.numel()
+            swap_target_device_slots.numel() == swap_source_host_slots.numel()
         ), "Swap target device slots and source host slots must have the same number of elements"
 
-        if True:
-            if valid_pos.numel() > 0:
-                target_valid = flat_target.index_select(0, valid_pos)
-                source_valid = flat_source.index_select(0, valid_pos)
-                self.mem_pool_host.load_to_device_per_layer(
-                    self.mem_pool_device,
-                    source_valid,
-                    target_valid,
-                    layer_id,
-                    "kernel"
-                )
-
-        if False:
-            assert (
-                swap_target_device_slots.numel() == swap_source_host_slots.numel()
-            ), "Swap target device slots and source host slots must have the same number of elements"
-
-            # Load cache from host to device
-            if swap_target_device_slots.numel() > 0:
-                self.mem_pool_host.load_to_device_per_layer(
-                    self.mem_pool_device,
-                    swap_source_host_slots.flatten(),
-                    swap_target_device_slots.flatten(),
-                    layer_id,
-                    "kernel",
-                )
+        # Load cache from host to device
+        if swap_target_device_slots.numel() > 0:
+            self.mem_pool_host.load_to_device_per_layer(
+                self.mem_pool_device,
+                swap_source_host_slots.flatten(),
+                swap_target_device_slots.flatten(),
+                layer_id,
+                "kernel",
+            )
 
         return self.req_states.curr_device_indices[
             :batch_size, : self.req_states.topk_tokens_cnt // page_size
