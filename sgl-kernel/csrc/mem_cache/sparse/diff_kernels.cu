@@ -132,6 +132,13 @@ __global__ void sparse_page_wise_diff_kernel(
   const int64_t curr_max_top_k = s_curr_max_top_k;
 
   if (tid == 0) {
+    for (int64_t i = 0; i < top_k_page; ++i) {
+      const int64_t top_k_origin = static_cast<int64_t>(top_k_base[i]);
+      if (top_k_origin >= 0) {
+        diff_map_base[top_k_origin] = static_cast<DiffT>(-1);
+      }
+    }
+
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
       int64_t v = s_last_top_k_snapshot[i];
       if (curr_max_top_k != last_max_top_k) {
@@ -152,8 +159,12 @@ __global__ void sparse_page_wise_diff_kernel(
             static_cast<int32_t>(diff_map_base[top_k_origin]);
         if (exist_top_k_idx >= 0) {
           const int64_t exist_page = last_page_ids_base[exist_top_k_idx];
-          page_ids_base[i] = static_cast<PageOutT>(exist_page);
-          last_page_ids_base[exist_top_k_idx] = -1;
+          if (exist_page >= 0) {
+            page_ids_base[i] = static_cast<PageOutT>(exist_page);
+            last_page_ids_base[exist_top_k_idx] = -1;
+          } else {
+            load_tokens_host_base[i] = top_k_origin;
+          }
         } else {
           load_tokens_host_base[i] = top_k_origin;
         }
