@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -121,7 +122,8 @@ class SparseKVCacheManager:
             top_k_page = self.req_states.topk_tokens_cnt // page_size
             hot_buffer_page = self.req_states.device_buffer_cnt // page_size
         
-        if top_k_page <= 256 and hot_buffer_page <= 256:
+        use_cuda_diff = os.environ.get("SGLANG_USE_CUDA_SPARSE_DIFF", "1") == "1"
+        if use_cuda_diff and top_k_page <= 256 and hot_buffer_page <= 256:
             
             if False:
 

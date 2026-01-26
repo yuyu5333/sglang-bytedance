@@ -240,7 +240,14 @@ __global__ void sparse_page_wise_diff_kernel(
       const int64_t curr_page = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
       bool empty = (curr_page == -1);
       if (!empty) continue;
+      
       const int32_t fill_pos = s_fill_pos[i];
+      if (mask_topk) {
+        const int32_t top_k_val = top_k_base[i];
+        if (top_k_val < 0) {
+            continue;
+        }
+      }
       load_tokens_host_base[fill_pos] = tmp_host_vals[i];
     }
     for (int64_t i = fill_count; i < hot_buffer_page; ++i) {
