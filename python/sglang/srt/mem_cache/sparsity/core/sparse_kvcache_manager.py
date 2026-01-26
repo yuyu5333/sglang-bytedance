@@ -200,6 +200,47 @@ class SparseKVCacheManager:
                 self.req_states.device_buffer_cnt,
                 page_size,
             )
+            import os
+            if os.getenv("SGLANG_SPARSE_DIFF_VERIFY", "0") == "1":
+                last_top_k_result_ref = self.req_states.last_top_k_result.clone()
+                last_device_indices_ref = self.req_states.last_device_indices.clone()
+                curr_device_indices_ref = self.req_states.curr_device_indices.clone()
+                should_load_device_indices_ref = self.req_states.should_load_device_indices.clone()
+                should_load_host_indices_ref = self.req_states.should_load_host_indices.clone()
+
+                invoke_sparse_diff_kernel(
+                    last_top_k_result_ref,
+                    top_k_result.long(),
+                    last_device_indices_ref,
+                    curr_device_indices_ref,
+                    self.bitmap.clone(),
+                    self.req_states.req_to_tokens_host,
+                    should_load_device_indices_ref,
+                    should_load_host_indices_ref,
+                    seq_lens,
+                    req_pool_indices,
+                    sparse_mask,
+                    page_table.long(),
+                    layer_id,
+                    self.req_states.topk_tokens_cnt,
+                    self.req_states.device_buffer_cnt,
+                    page_size,
+                )
+
+                if (
+                    not torch.equal(self.req_states.curr_device_indices, curr_device_indices_ref)
+                    or not torch.equal(self.req_states.should_load_device_indices, should_load_device_indices_ref)
+                    or not torch.equal(self.req_states.should_load_host_indices, should_load_host_indices_ref)
+                ):
+                    print(f"[SGLANG_SPARSE_DIFF_VERIFY] curr_device_indices?{torch.equal(self.req_states.curr_device_indices, curr_device_indices_ref)}")
+                    print(f"[SGLANG_SPARSE_DIFF_VERIFY] should_load_device_indices?{torch.equal(self.req_states.should_load_device_indices, should_load_device_indices_ref)}")
+                    print(f"[SGLANG_SPARSE_DIFF_VERIFY] should_load_host_indices?{torch.equal(self.req_states.should_load_host_indices, should_load_host_indices_ref)}")
+                    
+                    self.req_states.last_top_k_result.copy_(last_top_k_result_ref)
+                    self.req_states.last_device_indices.copy_(last_device_indices_ref)
+                    self.req_states.curr_device_indices.copy_(curr_device_indices_ref)
+                    self.req_states.should_load_device_indices.copy_(should_load_device_indices_ref)
+                    self.req_states.should_load_host_indices.copy_(should_load_host_indices_ref)
 
         else:
             invoke_sparse_diff_kernel(

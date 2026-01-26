@@ -71,6 +71,7 @@ __global__ void sparse_page_wise_diff_kernel(
   __shared__ int32_t s_fill_pos[kMaxHotBufferPages];
   __shared__ int64_t s_load_pages[kMaxHotBufferPages];
   __shared__ int64_t s_host_pages[kMaxHotBufferPages];
+  __shared__ int64_t s_last_top_k_snapshot[kMaxHotBufferPages];
   __shared__ int32_t s_fill_count;
   __shared__ int32_t s_req_idx;
   __shared__ int32_t s_sparse_mask_val;
@@ -114,6 +115,7 @@ __global__ void sparse_page_wise_diff_kernel(
     int64_t last_max = -9223372036854775807LL - 1;
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
       int64_t v = last_top_k_base[i];
+      s_last_top_k_snapshot[i] = v;
       if (v > last_max) last_max = v;
     }
     int64_t curr_max = -9223372036854775807LL - 1;
@@ -131,7 +133,7 @@ __global__ void sparse_page_wise_diff_kernel(
 
   if (tid == 0) {
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
-      int64_t v = last_top_k_base[i];
+      int64_t v = s_last_top_k_snapshot[i];
       if (curr_max_top_k != last_max_top_k) {
         v = (v < last_max_top_k) ? v : curr_max_top_k;
       }
@@ -163,7 +165,7 @@ __global__ void sparse_page_wise_diff_kernel(
     }
 
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
-      int64_t v = last_top_k_base[i];
+      int64_t v = s_last_top_k_snapshot[i];
       if (curr_max_top_k != last_max_top_k) {
         v = (v < last_max_top_k) ? v : curr_max_top_k;
       }
@@ -208,7 +210,7 @@ __global__ void sparse_page_wise_diff_kernel(
 
       load_tokens_base[page_pos] = last_page_val;
 
-      int64_t last_top_k_val = last_top_k_base[i];
+      int64_t last_top_k_val = s_last_top_k_snapshot[i];
       if (curr_max_top_k != last_max_top_k) {
         last_top_k_val = (last_top_k_val < last_max_top_k) ? last_top_k_val : curr_max_top_k;
       }
@@ -282,18 +284,8 @@ __global__ void sparse_page_wise_diff_kernel(
     load_tokens_base[t] = page_id * page_size + token_offset;
 
     const int64_t page_id_host = s_host_pages[page_idx];
-    if (page_id_host < 0) {
-      load_tokens_base[t] = -1;
-      load_tokens_host_base[t] = -1;
-      continue;
-    }
     const int64_t token_idx_host = page_id_host * page_size + token_offset;
-    const int64_t host_slot = tokens_host_base[token_idx_host];
-    load_tokens_host_base[t] = host_slot;
-    if (host_slot < 0) {
-      load_tokens_base[t] = -1;
-      load_tokens_host_base[t] = -1;
-    }
+    load_tokens_host_base[t] = tokens_host_base[token_idx_host];
   }
 }
 
