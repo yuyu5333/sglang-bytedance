@@ -123,7 +123,7 @@ class SparseKVCacheManager:
         
         if top_k_page <= 256 and hot_buffer_page <= 256:
             
-            if True:
+            if False:
 
                 """
                 void sparse_page_wise_diff(
