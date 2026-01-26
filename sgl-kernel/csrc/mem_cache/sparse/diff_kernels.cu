@@ -242,12 +242,6 @@ __global__ void sparse_page_wise_diff_kernel(
       if (!empty) continue;
       
       const int32_t fill_pos = s_fill_pos[i];
-      if (mask_topk) {
-        const int32_t top_k_val = top_k_base[i];
-        if (top_k_val < 0) {
-            continue;
-        }
-      }
       load_tokens_host_base[fill_pos] = tmp_host_vals[i];
     }
     for (int64_t i = fill_count; i < hot_buffer_page; ++i) {
@@ -261,21 +255,8 @@ __global__ void sparse_page_wise_diff_kernel(
       bool empty = (curr_page == -1);
       const int32_t fill_pos = s_fill_pos[i];
 
-      // Handle padding: if slot is empty (needs fill) but is padding (top_k < 0),
-      // we must NOT fill it with a recycled page, and must invalidate the recycled page
-      // that was speculatively assigned to this fill_pos.
-      bool is_padding = false;
-      if (mask_topk && empty) {
-        const int32_t top_k_val = top_k_base[i];
-        if (top_k_val < 0) {
-            is_padding = true;
-            // Invalidate the recycled page to prevent it from being loaded
-            load_tokens_base[fill_pos] = -1;
-        }
-      }
-
-      const int64_t fill_page = (empty && !is_padding) ? load_tokens_base[fill_pos] : -1;
-      const int64_t fill_top_k = (empty && !is_padding) ? s_last_top_k_snapshot[fill_pos] : -1;
+      const int64_t fill_page = empty ? load_tokens_base[fill_pos] : -1;
+      const int64_t fill_top_k = empty ? s_last_top_k_snapshot[fill_pos] : -1;
 
       const int64_t final_page = empty ? fill_page : curr_page;
       const int64_t final_top_k = empty ? fill_top_k : curr_top_k;
