@@ -173,18 +173,20 @@ __global__ void sparse_page_wise_diff_kernel(
           // 4. Compaction Logic
           // Calculate fill indices (where page_ids is empty)
           int32_t fill_indices[kMaxHotBufferPages]; 
-          int fill_cnt = 0;
+          int fill_cnt_total = 0;
+          int fill_cnt_topk = 0;
           for(int i=0; i<hot_buffer_page; ++i) {
               bool mask_topk = (i < top_k_page);
               int64_t p = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
               if (p == -1) {
-                  fill_indices[i] = fill_cnt; 
-                  if (mask_topk) fill_cnt++;
+                  fill_indices[i] = fill_cnt_total; 
+                  fill_cnt_total++;
+                  if (mask_topk) fill_cnt_topk++;
               } else {
                   fill_indices[i] = -1;
               }
           }
-          s_fill_count = fill_cnt;
+          s_fill_count = fill_cnt_topk;
           
           // Collect valid recycled pages
           int32_t valid_indices[kMaxHotBufferPages];
@@ -195,7 +197,7 @@ __global__ void sparse_page_wise_diff_kernel(
               }
           }
           
-          int32_t move_cnt = valid_cnt - fill_cnt;
+          int32_t move_cnt = valid_cnt - fill_cnt_topk;
           
           // Temp buffers for recycled data
           int64_t recycled_pages[kMaxHotBufferPages];
@@ -209,7 +211,7 @@ __global__ void sparse_page_wise_diff_kernel(
               int idx_in_last = valid_indices[k];
               int page_pos = k;
               bool fill_slots = (page_pos >= move_cnt);
-              int dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + fill_cnt);
+              int dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + fill_cnt_topk);
               if (dest_idx < kMaxHotBufferPages) {
                   recycled_pages[dest_idx] = s_last_page_ids[idx_in_last];
                   recycled_top_k[dest_idx] = s_last_top_k[idx_in_last];
