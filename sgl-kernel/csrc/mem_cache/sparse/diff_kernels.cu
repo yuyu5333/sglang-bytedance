@@ -24,7 +24,7 @@ __device__ __forceinline__ int64_t to_i64<bool>(bool v) {
 template <typename DiffT, typename PageOutT, typename SparseMaskT>
 __global__ void sparse_page_wise_diff_kernel(
     int64_t* __restrict__ last_top_k_idx,
-    const int64_t* __restrict__ top_k_idx,
+    const int32_t* __restrict__ top_k_idx,
     int64_t* __restrict__ last_page_ids,
     PageOutT* __restrict__ page_ids,
     DiffT* __restrict__ diff_map,
@@ -34,7 +34,7 @@ __global__ void sparse_page_wise_diff_kernel(
     const int64_t* __restrict__ seq_lens,
     const int64_t* __restrict__ req_pool_indices,
     const SparseMaskT* __restrict__ sparse_mask,
-    const int64_t* __restrict__ page_table,
+    const int32_t* __restrict__ page_table,
     int64_t last_top_k_s0,
     int64_t last_top_k_s1,
     int64_t top_k_s,
@@ -92,7 +92,7 @@ __global__ void sparse_page_wise_diff_kernel(
   const int64_t seq_len = s_seq_len;
   const int32_t sparse_mask_val = s_sparse_mask_val;
 
-  const int64_t* top_k_base = top_k_idx + bid * top_k_s;
+  const int32_t* top_k_base = top_k_idx + bid * top_k_s;
   int64_t* last_top_k_base = last_top_k_idx + req_idx * last_top_k_s0 + layer_id * last_top_k_s1;
   int64_t* last_page_ids_base = last_page_ids + req_idx * last_page_ids_s0 + layer_id * last_page_ids_s1;
   DiffT* diff_map_base = diff_map + bid * diff_map_s;
@@ -100,9 +100,10 @@ __global__ void sparse_page_wise_diff_kernel(
 
   if ((sparse_mask_val == 0) || (seq_len <= 0)) {
     for (int64_t i = tid; i < top_k_page; i += blockDim.x) {
-      int64_t top_k_val = top_k_base[i];
+      int64_t top_k_val = static_cast<int64_t>(top_k_base[i]);
       if (top_k_val >= 0) {
-        int64_t loaded_page_start = page_table[page_table_s * req_idx + top_k_val];
+        int64_t loaded_page_start =
+            static_cast<int64_t>(page_table[page_table_s * req_idx + top_k_val]);
         page_ids_base[i] = static_cast<PageOutT>(loaded_page_start / page_size);
       }
     }
@@ -117,7 +118,7 @@ __global__ void sparse_page_wise_diff_kernel(
     }
     int64_t curr_max = -9223372036854775807LL - 1;
     for (int64_t i = 0; i < top_k_page; ++i) {
-      int64_t v = top_k_base[i];
+      int64_t v = static_cast<int64_t>(top_k_base[i]);
       if (v > curr_max) curr_max = v;
     }
     s_last_max_top_k = last_max;
@@ -141,7 +142,7 @@ __global__ void sparse_page_wise_diff_kernel(
 
   if (tid == 0) {
     for (int64_t i = 0; i < top_k_page; ++i) {
-      const int64_t top_k_origin = top_k_base[i];
+      const int64_t top_k_origin = static_cast<int64_t>(top_k_base[i]);
       const int32_t exist_top_k_idx = static_cast<int32_t>(diff_map_base[top_k_origin]);
       if (exist_top_k_idx >= 0) {
         const int64_t exist_page = last_page_ids_base[exist_top_k_idx];
@@ -224,7 +225,7 @@ __global__ void sparse_page_wise_diff_kernel(
     }
 
     for (int64_t i = 0; i < top_k_page; ++i) {
-      last_top_k_base[i] = top_k_base[i];
+      last_top_k_base[i] = static_cast<int64_t>(top_k_base[i]);
     }
 
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
@@ -400,7 +401,7 @@ void sparse_page_wise_diff(
       if (sparse_mask.scalar_type() == at::kBool) {
         sparse_page_wise_diff_kernel<int16_t, int32_t, bool><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int32_t>(),
             diff_map.data_ptr<int16_t>(),
@@ -410,7 +411,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<bool>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -431,7 +432,7 @@ void sparse_page_wise_diff(
       } else if (sparse_mask.scalar_type() == at::kInt) {
         sparse_page_wise_diff_kernel<int16_t, int32_t, int32_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int32_t>(),
             diff_map.data_ptr<int16_t>(),
@@ -441,7 +442,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int32_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -462,7 +463,7 @@ void sparse_page_wise_diff(
       } else {
         sparse_page_wise_diff_kernel<int16_t, int32_t, int64_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int32_t>(),
             diff_map.data_ptr<int16_t>(),
@@ -472,7 +473,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int64_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -495,7 +496,7 @@ void sparse_page_wise_diff(
       if (sparse_mask.scalar_type() == at::kBool) {
         sparse_page_wise_diff_kernel<int16_t, int64_t, bool><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int64_t>(),
             diff_map.data_ptr<int16_t>(),
@@ -505,7 +506,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<bool>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -526,7 +527,7 @@ void sparse_page_wise_diff(
       } else if (sparse_mask.scalar_type() == at::kInt) {
         sparse_page_wise_diff_kernel<int16_t, int64_t, int32_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int64_t>(),
             diff_map.data_ptr<int16_t>(),
@@ -536,7 +537,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int32_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -557,7 +558,7 @@ void sparse_page_wise_diff(
       } else {
         sparse_page_wise_diff_kernel<int16_t, int64_t, int64_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int64_t>(),
             diff_map.data_ptr<int16_t>(),
@@ -567,7 +568,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int64_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -592,7 +593,7 @@ void sparse_page_wise_diff(
       if (sparse_mask.scalar_type() == at::kBool) {
         sparse_page_wise_diff_kernel<int32_t, int32_t, bool><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int32_t>(),
             diff_map.data_ptr<int32_t>(),
@@ -602,7 +603,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<bool>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -623,7 +624,7 @@ void sparse_page_wise_diff(
       } else if (sparse_mask.scalar_type() == at::kInt) {
         sparse_page_wise_diff_kernel<int32_t, int32_t, int32_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int32_t>(),
             diff_map.data_ptr<int32_t>(),
@@ -633,7 +634,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int32_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -654,7 +655,7 @@ void sparse_page_wise_diff(
       } else {
         sparse_page_wise_diff_kernel<int32_t, int32_t, int64_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int32_t>(),
             diff_map.data_ptr<int32_t>(),
@@ -664,7 +665,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int64_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -687,7 +688,7 @@ void sparse_page_wise_diff(
       if (sparse_mask.scalar_type() == at::kBool) {
         sparse_page_wise_diff_kernel<int32_t, int64_t, bool><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int64_t>(),
             diff_map.data_ptr<int32_t>(),
@@ -697,7 +698,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<bool>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -718,7 +719,7 @@ void sparse_page_wise_diff(
       } else if (sparse_mask.scalar_type() == at::kInt) {
         sparse_page_wise_diff_kernel<int32_t, int64_t, int32_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int64_t>(),
             diff_map.data_ptr<int32_t>(),
@@ -728,7 +729,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int32_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
@@ -749,7 +750,7 @@ void sparse_page_wise_diff(
       } else {
         sparse_page_wise_diff_kernel<int32_t, int64_t, int64_t><<<grid, block, 0, stream>>>(
             last_top_k_idx.data_ptr<int64_t>(),
-            top_k_idx.data_ptr<int64_t>(),
+            top_k_idx.data_ptr<int32_t>(),
             last_page_ids.data_ptr<int64_t>(),
             page_ids.data_ptr<int64_t>(),
             diff_map.data_ptr<int32_t>(),
@@ -759,7 +760,7 @@ void sparse_page_wise_diff(
             seq_lens.data_ptr<int64_t>(),
             req_pool_indices.data_ptr<int64_t>(),
             sparse_mask.data_ptr<int64_t>(),
-            page_table.data_ptr<int64_t>(),
+            page_table.data_ptr<int32_t>(),
             last_top_k_s0,
             last_top_k_s1,
             top_k_s,
