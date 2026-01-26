@@ -152,12 +152,8 @@ __global__ void sparse_page_wise_diff_kernel(
             static_cast<int32_t>(diff_map_base[top_k_origin]);
         if (exist_top_k_idx >= 0) {
           const int64_t exist_page = last_page_ids_base[exist_top_k_idx];
-          if (exist_page >= 0) {
-            page_ids_base[i] = static_cast<PageOutT>(exist_page);
-            last_page_ids_base[exist_top_k_idx] = -1;
-          } else {
-            load_tokens_host_base[i] = top_k_origin;
-          }
+          page_ids_base[i] = static_cast<PageOutT>(exist_page);
+          last_page_ids_base[exist_top_k_idx] = -1;
         } else {
           load_tokens_host_base[i] = top_k_origin;
         }
