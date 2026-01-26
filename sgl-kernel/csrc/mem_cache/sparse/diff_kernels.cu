@@ -229,6 +229,29 @@ __global__ void sparse_page_wise_diff_kernel(
       last_top_k_base[page_pos] = last_top_k_val;
     }
 
+    int64_t tmp_host_vals[kMaxHotBufferPages];
+    for (int64_t i = 0; i < hot_buffer_page; ++i) {
+      tmp_host_vals[i] = load_tokens_host_base[i];
+    }
+    for (int64_t i = 0; i < hot_buffer_page; ++i) {
+      load_tokens_host_base[i] = -1;
+    }
+    for (int64_t i = 0; i < hot_buffer_page; ++i) {
+      const bool mask_topk = i < top_k_page;
+      const int64_t curr_page = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
+      bool empty = (curr_page == -1);
+      if (mask_topk) {
+        const int32_t top_k_val = top_k_base[i];
+        empty = empty && (top_k_val >= 0);
+      }
+      if (!empty) continue;
+      const int32_t fill_pos = s_fill_pos[i];
+      load_tokens_host_base[fill_pos] = tmp_host_vals[i];
+    }
+    for (int64_t i = fill_count; i < hot_buffer_page; ++i) {
+      load_tokens_host_base[i] = -1;
+    }
+
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
       const bool mask_topk = i < top_k_page;
       const int64_t curr_page = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
@@ -261,29 +284,6 @@ __global__ void sparse_page_wise_diff_kernel(
       if (i >= fill_count) {
         load_tokens_base[i] = -1;
       }
-    }
-
-    int64_t tmp_host_vals[kMaxHotBufferPages];
-    for (int64_t i = 0; i < hot_buffer_page; ++i) {
-      tmp_host_vals[i] = load_tokens_host_base[i];
-    }
-    for (int64_t i = 0; i < hot_buffer_page; ++i) {
-      load_tokens_host_base[i] = -1;
-    }
-    for (int64_t i = 0; i < hot_buffer_page; ++i) {
-      const bool mask_topk = i < top_k_page;
-      const int64_t curr_page = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
-      bool empty = (curr_page == -1);
-      if (mask_topk) {
-        const int32_t top_k_val = top_k_base[i];
-        empty = empty && (top_k_val >= 0);
-      }
-      if (!empty) continue;
-      const int32_t fill_pos = s_fill_pos[i];
-      load_tokens_host_base[fill_pos] = tmp_host_vals[i];
-    }
-    for (int64_t i = fill_count; i < hot_buffer_page; ++i) {
-      load_tokens_host_base[i] = -1;
     }
   }
   __syncthreads();
