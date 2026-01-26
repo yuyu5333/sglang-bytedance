@@ -227,6 +227,9 @@ __global__ void sparse_page_wise_diff_kernel(
         last_top_k_val = (last_top_k_val < last_max_top_k) ? last_top_k_val : curr_max_top_k;
       }
       last_top_k_base[page_pos] = last_top_k_val;
+      if (page_pos < fill_count) {
+        s_last_top_k_snapshot[page_pos] = last_top_k_val;
+      }
     }
 
     int64_t tmp_host_vals[kMaxHotBufferPages];
@@ -255,7 +258,7 @@ __global__ void sparse_page_wise_diff_kernel(
     for (int64_t i = 0; i < hot_buffer_page; ++i) {
       const bool mask_topk = i < top_k_page;
       const int64_t curr_page = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
-      const int64_t curr_top_k = mask_topk ? load_tokens_host_base[i] : -1;
+      const int64_t curr_top_k = mask_topk ? static_cast<int64_t>(top_k_base[i]) : -1;
       bool empty = (curr_page == -1);
       if (mask_topk) {
         const int32_t top_k_val = top_k_base[i];
@@ -264,7 +267,7 @@ __global__ void sparse_page_wise_diff_kernel(
       const int32_t fill_pos = s_fill_pos[i];
 
       const int64_t fill_page = empty ? load_tokens_base[fill_pos] : -1;
-      const int64_t fill_top_k = empty ? last_top_k_base[fill_pos] : -1;
+      const int64_t fill_top_k = empty ? s_last_top_k_snapshot[fill_pos] : -1;
 
       const int64_t final_page = empty ? fill_page : curr_page;
       const int64_t final_top_k = empty ? fill_top_k : curr_top_k;
