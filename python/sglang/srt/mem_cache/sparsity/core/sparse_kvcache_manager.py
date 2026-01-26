@@ -230,6 +230,11 @@ class SparseKVCacheManager:
             swap_target_device_slots != -1
         ]
         swap_source_host_slots = swap_source_host_slots[swap_source_host_slots != -1]
+        print(f"[DEBUG] self.req_states.should_load_device_indices numel() is {self.req_states.should_load_device_indices.numel()}, self.req_states.should_load_host_indices numel() is {self.req_states.should_load_host_indices.numel()}")
+        print(f"[DEBUG] self.req_states.should_load_device_indices={self.req_states.should_load_device_indices}")
+        print(f"[DEBUG] self.req_states.should_load_host_indices={self.req_states.should_load_host_indices}")
+        
+        
         print(f"[DEBUG] swap_target_device_slots.numel()={swap_target_device_slots.numel()}, swap_source_host_slots.numel()={swap_source_host_slots.numel()}")
         print(f"[DEBUG] swap_target_device_slots is {swap_target_device_slots}")
         print(f"[DEBUG] swap_source_host_slots is {swap_source_host_slots}")
