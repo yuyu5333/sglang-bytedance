@@ -148,10 +148,6 @@ class SparseKVCacheManager:
             as_tuple=False,
         ).squeeze(1)
 
-        assert (
-            swap_target_device_slots.numel() == swap_source_host_slots.numel()
-        ), "Swap target device slots and source host slots must have the same number of elements"
-
         # Load cache from host to device
         if valid_pos.numel() > 0:
             self.mem_pool_host.load_to_device_per_layer(
