@@ -15,10 +15,7 @@ import triton
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
     BaseSparseAlgorithmImpl,
 )
-from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import (
-    quest_page_rep_kernel,
-    quest_retrieval_score_and_combine_indices_triton
-)
+from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import quest_page_rep_kernel
 
 from sgl_kernel import quest_retrieval_score_and_combine_indices
 
@@ -281,42 +278,6 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         
         out_indices = torch.empty((bs, max_out), dtype=torch.int32, device=device)
         out_lengths = torch.empty((bs,), dtype=torch.int32, device=device)
-        
-        """
-            bs=<class 'int'>
-            seq_lens=<class 'torch.Tensor'>
-            page_size=<class 'int'>
-            req_to_token=<class 'torch.Tensor'>
-            self.page_k_min[layer_id]=<class 'torch.Tensor'>
-            self.page_k_max[layer_id]=<class 'torch.Tensor'>
-            queries=<class 'torch.Tensor'>
-            req_pool_indices=<class 'torch.Tensor'>
-            self.num_recent_pages=<class 'int'>
-            self.fixed_topk_page_cnt=<class 'int'>
-            self.sparsity_ratio=<class 'float'>
-            sparse_mask=<class 'torch.Tensor'>
-            out_indices=<class 'torch.Tensor'>
-            out_lengths=<class 'torch.Tensor'>
-            
-            === para info ===
-            bs: Python type=<class 'int'>, value=1
-            page_size: Python type=<class 'int'>, value=64
-            num_recent_pages: Python type=<class 'int'>, value=4
-            fixed_topk_page_cnt: Python type=<class 'int'>, value=16
-            sparsity_ratio: Python type=<class 'float'>, value=0.7
-            layer_id: Python type=<class 'int'>, value=0
-
-            seq_lens: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1])
-            req_to_token: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([4096, 40964])
-            page_k_min[layer_id]: Python type=<class 'torch.Tensor'>, tensor dtype=torch.float32, shape=torch.Size([6886, 8, 128])
-            page_k_max[layer_id]: Python type=<class 'torch.Tensor'>, tensor dtype=torch.float32, shape=torch.Size([6886, 8, 128])
-            queries: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bfloat16, shape=torch.Size([1, 4096])
-            req_pool_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int64, shape=torch.Size([1])
-            sparse_mask: Python type=<class 'torch.Tensor'>, tensor dtype=torch.bool, shape=torch.Size([1])
-            out_indices: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1, 37])
-            out_lengths: Python type=<class 'torch.Tensor'>, tensor dtype=torch.int32, shape=torch.Size([1])
-
-        """
 
         seq_lens_i32 = kwargs.get("seq_lens_i32", None)
         if seq_lens_i32 is None:
