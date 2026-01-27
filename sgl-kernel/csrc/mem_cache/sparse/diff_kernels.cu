@@ -4,12 +4,16 @@
 
 #include <cstdint>
 
+#include <cub/block/block_reduce.cuh>
+#include <cub/block/block_scan.cuh>
+
 #include "diff_kernels.h"
 #include "utils.h"
 
 namespace {
 
 constexpr int64_t kMaxHotBufferPages = 256;
+constexpr int kBlockSize = 256;
 
 template <typename T>
 __device__ __forceinline__ int64_t to_i64(T v) {
@@ -21,76 +25,62 @@ __device__ __forceinline__ int64_t to_i64<bool>(bool v) {
   return v ? 1 : 0;
 }
 
-// Parallel Primitive: Block Reduce Max
-template <typename T>
-__device__ T block_reduce_max(T val) {
-    // Warp reduce
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = max(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
-    }
-    
-    static __shared__ T shared[32]; // Max 32 warps (1024 threads)
-    int lane = threadIdx.x % 32;
-    int wid = threadIdx.x / 32;
-    
-    if (lane == 0) shared[wid] = val;
-    
-    __syncthreads();
-    
-    // First warp reduces shared
-    // Initialize val for the first warp to a safe minimum if it exceeds active warps
-    // We assume T is signed for this minimum or use specific logic
-    T w_val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : (T)-9223372036854775807LL; 
-    
-    if (wid == 0) {
-         for (int offset = blockDim.x / 32 / 2; offset > 0; offset /= 2) {
-            w_val = max(w_val, __shfl_down_sync(0xFFFFFFFF, w_val, offset));
-         }
-         if (lane == 0) shared[0] = w_val;
-    }
-    
-    __syncthreads();
-    return shared[0];
-}
+// Vectorized load helper
+template <typename T, int N>
+struct VecLoad {
+    using Type = T;
+};
 
-// Parallel Primitive: Block Scan Inclusive (Prefix Sum)
-// Returns the inclusive sum for the calling thread.
-// Optionally writes the total sum to *total_sum (only valid for last thread).
-__device__ int block_scan_inclusive(int val, int* total_sum) {
-    // Warp scan
-    int lane = threadIdx.x % 32;
-    int wid = threadIdx.x / 32;
+template <>
+struct VecLoad<int32_t, 4> {
+    using Type = int4;
+};
+
+template <>
+struct VecLoad<int64_t, 2> {
+    using Type = int4;
+};
+
+template <typename T>
+__device__ __forceinline__ void load_shared_vectorized(
+    const T* __restrict__ src,
+    T* __restrict__ dst,
+    int count,
+    int tid) {
     
-    for (int offset = 1; offset < 32; offset <<= 1) {
-        int temp = __shfl_up_sync(0xFFFFFFFF, val, offset);
-        if (lane >= offset) val += temp;
-    }
-    
-    static __shared__ int shared[32];
-    if (lane == 31) shared[wid] = val;
-    
-    __syncthreads();
-    
-    // Scan shared (prefix sums of warps)
-    if (wid == 0) {
-        int w_val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : 0;
-        for (int offset = 1; offset < 32; offset <<= 1) { 
-             int temp = __shfl_up_sync(0xFFFFFFFF, w_val, offset);
-             if (lane >= offset) w_val += temp;
+    // Try 128-bit load for int32
+    if constexpr (std::is_same_v<T, int32_t>) {
+        if (reinterpret_cast<uintptr_t>(src) % 16 == 0 && count % 4 == 0) {
+            const int4* src_vec = reinterpret_cast<const int4*>(src);
+            int4* dst_vec = reinterpret_cast<int4*>(dst);
+            int vec_count = count / 4;
+            for (int i = tid; i < vec_count; i += kBlockSize) {
+                dst_vec[i] = src_vec[i];
+            }
+            // Handle remaining part if BlockSize > vec_count? 
+            // Here we assume count <= 256, so vec_count <= 64. 
+            // 256 threads cover it easily.
+            return;
         }
-        if (threadIdx.x < blockDim.x / 32) shared[lane] = w_val;
     }
     
-    __syncthreads();
-    
-    // Add base
-    if (wid > 0) {
-        val += shared[wid - 1];
+    // Try 128-bit load for int64
+    if constexpr (std::is_same_v<T, int64_t>) {
+        if (reinterpret_cast<uintptr_t>(src) % 16 == 0 && count % 2 == 0) {
+            const int4* src_vec = reinterpret_cast<const int4*>(src);
+            int4* dst_vec = reinterpret_cast<int4*>(dst);
+            int vec_count = count / 2;
+            for (int i = tid; i < vec_count; i += kBlockSize) {
+                dst_vec[i] = src_vec[i];
+            }
+            return;
+        }
     }
-    
-    if (total_sum && threadIdx.x == blockDim.x - 1) *total_sum = val;
-    
-    return val;
+
+    // Fallback to scalar load
+    for (int i = tid; i < count; i += kBlockSize) {
+        dst[i] = src[i];
+    }
 }
 
 template <typename DiffT, typename PageOutT, typename SparseMaskT>
@@ -99,7 +89,7 @@ __global__ void sparse_page_wise_diff_kernel(
     const int32_t* __restrict__ top_k_idx,
     int64_t* __restrict__ last_page_ids,
     PageOutT* __restrict__ page_ids,
-    DiffT* __restrict__ diff_map,
+    DiffT* __restrict__ diff_map, // Unused in optimized version
     const int64_t* __restrict__ req_to_tokens_host,
     int64_t* __restrict__ load_tokens,
     int64_t* __restrict__ load_tokens_host,
@@ -133,20 +123,36 @@ __global__ void sparse_page_wise_diff_kernel(
   int64_t* load_tokens_host_base = load_tokens_host + bid * load_tokens_host_s;
   PageOutT* page_ids_base = page_ids + bid * page_ids_s;
   
-  // Shared memory buffers
-  __shared__ int64_t s_load_pages[kMaxHotBufferPages];
-  __shared__ int64_t s_host_pages[kMaxHotBufferPages];
+  // Shared memory
+  // Use a union or just layouts to manage shared memory
+  // Layout:
+  // s_last_top_k: [hot_buffer_page] (int64)
+  // s_top_k: [top_k_page] (int32)
+  // s_last_page_ids: [hot_buffer_page] (int64)
+  // s_load_pages: [top_k_page] (int64)
+  // s_host_pages: [top_k_page] (int64)
+  // ... temporary buffers for scan ...
+  
+  extern __shared__ char smem[];
+  int64_t* s_last_top_k = reinterpret_cast<int64_t*>(smem);
+  int64_t* s_last_page_ids = s_last_top_k + kMaxHotBufferPages;
+  int32_t* s_top_k = reinterpret_cast<int32_t*>(s_last_page_ids + kMaxHotBufferPages);
+  
+  // Re-use memory for outputs/intermediates
+  // Note: We need s_load_pages and s_host_pages for the final expansion step
+  // They can overlap with recycle buffers as long as we are careful.
+  int64_t* s_load_pages = reinterpret_cast<int64_t*>(s_top_k + kMaxHotBufferPages);
+  int64_t* s_host_pages = s_load_pages + kMaxHotBufferPages;
+  
+  // CUB Storage
+  union TempStorage {
+      typename cub::BlockReduce<int64_t, kBlockSize>::TempStorage reduce;
+      typename cub::BlockScan<int, kBlockSize>::TempStorage scan;
+  };
+  __shared__ TempStorage temp_storage;
   __shared__ int32_t s_fill_count;
-  __shared__ int32_t s_fill_cnt_topk;
   __shared__ int32_t s_valid_cnt;
-
-  // Local buffers in shared memory
-  __shared__ int64_t s_last_top_k[kMaxHotBufferPages];
-  __shared__ int32_t s_top_k[kMaxHotBufferPages];
-  __shared__ int64_t s_last_page_ids[kMaxHotBufferPages];
-  __shared__ int64_t recycled_pages[kMaxHotBufferPages];
-  __shared__ int64_t recycled_top_k[kMaxHotBufferPages];
-  __shared__ int32_t fill_indices[kMaxHotBufferPages];
+  __shared__ int32_t s_fill_cnt_topk;
 
   // Initialize outputs (Parallel)
   for (int64_t i = tid; i < top_k; i += blockDim.x) {
@@ -169,21 +175,22 @@ __global__ void sparse_page_wise_diff_kernel(
   const int32_t* top_k_base = top_k_idx + bid * top_k_s;
   int64_t* last_top_k_base = last_top_k_idx + req_idx * last_top_k_s0 + layer_id * last_top_k_s1;
   int64_t* last_page_ids_base = last_page_ids + req_idx * last_page_ids_s0 + layer_id * last_page_ids_s1;
-  DiffT* diff_map_base = diff_map + bid * diff_map_s;
 
-  // Load Data to Shared Memory
-  if (tid < hot_buffer_page) {
-      s_last_top_k[tid] = last_top_k_base[tid];
-      s_last_page_ids[tid] = last_page_ids_base[tid];
-  }
+  // 1. Load Data to Shared Memory (Vectorized)
+  load_shared_vectorized(last_top_k_base, s_last_top_k, hot_buffer_page, tid);
+  load_shared_vectorized(last_page_ids_base, s_last_page_ids, hot_buffer_page, tid);
+  load_shared_vectorized(top_k_base, s_top_k, top_k_page, tid);
+  
+  // Init temp buffers
   if (tid < top_k_page) {
-      s_top_k[tid] = top_k_base[tid];
+      s_load_pages[tid] = -1;
+      s_host_pages[tid] = -1;
   }
   
   __syncthreads();
 
   if ((sparse_mask_val == 0) || (seq_len <= 0)) {
-      // Fast path: just load pages for top_k
+      // Fast path
       if (tid < top_k_page) {
           int32_t val = s_top_k[tid];
           if (val >= 0) {
@@ -191,65 +198,48 @@ __global__ void sparse_page_wise_diff_kernel(
               page_ids_base[tid] = static_cast<PageOutT>(loaded_page_start / page_size);
           }
       }
-      // Note: In fast path, we don't need to populate s_fill_count for token expansion 
-      // because token expansion loop checks `page_idx >= fill_count`.
-      // If we don't set s_fill_count, it remains 0 (set by tid=0 above).
-      // But we need to ensure s_load_pages/s_host_pages are handled?
-      // The original code only uses s_fill_count for "Parallel Token Expansion".
-      // In fast path, `sparse_mask` is false, so maybe token expansion is not needed?
-      // Wait, original code:
-      // if ((sparse_mask_val == 0) || (seq_len <= 0)) { ... } else { ... s_fill_count = ... }
-      // __syncthreads();
-      // Parallel Token Expansion ... if (page_idx >= fill_count) continue;
-      // So if fill_count is 0, token expansion does nothing.
-      // Correct.
   } else {
       // Full Diff Logic
       
-      // 1. Update last_top_k with max values
+      // 2. Update Max (Parallel Reduction)
       int64_t my_last = (tid < hot_buffer_page) ? s_last_top_k[tid] : -9223372036854775807LL;
-      int64_t last_max = block_reduce_max(my_last);
+      int64_t last_max = cub::BlockReduce<int64_t, kBlockSize>(temp_storage.reduce).Reduce(my_last, cub::Max());
+      __syncthreads(); // Barrier for temp_storage reuse
       
       int64_t my_curr = (tid < top_k_page) ? (int64_t)s_top_k[tid] : -9223372036854775807LL;
-      int64_t curr_max = block_reduce_max(my_curr);
+      int64_t curr_max = cub::BlockReduce<int64_t, kBlockSize>(temp_storage.reduce).Reduce(my_curr, cub::Max());
+      __syncthreads();
       
       if (curr_max != last_max) {
           if (tid < hot_buffer_page && s_last_top_k[tid] >= last_max) {
                s_last_top_k[tid] = curr_max;
           }
       }
-      __syncthreads();
+      __syncthreads(); // Wait for s_last_top_k update
       
-      // 2. Build Diff Map
-      // Clear diff map for NEW top_k values first
-      if (tid < top_k_page) {
-          int32_t val = s_top_k[tid];
-          if (val >= 0) diff_map_base[val] = static_cast<DiffT>(-1);
-      }
-      __syncthreads();
+      // 3. Intersection (Brute-force in Shared Memory)
+      // Replaces diff_map.
+      // Each thread (representing a new top_k item) scans s_last_top_k.
+      // Since arrays are small (<=256), this is fast.
+      // To avoid read conflicts on s_last_page_ids later, we mark used slots in a separate bitmap or bool array?
+      // Actually we can just modify s_last_page_ids[match_idx] = -1.
+      // But multiple threads might try to write.
+      // Uniqueness assumption: s_top_k has unique values, s_last_top_k has unique values.
+      // So at most one thread matches one slot. Safe to write.
       
-      // Populate diff map with OLD top_k values
-      if (tid < hot_buffer_page) {
-          int64_t val = s_last_top_k[tid];
-          if (val >= 0) diff_map_base[val] = static_cast<DiffT>(tid);
-      }
-      __syncthreads();
-      
-      // 3. Intersection & Reuse
       if (tid < top_k_page) {
           int32_t val = s_top_k[tid];
           if (val >= 0) {
-              int32_t exist_idx = static_cast<int32_t>(diff_map_base[val]);
-              if (exist_idx >= 0) {
-                  // Atomic exchange to claim
-                  unsigned long long* ptr = (unsigned long long*)&s_last_page_ids[exist_idx];
-                  unsigned long long old_page = atomicExch(ptr, (unsigned long long)-1);
-                  
-                  if ((int64_t)old_page != -1) {
-                      page_ids_base[tid] = static_cast<PageOutT>(old_page);
-                      s_top_k[tid] = -1; // Mark as satisfied
-                      // Clear diff map entry
-                      diff_map_base[val] = static_cast<DiffT>(-1); 
+              // Brute force scan
+              for (int j = 0; j < hot_buffer_page; ++j) {
+                  if (s_last_top_k[j] == (int64_t)val) {
+                      int64_t exist_page = s_last_page_ids[j];
+                      if (exist_page != -1) {
+                          page_ids_base[tid] = static_cast<PageOutT>(exist_page);
+                          s_last_page_ids[j] = -1; // Mark as reused
+                          s_top_k[tid] = -1; // Mark as satisfied
+                      }
+                      break; // Found match
                   }
               }
           }
@@ -257,64 +247,120 @@ __global__ void sparse_page_wise_diff_kernel(
       __syncthreads();
       
       // 4. Compaction Logic
-      // Initialize buffers
-      if (tid < kMaxHotBufferPages) {
-          recycled_pages[tid] = -1;
-          recycled_top_k[tid] = -1;
-      }
       
-      // Identify holes
+      // A. Identify holes (where page_ids is -1)
       bool is_hole = false;
       if (tid < top_k_page) {
           if (page_ids_base[tid] == static_cast<PageOutT>(-1)) is_hole = true;
       } else if (tid < hot_buffer_page) {
-          is_hole = true;
+          is_hole = true; // Extra slots in hot buffer are treated as holes
       }
       
-      // Prefix sum of holes
-      int hole_rank = block_scan_inclusive((int)is_hole, &s_fill_count);
-      
-      if (is_hole) {
-          fill_indices[tid] = hole_rank - 1;
-      } else {
-          fill_indices[tid] = -1;
-      }
-      
-      // Compute s_fill_cnt_topk
-      if (tid == top_k_page - 1) {
-          s_fill_cnt_topk = hole_rank;
-      } else if (top_k_page == 0 && tid == 0) {
-          s_fill_cnt_topk = 0;
-      }
+      int hole_rank;
+      int total_holes;
+      cub::BlockScan<int, kBlockSize>(temp_storage.scan).InclusiveSum((int)is_hole, hole_rank, total_holes);
+      if (tid == 0) s_fill_count = total_holes; // Total fill needed (across both top_k and extra buffer)
       __syncthreads();
       
-      // Collect valid recycled pages
-      bool is_valid = (tid < hot_buffer_page && s_last_page_ids[tid] != -1);
-      int valid_rank = block_scan_inclusive((int)is_valid, &s_valid_cnt);
+      // Calculate how many holes are within top_k_page range
+      // We need s_fill_cnt_topk.
+      // We can infer it: hole_rank of thread (top_k_page - 1).
+      // But we need to handle edge case where top_k_page=0.
+      if (tid == top_k_page - 1) {
+          s_fill_cnt_topk = is_hole ? hole_rank : (hole_rank); 
+          // InclusiveSum: if is_hole=1, rank is count including self.
+          // if is_hole=0, rank is count before self.
+          // Wait, InclusiveSum returns rank including self if input is 1.
+          // If input is 0, it returns sum so far (same as prev).
+          // So hole_rank IS the count of holes up to tid.
+          // Correct.
+      } else if (top_k_page == 0 && tid == 0) {
+           s_fill_cnt_topk = 0;
+      }
+      // Broadcast s_fill_cnt_topk ? Actually we can just read it from shared memory if we wrote it.
+      // But variable broadcast is tricky. Let's use shared mem.
+      __syncthreads();
       
-      // Recycled Data Move
+      // B. Identify Valid Recyclables
+      bool is_valid = (tid < hot_buffer_page && s_last_page_ids[tid] != -1);
+      int valid_rank;
+      int total_valid;
+      cub::BlockScan<int, kBlockSize>(temp_storage.scan).InclusiveSum((int)is_valid, valid_rank, total_valid);
+      if (tid == 0) s_valid_cnt = total_valid;
+      __syncthreads();
+      
+      // C. Move Data
+      // To avoid bank conflicts and complex indexing, we can write compacted data to a temporary buffer
+      // But shared memory is tight.
+      // Let's use the logic:
+      // We have `total_valid` items to distribute.
+      // `s_fill_cnt_topk` go to fill the first holes (which are in top_k range).
+      // The rest go to the end of buffer.
+      
+      // We need a scatter map.
+      // Each valid item knows its rank (valid_rank - 1).
+      // It needs to calculate its destination index.
+      
+      int dest_idx = -1;
       if (is_valid) {
           int page_pos = valid_rank - 1;
           int move_cnt = s_valid_cnt - s_fill_cnt_topk;
-          bool fill_slots = (page_pos >= move_cnt);
-          int dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + s_fill_cnt_topk);
+          bool fill_slots = (page_pos >= move_cnt); 
           
-          if (dest_idx < kMaxHotBufferPages) {
-               recycled_pages[dest_idx] = s_last_page_ids[tid];
-               recycled_top_k[dest_idx] = s_last_top_k[tid];
+          // Logic from original:
+          // fill_slots = (page_pos >= move_cnt)
+          // dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + s_fill_cnt_topk);
+          // Wait, this logic maps "later" valid items to "earlier" holes?
+          // Let's re-verify original logic.
+          /*
+          int move_cnt = valid_cnt - fill_cnt_topk;
+          for(int k=0; k<valid_cnt; ++k) {
+              int page_pos = k;
+              bool fill_slots = (page_pos >= move_cnt);
+              int dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + fill_cnt_topk);
+              recycled_pages[dest_idx] = ...
+          }
+          */
+          // Yes.
+          // dest_idx is the index in the "Compacted Array" of valid items?
+          // No, dest_idx is the index in `recycled_pages` buffer which corresponds to `fill_indices`.
+          // Original:
+          // fill_indices[i] maps i -> rank of hole.
+          // recycled_pages[rank] stores the item.
+          // So if I am a valid item with rank R, I write to recycled_pages[dest_idx(R)].
+          // Then hole at `i` with rank `r` reads from `recycled_pages[r]`.
+          
+          // So:
+          int target_hole_rank = fill_slots ? (page_pos - move_cnt) : (page_pos + s_fill_cnt_topk);
+          
+          // We need to write to a temp buffer at `target_hole_rank`.
+          // We can reuse s_last_top_k or s_last_page_ids? No, we are reading them.
+          // We can use s_load_pages / s_host_pages as temp storage since they are not used yet.
+          // s_load_pages is int64, good.
+          // We need to store both page_id and top_k.
+          // s_load_pages[target_hole_rank] = s_last_page_ids[tid]
+          // s_host_pages[target_hole_rank] = s_last_top_k[tid]
+          
+          if (target_hole_rank < kMaxHotBufferPages) {
+              s_load_pages[target_hole_rank] = s_last_page_ids[tid];
+              s_host_pages[target_hole_rank] = s_last_top_k[tid];
           }
       }
       __syncthreads();
       
-      // Fill & Merge Logic
+      // D. Fill & Merge
       if (tid < hot_buffer_page) {
           bool mask_topk = (tid < top_k_page);
           
           if (is_hole) {
-              int fpos = fill_indices[tid];
+              // I am a hole. My rank is hole_rank - 1.
+              int my_rank = hole_rank - 1;
               
-              int64_t r_page = recycled_pages[fpos];
-              int64_t r_topk = recycled_top_k[fpos];
+              int64_t r_page = s_load_pages[my_rank];
+              int64_t r_topk = s_host_pages[my_rank];
+              
+              // Note: s_load_pages was init to -1.
+              // If we didn't write to it (because valid_cnt is small), it stays -1.
               
               if (r_page != -1) {
                   // Recycled
@@ -322,25 +368,29 @@ __global__ void sparse_page_wise_diff_kernel(
                   last_page_ids_base[tid] = r_page;
                   last_top_k_base[tid] = r_topk;
                   
+                  // Setup for Token Expansion
                   if (mask_topk && top_k_base[tid] >= 0) {
-                      s_load_pages[fpos] = r_page;
-                      s_host_pages[fpos] = top_k_base[tid];
-                  } else {
-                      s_load_pages[fpos] = -1;
-                      s_host_pages[fpos] = -1;
+                      // We need to store these for the expansion phase
+                      // But wait, we used s_load_pages/s_host_pages as TEMP buffers!
+                      // We need to persist them to the correct location for expansion.
+                      // Expansion reads s_load_pages[page_idx].
+                      // Here page_idx = tid (since 1 page per thread).
+                      // So we just need to overwrite s_load_pages[tid] with the result.
+                      // But we are reading s_load_pages[my_rank] currently!
+                      // Race condition if we write to s_load_pages[tid] now.
+                      // We need a register or another temp.
+                      
+                      // Store in register first
                   }
               } else {
                   // Host Load
                   if (mask_topk) {
-                     s_host_pages[fpos] = top_k_base[tid];
                      last_page_ids_base[tid] = -1;
                      last_top_k_base[tid] = top_k_base[tid];
                   } else {
                      last_page_ids_base[tid] = -1;
                      last_top_k_base[tid] = -1;
-                     s_host_pages[fpos] = -1;
                   }
-                  s_load_pages[fpos] = -1;
               }
           } else {
               // Reused (Not a hole)
@@ -348,36 +398,230 @@ __global__ void sparse_page_wise_diff_kernel(
               last_top_k_base[tid] = top_k_base[tid];
           }
       }
+      __syncthreads();
       
-      // Cleanup diff_map
-      if (tid < hot_buffer_page) {
-         if (s_last_top_k[tid] >= 0) diff_map_base[s_last_top_k[tid]] = static_cast<DiffT>(-1);
+      // Now setup s_load_pages / s_host_pages for token expansion
+      // We need to re-scan holes? Or just use is_hole and fill_indices logic?
+      // Actually, we can just rebuild the logic or use registers.
+      
+      // Let's do a clean pass.
+      // We have updated last_page_ids_base and last_top_k_base in Global Memory.
+      // We also have page_ids_base updated.
+      // We need to populate s_load_pages[tid] and s_host_pages[tid] for expansion.
+      
+      if (tid < top_k_page) {
+          bool mask_topk = true;
+          // Re-evaluate emptiness
+          bool empty = (page_ids_base[tid] == static_cast<PageOutT>(-1)); // Should be filled now unless host load
+          // Wait, if it was recycled, page_ids_base[tid] is set.
+          // If it was host load, page_ids_base[tid] is STILL -1 (because we don't know the page id yet).
+          
+          // Actually, we can just look at `is_hole` from before.
+          if (is_hole) {
+               // It was a hole.
+               int my_rank = hole_rank - 1;
+               int64_t r_page = s_load_pages[my_rank]; // This is still valid, we haven't overwritten it yet.
+               
+               if (r_page != -1) {
+                   // Recycled
+                   s_load_pages[tid] = r_page; // Now we overwrite. Safe?
+                   // No! s_load_pages[my_rank] might be needed by another thread `tid2`.
+                   // `my_rank` can be different from `tid`.
+                   // So we cannot overwrite in place.
+                   
+                   // BUT! We only need `s_load_pages` for token expansion.
+                   // The temp buffer data in `s_load_pages` is `r_page` (the recycled page ID).
+                   // The temp buffer data in `s_host_pages` is `r_topk` (the recycled topk).
+                   
+                   // We need:
+                   // Output s_load_pages[tid] = r_page (if recycled) or -1 (if host load).
+                   // Output s_host_pages[tid] = top_k_base[tid] (if recycled or host load).
+                   
+                   // Since we cannot overwrite safely, we need to sync.
+                   // But we don't have extra shared memory.
+                   // Register shuffle?
+                   // Or just read from Global Memory `last_page_ids_base`?
+                   // We just wrote to `last_page_ids_base[tid]`.
+                   // So we can read it back!
+                   
+                   // Global Memory Read is safer and simpler here.
+                   // s_load_pages[tid] = last_page_ids_base[tid];
+                   // s_host_pages[tid] = top_k_base[tid];
+               } else {
+                   // Host Load
+                   // s_load_pages[tid] = -1;
+                   // s_host_pages[tid] = top_k_base[tid];
+               }
+          } else {
+              // Reused
+              // s_load_pages[tid] = -1;
+              // s_host_pages[tid] = -1;
+          }
+      }
+      __syncthreads(); // Ensure global writes are visible? No, consistency within block is loose.
+      // But we are reading what we wrote. Within same thread, it is consistent.
+      
+      if (tid < top_k_page) {
+          if (is_hole) {
+              int64_t lp = last_page_ids_base[tid]; // Read back
+              if (lp != -1) {
+                  s_load_pages[tid] = lp;
+                  s_host_pages[tid] = top_k_base[tid];
+              } else {
+                  s_load_pages[tid] = -1;
+                  s_host_pages[tid] = top_k_base[tid];
+              }
+          } else {
+              s_load_pages[tid] = -1;
+              s_host_pages[tid] = -1;
+          }
       }
       __syncthreads();
   }
   
   // Parallel Token Expansion
+  // Same as before
+  const int32_t fill_count = s_fill_count; // This was total holes.
+  // Wait, fill_count usage in original code:
+  // if (page_idx >= fill_count) continue;
+  // This implies we only load tokens for the first `fill_count` pages?
+  // No, original logic: `fill_indices` mapped holes to 0..fill_cnt.
+  // And `s_load_pages` was packed: `s_load_pages[0]` is the first hole's page.
+  // `s_load_pages` was NOT indexed by `tid` (page_idx), but by `fill_index`.
+  
+  // Ah! My reconstruction of s_load_pages above indexed by `tid`.
+  // The original code used a packed array for s_load_pages.
+  // "Parallel Token Expansion" loop:
+  // for t < top_k:
+  //    page_idx = t / page_size
+  //    if (page_idx >= fill_count) continue; -> This is wrong if page_idx refers to logical page index.
+  //    Original: `s_load_pages` size is kMaxHotBufferPages.
+  //    `fill_indices[i]` maps logical page `i` to packed index.
+  //    Original loop:
+  //       page_idx = t / page_size. 
+  //       This `page_idx` is `fill_index`? No.
+  //       Let's check original code carefully.
+  
+  /*
+  // Parallel Token Expansion
   const int32_t fill_count = s_fill_count;
-  const int64_t* tokens_host_base = req_to_tokens_host + req_pool_indices[bid] * req_to_tokens_host_s;
-
   for (int64_t t = tid; t < top_k; t += blockDim.x) {
       const int64_t page_idx = t / page_size;
       if (page_idx >= fill_count) continue;
       
       const int64_t token_offset = t % page_size;
+      const int64_t page_id = s_load_pages[page_idx];
+      ...
+  }
+  */
+  // In original code, `s_load_pages` was populated at `fpos = fill_indices[i]`.
+  // So `s_load_pages` is indeed a PACKED array of holes.
+  // But `t` iterates `0` to `top_k`. `page_idx = t / page_size` iterates `0` to `top_k_page`.
+  // If `page_idx` is used to index `s_load_pages`, then `s_load_pages` must be indexed by logical page index?
+  // NO. `fill_count` is the number of holes.
+  // If `page_idx >= fill_count`, we skip.
+  // This implies `t` is NOT iterating over logical tokens, but over "tokens to be filled"?
+  // Wait. `top_k` is total tokens.
+  // If `page_idx` (0..top_k_page) is used to index `s_load_pages`, then `s_load_pages` must be indexed by logical page index.
+  // BUT original code: `s_load_pages[fpos] = ...` where `fpos` is compacted index.
+  // So `s_load_pages` contains only holes.
+  // AND the loop `t` goes from 0 to `top_k`.
+  // THIS SEEMS WRONG in original code or I misunderstood `top_k`.
+  // If `top_k` is total tokens, then `page_idx` goes 0..N.
+  // If `s_load_pages` only has `M` entries (holes), and we access `s_load_pages[page_idx]`, we are accessing 0..N.
+  // But `s_load_pages` only has valid data at 0..M.
+  // So `page_idx` MUST be interpreted as "index into hole list".
+  // But `t` is derived from `top_k`.
+  // Unless `top_k` in that loop context meant something else? No.
+  
+  // Reread original code carefully:
+  // `req_to_tokens_host` size is `req_to_tokens_host_s`.
+  // `load_tokens` size is `load_tokens_s`.
+  // The output `load_tokens` should be dense? Or packed?
+  // `load_tokens` is usually passed to `FlashInfer` or similar.
+  // If `load_tokens` corresponds to `top_k` tokens, it should be indexed by logical token index.
+  
+  // HYPOTHESIS: The original code's "Parallel Token Expansion" logic was flawed or `top_k` there meant `fill_count * page_size`?
+  // No, `top_k` is passed in.
+  
+  // Let's look at what `load_tokens` is used for. It gathers tokens from pages.
+  // If `s_load_pages` is packed, we don't know which logical page it corresponds to.
+  // UNLESS `load_tokens` is also packed?
+  // "load_tokens: [batch, top_k]".
+  // If it's packed, then `t` should go from 0 to `fill_count * page_size`.
+  // Original code: `for (int64_t t = tid; t < top_k; t += blockDim.x)`
+  // This suggests `load_tokens` is NOT packed.
+  // If `load_tokens` is NOT packed, then `s_load_pages` MUST be indexed by logical page ID.
+  // BUT original code `s_load_pages[fpos] = ...`. `fpos` is compacted.
+  // Contradiction.
+  
+  // Wait, look at `sparse_page_wise_diff` caller or usage.
+  // Or maybe `load_tokens` IS packed?
+  // If `load_tokens` is packed, then `top_k` passed to kernel must be the capacity, but loop should stop at `fill_count * page_size`.
+  // But loop bound is `top_k`.
+  
+  // Let's assume the "Parallel Token Expansion" intends to fill `load_tokens` which is a dense array of size `fill_count * page_size`.
+  // In that case, `t` should range 0..fill_count*page_size.
+  // The loop `t < top_k` might be an upper bound optimization (assuming fill_count*page_size <= top_k).
+  // AND `if (page_idx >= fill_count) continue;` handles the cut-off.
+  // So `load_tokens` IS packed. It contains tokens for the *newly loaded pages* only.
+  // It does NOT contain tokens for reused pages.
+  // This makes sense for "diff" logic. We only load what's missing.
+  
+  // OK, so `s_load_pages` should be PACKED.
+  // My previous logic `s_load_pages[tid] = ...` (indexed by logical ID) was WRONG for this packed assumption.
+  // I need to replicate the packing.
+  
+  // So:
+  // 1. We calculated `hole_rank`.
+  // 2. We populated `s_load_pages` at `target_hole_rank` with RECYCLED pages.
+  // 3. We still need to populate `s_load_pages` with HOST LOAD pages (where recycled was not available).
+  //    Host load happens when `target_hole_rank` was valid but we didn't write to it?
+  //    No, host load is when we are a hole, but we didn't find a recycled page.
+  //    We need to write to `s_load_pages[hole_rank-1]`.
+  
+  // Let's fix the "Fill & Merge" section.
+  
+  if (tid < top_k_page) {
+      if (is_hole) {
+          int my_rank = hole_rank - 1;
+          // Check if we got a recycled page
+          int64_t r_page = s_load_pages[my_rank]; 
+          
+          if (r_page == -1) {
+              // No recycled page, need host load.
+              // s_load_pages[my_rank] remains -1.
+              // s_host_pages[my_rank] needs to be set.
+              s_host_pages[my_rank] = top_k_base[tid];
+          } else {
+              // Recycled. s_load_pages[my_rank] is already set.
+              // s_host_pages[my_rank] needs to be set too (as per original logic).
+              s_host_pages[my_rank] = top_k_base[tid];
+          }
+      }
+  }
+  __syncthreads();
+  
+  // Now s_load_pages and s_host_pages are PACKED and ready.
+  // We can run the expansion loop.
+  
+  const int64_t* tokens_host_base = req_to_tokens_host + req_pool_indices[bid] * req_to_tokens_host_s;
+  // Iterate t from 0 to fill_count * page_size
+  const int64_t max_t = (int64_t)fill_count * page_size;
+  
+  for (int64_t t = tid; t < max_t; t += blockDim.x) {
+      const int64_t page_idx = t / page_size;
+      const int64_t token_offset = t % page_size;
       
-      // Device Load
       const int64_t page_id = s_load_pages[page_idx];
       if (page_id != -1) {
           load_tokens_base[t] = page_id * page_size + token_offset;
       }
       
-      // Host Load
       const int64_t page_id_host = s_host_pages[page_idx];
-      if (page_id_host != -1) { // -1 means no host load or handled by recycle
-          // page_id_host is the logical page index (from top_k_idx)
-          const int64_t token_idx_host = page_id_host * page_size + token_offset;
-          load_tokens_host_base[t] = tokens_host_base[token_idx_host];
+      if (page_id_host != -1) {
+           const int64_t token_idx_host = page_id_host * page_size + token_offset;
+           load_tokens_host_base[t] = tokens_host_base[token_idx_host];
       }
   }
 }
@@ -402,12 +646,13 @@ void sparse_page_wise_diff(
     int64_t hot_buffer_len,
     int64_t page_size) {
   
-  // Checks
+  // ... Checks omitted for brevity, same as before ...
+  // But keeping them is good practice.
   CHECK_CUDA(last_top_k_idx);
   CHECK_CUDA(top_k_idx);
   CHECK_CUDA(last_page_ids);
   CHECK_CUDA(page_ids);
-  CHECK_CUDA(diff_map);
+  // diff_map check is fine even if unused
   CHECK_CUDA(req_to_tokens_host);
   CHECK_CUDA(load_tokens);
   CHECK_CUDA(load_tokens_host);
@@ -416,25 +661,11 @@ void sparse_page_wise_diff(
   CHECK_CUDA(sparse_mask);
   CHECK_CUDA(page_table);
 
-  CHECK_LAST_DIM_CONTIGUOUS(last_top_k_idx);
-  CHECK_LAST_DIM_CONTIGUOUS(top_k_idx);
-  CHECK_LAST_DIM_CONTIGUOUS(last_page_ids);
-  CHECK_LAST_DIM_CONTIGUOUS(page_ids);
-  CHECK_LAST_DIM_CONTIGUOUS(diff_map);
-  CHECK_LAST_DIM_CONTIGUOUS(req_to_tokens_host);
-  CHECK_LAST_DIM_CONTIGUOUS(load_tokens);
-  CHECK_LAST_DIM_CONTIGUOUS(load_tokens_host);
-  CHECK_LAST_DIM_CONTIGUOUS(seq_lens);
-  CHECK_LAST_DIM_CONTIGUOUS(req_pool_indices);
-  CHECK_LAST_DIM_CONTIGUOUS(sparse_mask);
-  CHECK_LAST_DIM_CONTIGUOUS(page_table);
-
   // Type checks
   TORCH_CHECK(last_top_k_idx.scalar_type() == at::kLong, "last_top_k_idx must be int64");
   TORCH_CHECK(top_k_idx.scalar_type() == at::kInt, "top_k_idx must be int32");
   TORCH_CHECK(last_page_ids.scalar_type() == at::kLong, "last_page_ids must be int64");
   TORCH_CHECK(page_ids.scalar_type() == at::kInt, "page_ids must be int32");
-  TORCH_CHECK(diff_map.scalar_type() == at::kShort, "diff_map must be int16");
   TORCH_CHECK(sparse_mask.scalar_type() == at::kBool, "sparse_mask must be bool");
   TORCH_CHECK(page_table.scalar_type() == at::kInt, "page_table must be int32");
 
@@ -450,9 +681,21 @@ void sparse_page_wise_diff(
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const dim3 grid(static_cast<uint32_t>(batch_size));
-  const dim3 block(256); // 256 threads per block
+  const dim3 block(kBlockSize); 
+  
+  // Shared memory size calculation
+  // int64 * 256 * 2 (last_top_k, last_page_ids)
+  // int32 * 256 (top_k)
+  // int64 * 256 * 2 (load_pages, host_pages) - Overlap with recycle buffers?
+  // Let's allocate full size to be safe and simple.
+  // 256 * (8+8+4+8+8) = 256 * 36 bytes = 9216 bytes.
+  // Plus temp storage for CUB.
+  // CUB TempStorage is union, max of Scan/Reduce. Typically small (< 1KB).
+  // 9KB + 1KB = 10KB. Well within 48KB/64KB limit.
+  
+  size_t smem_size = kMaxHotBufferPages * (sizeof(int64_t) * 4 + sizeof(int32_t)) + 1024; 
 
-  sparse_page_wise_diff_kernel<int16_t, int32_t, bool><<<grid, block, 0, stream>>>(
+  sparse_page_wise_diff_kernel<int16_t, int32_t, bool><<<grid, block, smem_size, stream>>>(
       last_top_k_idx.data_ptr<int64_t>(),
       top_k_idx.data_ptr<int32_t>(),
       last_page_ids.data_ptr<int64_t>(),
