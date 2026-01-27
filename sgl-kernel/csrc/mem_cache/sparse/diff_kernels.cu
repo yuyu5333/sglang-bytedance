@@ -480,133 +480,18 @@ __global__ void sparse_page_wise_diff_kernel(
   }
   
   // Parallel Token Expansion
-  // Same as before
-  const int32_t fill_count = s_fill_count; // This was total holes.
-  // Wait, fill_count usage in original code:
-  // if (page_idx >= fill_count) continue;
-  // This implies we only load tokens for the first `fill_count` pages?
-  // No, original logic: `fill_indices` mapped holes to 0..fill_cnt.
-  // And `s_load_pages` was packed: `s_load_pages[0]` is the first hole's page.
-  // `s_load_pages` was NOT indexed by `tid` (page_idx), but by `fill_index`.
-  
-  // Ah! My reconstruction of s_load_pages above indexed by `tid`.
-  // The original code used a packed array for s_load_pages.
-  // "Parallel Token Expansion" loop:
-  // for t < top_k:
-  //    page_idx = t / page_size
-  //    if (page_idx >= fill_count) continue; -> This is wrong if page_idx refers to logical page index.
-  //    Original: `s_load_pages` size is kMaxHotBufferPages.
-  //    `fill_indices[i]` maps logical page `i` to packed index.
-  //    Original loop:
-  //       page_idx = t / page_size. 
-  //       This `page_idx` is `fill_index`? No.
-  //       Let's check original code carefully.
-  
-  /*
-  // Parallel Token Expansion
-  const int32_t fill_count = s_fill_count;
-  for (int64_t t = tid; t < top_k; t += blockDim.x) {
-      const int64_t page_idx = t / page_size;
-      if (page_idx >= fill_count) continue;
-      
-      const int64_t token_offset = t % page_size;
-      const int64_t page_id = s_load_pages[page_idx];
-      ...
-  }
-  */
-  // In original code, `s_load_pages` was populated at `fpos = fill_indices[i]`.
-  // So `s_load_pages` is indeed a PACKED array of holes.
-  // But `t` iterates `0` to `top_k`. `page_idx = t / page_size` iterates `0` to `top_k_page`.
-  // If `page_idx` is used to index `s_load_pages`, then `s_load_pages` must be indexed by logical page index?
-  // NO. `fill_count` is the number of holes.
-  // If `page_idx >= fill_count`, we skip.
-  // This implies `t` is NOT iterating over logical tokens, but over "tokens to be filled"?
-  // Wait. `top_k` is total tokens.
-  // If `page_idx` (0..top_k_page) is used to index `s_load_pages`, then `s_load_pages` must be indexed by logical page index.
-  // BUT original code: `s_load_pages[fpos] = ...` where `fpos` is compacted index.
-  // So `s_load_pages` contains only holes.
-  // AND the loop `t` goes from 0 to `top_k`.
-  // THIS SEEMS WRONG in original code or I misunderstood `top_k`.
-  // If `top_k` is total tokens, then `page_idx` goes 0..N.
-  // If `s_load_pages` only has `M` entries (holes), and we access `s_load_pages[page_idx]`, we are accessing 0..N.
-  // But `s_load_pages` only has valid data at 0..M.
-  // So `page_idx` MUST be interpreted as "index into hole list".
-  // But `t` is derived from `top_k`.
-  // Unless `top_k` in that loop context meant something else? No.
-  
-  // Reread original code carefully:
-  // `req_to_tokens_host` size is `req_to_tokens_host_s`.
-  // `load_tokens` size is `load_tokens_s`.
-  // The output `load_tokens` should be dense? Or packed?
-  // `load_tokens` is usually passed to `FlashInfer` or similar.
-  // If `load_tokens` corresponds to `top_k` tokens, it should be indexed by logical token index.
-  
-  // HYPOTHESIS: The original code's "Parallel Token Expansion" logic was flawed or `top_k` there meant `fill_count * page_size`?
-  // No, `top_k` is passed in.
-  
-  // Let's look at what `load_tokens` is used for. It gathers tokens from pages.
-  // If `s_load_pages` is packed, we don't know which logical page it corresponds to.
-  // UNLESS `load_tokens` is also packed?
-  // "load_tokens: [batch, top_k]".
-  // If it's packed, then `t` should go from 0 to `fill_count * page_size`.
-  // Original code: `for (int64_t t = tid; t < top_k; t += blockDim.x)`
-  // This suggests `load_tokens` is NOT packed.
-  // If `load_tokens` is NOT packed, then `s_load_pages` MUST be indexed by logical page ID.
-  // BUT original code `s_load_pages[fpos] = ...`. `fpos` is compacted.
-  // Contradiction.
-  
-  // Wait, look at `sparse_page_wise_diff` caller or usage.
-  // Or maybe `load_tokens` IS packed?
-  // If `load_tokens` is packed, then `top_k` passed to kernel must be the capacity, but loop should stop at `fill_count * page_size`.
-  // But loop bound is `top_k`.
-  
-  // Let's assume the "Parallel Token Expansion" intends to fill `load_tokens` which is a dense array of size `fill_count * page_size`.
-  // In that case, `t` should range 0..fill_count*page_size.
-  // The loop `t < top_k` might be an upper bound optimization (assuming fill_count*page_size <= top_k).
-  // AND `if (page_idx >= fill_count) continue;` handles the cut-off.
-  // So `load_tokens` IS packed. It contains tokens for the *newly loaded pages* only.
-  // It does NOT contain tokens for reused pages.
-  // This makes sense for "diff" logic. We only load what's missing.
-  
-  // OK, so `s_load_pages` should be PACKED.
-  // My previous logic `s_load_pages[tid] = ...` (indexed by logical ID) was WRONG for this packed assumption.
-  // I need to replicate the packing.
-  
-  // So:
-  // 1. We calculated `hole_rank`.
-  // 2. We populated `s_load_pages` at `target_hole_rank` with RECYCLED pages.
-  // 3. We still need to populate `s_load_pages` with HOST LOAD pages (where recycled was not available).
-  //    Host load happens when `target_hole_rank` was valid but we didn't write to it?
-  //    No, host load is when we are a hole, but we didn't find a recycled page.
-  //    We need to write to `s_load_pages[hole_rank-1]`.
-  
-  // Let's fix the "Fill & Merge" section.
-  
-  if (tid < top_k_page) {
-      if (is_hole) {
-          int my_rank = hole_rank - 1;
-          // Check if we got a recycled page
-          int64_t r_page = s_load_pages[my_rank]; 
-          
-          if (r_page == -1) {
-              // No recycled page, need host load.
-              // s_load_pages[my_rank] remains -1.
-              // s_host_pages[my_rank] needs to be set.
-              s_host_pages[my_rank] = top_k_base[tid];
-          } else {
-              // Recycled. s_load_pages[my_rank] is already set.
-              // s_host_pages[my_rank] needs to be set too (as per original logic).
-              s_host_pages[my_rank] = top_k_base[tid];
-          }
-      }
-  }
-  __syncthreads();
-  
-  // Now s_load_pages and s_host_pages are PACKED and ready.
-  // We can run the expansion loop.
-  
   const int64_t* tokens_host_base = req_to_tokens_host + req_pool_indices[bid] * req_to_tokens_host_s;
-  // Iterate t from 0 to fill_count * page_size
+  
+  // Reuse s_fill_count. If we are in Fast Path, s_fill_count is 0, so loop won't run.
+  // Wait, in Fast Path, we might need to load tokens if sparse_mask is false but we have top_k?
+  // Original logic: if sparse_mask==0, we don't do token expansion?
+  // Let's check original code.
+  // Original: if (sparse_mask_val == 0) ... else { ... s_fill_count = ... }
+  // __syncthreads();
+  // ... if (page_idx >= fill_count) continue;
+  // So yes, if Fast Path, fill_count is 0 (initialized at start), so no expansion.
+  
+  const int32_t fill_count = s_fill_count;
   const int64_t max_t = (int64_t)fill_count * page_size;
   
   for (int64_t t = tid; t < max_t; t += blockDim.x) {
