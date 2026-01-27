@@ -430,14 +430,11 @@ class SparseCoordinator:
             selected_indices=selected_indices,
             valid_lengths=valid_lengths,
             sparse_mask=sparse_mask,
-            sparse_mask_i32=getattr(forward_batch, "_sparse_mask_i32", None),
             current_metadata=attn_metadata,
             forward_batch=forward_batch,
             req_to_token=self.req_to_token_pool.req_to_token,
             page_size=self.page_size,
             layer_id=layer.layer_id,
-            req_pool_indices_i32=getattr(forward_batch, "_req_pool_indices_i32", None),
-            seq_lens_i32=getattr(forward_batch, "_seq_lens_i32", None),
         )
 
     def _compute_sparse_mask(self, req_pool_indices):
