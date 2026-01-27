@@ -11,13 +11,12 @@ import logging
 
 import torch
 import triton
+from sgl_kernel import quest_retrieval_score_and_combine_indices
 
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
     BaseSparseAlgorithmImpl,
 )
 from sglang.srt.mem_cache.sparsity.algorithms.quest_kernels import quest_page_rep_kernel
-
-from sgl_kernel import quest_retrieval_score_and_combine_indices
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +203,6 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             self.states.repr_constructed[success_indices] = True
             self.states.last_constructed_page[success_indices] = num_pages[valid_mask]
 
-
     def update_representations(
         self,
         layer_id,
@@ -249,12 +247,14 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         **kwargs,
     ) -> tuple:
         bs, device = queries.shape[0], queries.device
-        
+
         seq_lens_source = kwargs.get("forward_batch", None)
         if seq_lens_source is None or not hasattr(seq_lens_source, "seq_lens"):
-            raise ValueError("forward_batch with seq_lens is required for TopK retrieval")
+            raise ValueError(
+                "forward_batch with seq_lens is required for TopK retrieval"
+            )
         seq_lens = seq_lens_source.seq_lens
-        
+
         # Calculate max_out roughly
         seq_lens_cpu = getattr(seq_lens_source, "seq_lens_cpu", None)
         if seq_lens_cpu is not None:
@@ -262,20 +262,20 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
         else:
             max_seq_len = int(torch.max(seq_lens).item())
         max_pages = (max_seq_len + self.page_size - 1) // self.page_size
-        
+
         k_val = 0
         if self.fixed_topk_page_cnt is not None:
             k_val = self.fixed_topk_page_cnt
         else:
             k_val = int(max_pages * self.sparsity_ratio) + self.num_recent_pages
-        
+
         # Clamp k_val
         if k_val > max_pages:
             k_val = max_pages
-            
+
         # Add buffer for safety and recent pages overlap
         max_out = k_val + self.num_recent_pages + 32
-        
+
         out_indices = torch.empty((bs, max_out), dtype=torch.int32, device=device)
         out_lengths = torch.empty((bs,), dtype=torch.int32, device=device)
 
@@ -322,5 +322,5 @@ class QuestAlgorithm(BaseSparseAlgorithmImpl):
             out_indices,
             out_lengths,
         )
-        
+
         return out_indices, out_lengths

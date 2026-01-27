@@ -3,15 +3,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-import triton
-from sglang.srt.utils.common import is_cuda, is_hip
-from sglang.srt.mem_cache.sparsity.kernel.flashattn_metadata_kernels import (
-    update_page_table_triton,
-    compute_sparse_seqlens_triton,
-)
-
 from sgl_kernel import update_sparse_metadata
-from sglang.srt.mem_cache.sparsity.kernel.diff_kernel import invoke_sparse_diff_kernel
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -153,7 +145,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
             current_metadata.cache_seqlens_int32,
             forward_batch.seq_lens.to(torch.int32).contiguous(),
             self._original_metadata["cache_seqlens_int32"],
-            page_size
+            page_size,
         )
 
         current_metadata.cu_seqlens_k = torch.nn.functional.pad(
@@ -164,8 +156,11 @@ class FlashAttentionAdaptor(BackendAdaptor):
         )
         if getattr(forward_batch, "_sparse_all", False):
             current_metadata.max_seq_len_k = min(
-                int(self._original_metadata["max_seq_len_k"]), int(self.sparse_kv_cache_manager.req_states.topk_tokens_cnt)
+                int(self._original_metadata["max_seq_len_k"]),
+                int(self.sparse_kv_cache_manager.req_states.topk_tokens_cnt),
             )
         else:
-            current_metadata.max_seq_len_k = int(self._original_metadata["max_seq_len_k"])
+            current_metadata.max_seq_len_k = int(
+                self._original_metadata["max_seq_len_k"]
+            )
         return current_metadata

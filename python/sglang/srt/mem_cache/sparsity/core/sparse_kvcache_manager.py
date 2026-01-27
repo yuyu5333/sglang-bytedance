@@ -142,9 +142,10 @@ class SparseKVCacheManager:
 
         swap_target_device_slots = swap_target_device_slots.reshape(-1)
         swap_source_host_slots = swap_source_host_slots.reshape(-1)
-        
+
         valid_pos = torch.nonzero(
-            swap_target_device_slots.ne(-1) & swap_source_host_slots.ne(-1), as_tuple=False
+            swap_target_device_slots.ne(-1) & swap_source_host_slots.ne(-1),
+            as_tuple=False,
         ).squeeze(1)
 
         assert (

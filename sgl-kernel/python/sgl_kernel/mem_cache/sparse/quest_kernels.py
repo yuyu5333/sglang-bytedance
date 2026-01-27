@@ -1,5 +1,7 @@
+from typing import Optional
+
 import torch
-from typing import Optional, Tuple
+
 
 def quest_retrieval_score_and_combine_indices(
     bs: int,
@@ -19,7 +21,7 @@ def quest_retrieval_score_and_combine_indices(
 ) -> None:
     """
     Call the optimized CUDA kernel for Quest retrieval score calculation and index combination.
-    
+
     Args:
         bs: Batch size
         seq_lens: Sequence lengths [bs]
@@ -36,7 +38,7 @@ def quest_retrieval_score_and_combine_indices(
         out_indices: Output indices tensor [bs, max_out] (int32)
         out_lengths: Output lengths tensor [bs] (int32)
     """
-    
+
     return torch.ops.sgl_kernel.quest_retrieval_score_and_combine_indices.default(
         bs,
         seq_lens,
@@ -51,8 +53,9 @@ def quest_retrieval_score_and_combine_indices(
         sparsity_ratio,
         sparse_mask,
         out_indices,
-        out_lengths
+        out_lengths,
     )
+
 
 def update_sparse_metadata(
     page_table: torch.Tensor,
@@ -66,7 +69,7 @@ def update_sparse_metadata(
 ) -> None:
     """
     Call the optimized CUDA kernel for Quest sparse metadata update.
-    
+
     Args:
         page_table: Page table [bs, max_selected, max_tokens]
         physical_pages: Physical pages [bs, max_selected, max_tokens]
@@ -77,7 +80,7 @@ def update_sparse_metadata(
         original_cache_seqlens: Original cache sequence lengths [bs]
         page_size: Page size
     """
-    
+
     return torch.ops.sgl_kernel.update_sparse_metadata.default(
         page_table,
         physical_pages,
@@ -86,5 +89,5 @@ def update_sparse_metadata(
         cache_seqlens,
         seq_lens,
         original_cache_seqlens,
-        page_size
+        page_size,
     )
