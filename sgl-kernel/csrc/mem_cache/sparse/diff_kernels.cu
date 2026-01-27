@@ -21,6 +21,78 @@ __device__ __forceinline__ int64_t to_i64<bool>(bool v) {
   return v ? 1 : 0;
 }
 
+// Parallel Primitive: Block Reduce Max
+template <typename T>
+__device__ T block_reduce_max(T val) {
+    // Warp reduce
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = max(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+    }
+    
+    static __shared__ T shared[32]; // Max 32 warps (1024 threads)
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+    
+    if (lane == 0) shared[wid] = val;
+    
+    __syncthreads();
+    
+    // First warp reduces shared
+    // Initialize val for the first warp to a safe minimum if it exceeds active warps
+    // We assume T is signed for this minimum or use specific logic
+    T w_val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : (T)-9223372036854775807LL; 
+    
+    if (wid == 0) {
+         for (int offset = blockDim.x / 32 / 2; offset > 0; offset /= 2) {
+            w_val = max(w_val, __shfl_down_sync(0xFFFFFFFF, w_val, offset));
+         }
+         if (lane == 0) shared[0] = w_val;
+    }
+    
+    __syncthreads();
+    return shared[0];
+}
+
+// Parallel Primitive: Block Scan Inclusive (Prefix Sum)
+// Returns the inclusive sum for the calling thread.
+// Optionally writes the total sum to *total_sum (only valid for last thread).
+__device__ int block_scan_inclusive(int val, int* total_sum) {
+    // Warp scan
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+    
+    for (int offset = 1; offset < 32; offset <<= 1) {
+        int temp = __shfl_up_sync(0xFFFFFFFF, val, offset);
+        if (lane >= offset) val += temp;
+    }
+    
+    static __shared__ int shared[32];
+    if (lane == 31) shared[wid] = val;
+    
+    __syncthreads();
+    
+    // Scan shared (prefix sums of warps)
+    if (wid == 0) {
+        int w_val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : 0;
+        for (int offset = 1; offset < 32; offset <<= 1) { 
+             int temp = __shfl_up_sync(0xFFFFFFFF, w_val, offset);
+             if (lane >= offset) w_val += temp;
+        }
+        if (threadIdx.x < blockDim.x / 32) shared[lane] = w_val;
+    }
+    
+    __syncthreads();
+    
+    // Add base
+    if (wid > 0) {
+        val += shared[wid - 1];
+    }
+    
+    if (total_sum && threadIdx.x == blockDim.x - 1) *total_sum = val;
+    
+    return val;
+}
+
 template <typename DiffT, typename PageOutT, typename SparseMaskT>
 __global__ void sparse_page_wise_diff_kernel(
     int64_t* __restrict__ last_top_k_idx,
@@ -65,7 +137,17 @@ __global__ void sparse_page_wise_diff_kernel(
   __shared__ int64_t s_load_pages[kMaxHotBufferPages];
   __shared__ int64_t s_host_pages[kMaxHotBufferPages];
   __shared__ int32_t s_fill_count;
-  
+  __shared__ int32_t s_fill_cnt_topk;
+  __shared__ int32_t s_valid_cnt;
+
+  // Local buffers in shared memory
+  __shared__ int64_t s_last_top_k[kMaxHotBufferPages];
+  __shared__ int32_t s_top_k[kMaxHotBufferPages];
+  __shared__ int64_t s_last_page_ids[kMaxHotBufferPages];
+  __shared__ int64_t recycled_pages[kMaxHotBufferPages];
+  __shared__ int64_t recycled_top_k[kMaxHotBufferPages];
+  __shared__ int32_t fill_indices[kMaxHotBufferPages];
+
   // Initialize outputs (Parallel)
   for (int64_t i = tid; i < top_k; i += blockDim.x) {
     load_tokens_base[i] = -1;
@@ -78,200 +160,201 @@ __global__ void sparse_page_wise_diff_kernel(
   if (tid == 0) {
       s_fill_count = 0;
   }
+
+  // Pre-load common data
+  const int64_t req_idx = req_pool_indices[bid];
+  const int64_t seq_len = seq_lens[bid] - 1;
+  const int32_t sparse_mask_val = to_i64<SparseMaskT>(sparse_mask[bid]);
   
-  __syncthreads();
+  const int32_t* top_k_base = top_k_idx + bid * top_k_s;
+  int64_t* last_top_k_base = last_top_k_idx + req_idx * last_top_k_s0 + layer_id * last_top_k_s1;
+  int64_t* last_page_ids_base = last_page_ids + req_idx * last_page_ids_s0 + layer_id * last_page_ids_s1;
+  DiffT* diff_map_base = diff_map + bid * diff_map_s;
 
-  // Single-threaded core logic (tid == 0) for correctness
-  if (tid == 0) {
-      const int64_t req_idx = req_pool_indices[bid];
-      const int64_t seq_len = seq_lens[bid] - 1;
-      const int32_t sparse_mask_val = to_i64<SparseMaskT>(sparse_mask[bid]);
-      
-      const int32_t* top_k_base = top_k_idx + bid * top_k_s;
-      int64_t* last_top_k_base = last_top_k_idx + req_idx * last_top_k_s0 + layer_id * last_top_k_s1;
-      int64_t* last_page_ids_base = last_page_ids + req_idx * last_page_ids_s0 + layer_id * last_page_ids_s1;
-      DiffT* diff_map_base = diff_map + bid * diff_map_s;
-
-      // Local buffers
-      int64_t s_last_top_k[kMaxHotBufferPages];
-      int32_t s_top_k[kMaxHotBufferPages];
-      int64_t s_last_page_ids[kMaxHotBufferPages];
-      
-      // Load Data
-      for (int i = 0; i < hot_buffer_page; ++i) {
-          s_last_top_k[i] = last_top_k_base[i];
-          s_last_page_ids[i] = last_page_ids_base[i];
-      }
-      for (int i = 0; i < top_k_page; ++i) {
-          s_top_k[i] = top_k_base[i];
-      }
-
-      if ((sparse_mask_val == 0) || (seq_len <= 0)) {
-          // Fast path: just load pages for top_k
-          for (int i = 0; i < top_k_page; ++i) {
-              int32_t val = s_top_k[i];
-              if (val >= 0) {
-                  int64_t loaded_page_start = static_cast<int64_t>(page_table[page_table_s * req_idx + val]);
-                  page_ids_base[i] = static_cast<PageOutT>(loaded_page_start / page_size);
-              }
-          }
-      } else {
-          // Full Diff Logic
-          
-          // 1. Update last_top_k with max values
-          int64_t last_max = -9223372036854775807LL - 1;
-          for(int i=0; i<hot_buffer_page; ++i) {
-              if (s_last_top_k[i] > last_max) last_max = s_last_top_k[i];
-          }
-          int64_t curr_max = -9223372036854775807LL - 1;
-          for(int i=0; i<top_k_page; ++i) {
-              if ((int64_t)s_top_k[i] > curr_max) curr_max = (int64_t)s_top_k[i];
-          }
-          
-          for(int i=0; i<hot_buffer_page; ++i) {
-              if (curr_max != last_max) {
-                  if (s_last_top_k[i] < last_max) {
-                      // Keep it
-                  } else {
-                      // Update to new max
-                      s_last_top_k[i] = curr_max;
-                  }
-              }
-          }
-          
-          // 2. Build Diff Map
-          // Clear diff map for NEW top_k values first
-          for(int i=0; i<top_k_page; ++i) {
-              int32_t val = s_top_k[i];
-              if (val >= 0) diff_map_base[val] = static_cast<DiffT>(-1);
-          }
-          // Populate diff map with OLD top_k values
-          for(int i=0; i<hot_buffer_page; ++i) {
-              int64_t val = s_last_top_k[i];
-              if (val >= 0) diff_map_base[val] = static_cast<DiffT>(i);
-          }
-          
-          // 3. Intersection & Reuse
-          for(int i=0; i<top_k_page; ++i) {
-              int32_t val = s_top_k[i];
-              if (val >= 0) {
-                  int32_t exist_idx = static_cast<int32_t>(diff_map_base[val]);
-                  if (exist_idx >= 0) {
-                      int64_t exist_page = s_last_page_ids[exist_idx];
-                      if (exist_page >= 0) {
-                          page_ids_base[i] = static_cast<PageOutT>(exist_page);
-                          s_last_page_ids[exist_idx] = -1; // Mark as reused
-                          s_top_k[i] = -1; // Mark as satisfied
-                          
-                          // Clear diff map entry
-                          diff_map_base[val] = static_cast<DiffT>(-1); 
-                      }
-                  }
-              }
-          }
-          
-          // 4. Compaction Logic
-          // Calculate fill indices (where page_ids is empty)
-          int32_t fill_indices[kMaxHotBufferPages]; 
-          int fill_cnt_total = 0;
-          int fill_cnt_topk = 0;
-          for(int i=0; i<hot_buffer_page; ++i) {
-              bool mask_topk = (i < top_k_page);
-              int64_t p = mask_topk ? static_cast<int64_t>(page_ids_base[i]) : -1;
-              if (p == -1) {
-                  fill_indices[i] = fill_cnt_total; 
-                  fill_cnt_total++;
-                  if (mask_topk) fill_cnt_topk++;
-              } else {
-                  fill_indices[i] = -1;
-              }
-          }
-          s_fill_count = fill_cnt_topk;
-          
-          // Collect valid recycled pages
-          int32_t valid_indices[kMaxHotBufferPages];
-          int valid_cnt = 0;
-          for(int i=0; i<hot_buffer_page; ++i) {
-              if (s_last_page_ids[i] != -1) {
-                  valid_indices[valid_cnt++] = i;
-              }
-          }
-          
-          int32_t move_cnt = valid_cnt - fill_cnt_topk;
-          
-          // Temp buffers for recycled data
-          int64_t recycled_pages[kMaxHotBufferPages];
-          int64_t recycled_top_k[kMaxHotBufferPages];
-          for(int i=0; i<hot_buffer_page; ++i) { 
-              recycled_pages[i] = -1; 
-              recycled_top_k[i] = -1; 
-          }
-          
-          for(int k=0; k<valid_cnt; ++k) {
-              int idx_in_last = valid_indices[k];
-              int page_pos = k;
-              bool fill_slots = (page_pos >= move_cnt);
-              int dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + fill_cnt_topk);
-              if (dest_idx < kMaxHotBufferPages) {
-                  recycled_pages[dest_idx] = s_last_page_ids[idx_in_last];
-                  recycled_top_k[dest_idx] = s_last_top_k[idx_in_last];
-              }
-          }
-          
-          // Fill & Merge Logic
-          for(int i=0; i<hot_buffer_page; ++i) {
-              bool mask_topk = (i < top_k_page);
-              bool empty = mask_topk ? (page_ids_base[i] == static_cast<PageOutT>(-1)) : true;
-              
-              if (empty) {
-                  int fpos = fill_indices[i]; // valid for empty slots
-                  
-                  int64_t r_page = recycled_pages[fpos];
-                  int64_t r_topk = recycled_top_k[fpos];
-                  
-                  if (r_page != -1) {
-                      // Recycled
-                      if (mask_topk) page_ids_base[i] = static_cast<PageOutT>(r_page);
-                      last_page_ids_base[i] = r_page;
-                      last_top_k_base[i] = r_topk;
-                      
-                      // Only generate load token if not padding
-                      if (mask_topk && top_k_base[i] >= 0) {
-                          s_load_pages[fpos] = r_page;
-                          s_host_pages[fpos] = top_k_base[i];
-                      } else {
-                          s_load_pages[fpos] = -1;
-                          s_host_pages[fpos] = -1;
-                      }
-                  } else {
-                      // Host Load but no Recycled Page (Should not happen if cache is sufficient)
-                      if (mask_topk) {
-                         // Load corresponding top_k_base[i]
-                         s_host_pages[fpos] = top_k_base[i];
-                         last_page_ids_base[i] = -1;
-                         last_top_k_base[i] = top_k_base[i];
-                      } else {
-                         last_page_ids_base[i] = -1;
-                         last_top_k_base[i] = -1;
-                         s_host_pages[fpos] = -1;
-                      }
-                      s_load_pages[fpos] = -1;
-                  }
-              } else {
-                  // Reused
-                  last_page_ids_base[i] = static_cast<int64_t>(page_ids_base[i]);
-                  last_top_k_base[i] = top_k_base[i];
-              }
-          }
-          
-          // Cleanup diff_map
-          for(int i=0; i<hot_buffer_page; ++i) {
-             if (s_last_top_k[i] >= 0) diff_map_base[s_last_top_k[i]] = static_cast<DiffT>(-1);
-          }
-      }
+  // Load Data to Shared Memory
+  if (tid < hot_buffer_page) {
+      s_last_top_k[tid] = last_top_k_base[tid];
+      s_last_page_ids[tid] = last_page_ids_base[tid];
+  }
+  if (tid < top_k_page) {
+      s_top_k[tid] = top_k_base[tid];
   }
   
   __syncthreads();
+
+  if ((sparse_mask_val == 0) || (seq_len <= 0)) {
+      // Fast path: just load pages for top_k
+      if (tid < top_k_page) {
+          int32_t val = s_top_k[tid];
+          if (val >= 0) {
+              int64_t loaded_page_start = static_cast<int64_t>(page_table[page_table_s * req_idx + val]);
+              page_ids_base[tid] = static_cast<PageOutT>(loaded_page_start / page_size);
+          }
+      }
+      // Note: In fast path, we don't need to populate s_fill_count for token expansion 
+      // because token expansion loop checks `page_idx >= fill_count`.
+      // If we don't set s_fill_count, it remains 0 (set by tid=0 above).
+      // But we need to ensure s_load_pages/s_host_pages are handled?
+      // The original code only uses s_fill_count for "Parallel Token Expansion".
+      // In fast path, `sparse_mask` is false, so maybe token expansion is not needed?
+      // Wait, original code:
+      // if ((sparse_mask_val == 0) || (seq_len <= 0)) { ... } else { ... s_fill_count = ... }
+      // __syncthreads();
+      // Parallel Token Expansion ... if (page_idx >= fill_count) continue;
+      // So if fill_count is 0, token expansion does nothing.
+      // Correct.
+  } else {
+      // Full Diff Logic
+      
+      // 1. Update last_top_k with max values
+      int64_t my_last = (tid < hot_buffer_page) ? s_last_top_k[tid] : -9223372036854775807LL;
+      int64_t last_max = block_reduce_max(my_last);
+      
+      int64_t my_curr = (tid < top_k_page) ? (int64_t)s_top_k[tid] : -9223372036854775807LL;
+      int64_t curr_max = block_reduce_max(my_curr);
+      
+      if (curr_max != last_max) {
+          if (tid < hot_buffer_page && s_last_top_k[tid] >= last_max) {
+               s_last_top_k[tid] = curr_max;
+          }
+      }
+      __syncthreads();
+      
+      // 2. Build Diff Map
+      // Clear diff map for NEW top_k values first
+      if (tid < top_k_page) {
+          int32_t val = s_top_k[tid];
+          if (val >= 0) diff_map_base[val] = static_cast<DiffT>(-1);
+      }
+      __syncthreads();
+      
+      // Populate diff map with OLD top_k values
+      if (tid < hot_buffer_page) {
+          int64_t val = s_last_top_k[tid];
+          if (val >= 0) diff_map_base[val] = static_cast<DiffT>(tid);
+      }
+      __syncthreads();
+      
+      // 3. Intersection & Reuse
+      if (tid < top_k_page) {
+          int32_t val = s_top_k[tid];
+          if (val >= 0) {
+              int32_t exist_idx = static_cast<int32_t>(diff_map_base[val]);
+              if (exist_idx >= 0) {
+                  // Atomic exchange to claim
+                  unsigned long long* ptr = (unsigned long long*)&s_last_page_ids[exist_idx];
+                  unsigned long long old_page = atomicExch(ptr, (unsigned long long)-1);
+                  
+                  if ((int64_t)old_page != -1) {
+                      page_ids_base[tid] = static_cast<PageOutT>(old_page);
+                      s_top_k[tid] = -1; // Mark as satisfied
+                      // Clear diff map entry
+                      diff_map_base[val] = static_cast<DiffT>(-1); 
+                  }
+              }
+          }
+      }
+      __syncthreads();
+      
+      // 4. Compaction Logic
+      // Initialize buffers
+      if (tid < kMaxHotBufferPages) {
+          recycled_pages[tid] = -1;
+          recycled_top_k[tid] = -1;
+      }
+      
+      // Identify holes
+      bool is_hole = false;
+      if (tid < top_k_page) {
+          if (page_ids_base[tid] == static_cast<PageOutT>(-1)) is_hole = true;
+      } else if (tid < hot_buffer_page) {
+          is_hole = true;
+      }
+      
+      // Prefix sum of holes
+      int hole_rank = block_scan_inclusive((int)is_hole, &s_fill_count);
+      
+      if (is_hole) {
+          fill_indices[tid] = hole_rank - 1;
+      } else {
+          fill_indices[tid] = -1;
+      }
+      
+      // Compute s_fill_cnt_topk
+      if (tid == top_k_page - 1) {
+          s_fill_cnt_topk = hole_rank;
+      } else if (top_k_page == 0 && tid == 0) {
+          s_fill_cnt_topk = 0;
+      }
+      __syncthreads();
+      
+      // Collect valid recycled pages
+      bool is_valid = (tid < hot_buffer_page && s_last_page_ids[tid] != -1);
+      int valid_rank = block_scan_inclusive((int)is_valid, &s_valid_cnt);
+      
+      // Recycled Data Move
+      if (is_valid) {
+          int page_pos = valid_rank - 1;
+          int move_cnt = s_valid_cnt - s_fill_cnt_topk;
+          bool fill_slots = (page_pos >= move_cnt);
+          int dest_idx = fill_slots ? (page_pos - move_cnt) : (page_pos + s_fill_cnt_topk);
+          
+          if (dest_idx < kMaxHotBufferPages) {
+               recycled_pages[dest_idx] = s_last_page_ids[tid];
+               recycled_top_k[dest_idx] = s_last_top_k[tid];
+          }
+      }
+      __syncthreads();
+      
+      // Fill & Merge Logic
+      if (tid < hot_buffer_page) {
+          bool mask_topk = (tid < top_k_page);
+          
+          if (is_hole) {
+              int fpos = fill_indices[tid];
+              
+              int64_t r_page = recycled_pages[fpos];
+              int64_t r_topk = recycled_top_k[fpos];
+              
+              if (r_page != -1) {
+                  // Recycled
+                  if (mask_topk) page_ids_base[tid] = static_cast<PageOutT>(r_page);
+                  last_page_ids_base[tid] = r_page;
+                  last_top_k_base[tid] = r_topk;
+                  
+                  if (mask_topk && top_k_base[tid] >= 0) {
+                      s_load_pages[fpos] = r_page;
+                      s_host_pages[fpos] = top_k_base[tid];
+                  } else {
+                      s_load_pages[fpos] = -1;
+                      s_host_pages[fpos] = -1;
+                  }
+              } else {
+                  // Host Load
+                  if (mask_topk) {
+                     s_host_pages[fpos] = top_k_base[tid];
+                     last_page_ids_base[tid] = -1;
+                     last_top_k_base[tid] = top_k_base[tid];
+                  } else {
+                     last_page_ids_base[tid] = -1;
+                     last_top_k_base[tid] = -1;
+                     s_host_pages[fpos] = -1;
+                  }
+                  s_load_pages[fpos] = -1;
+              }
+          } else {
+              // Reused (Not a hole)
+              last_page_ids_base[tid] = static_cast<int64_t>(page_ids_base[tid]);
+              last_top_k_base[tid] = top_k_base[tid];
+          }
+      }
+      
+      // Cleanup diff_map
+      if (tid < hot_buffer_page) {
+         if (s_last_top_k[tid] >= 0) diff_map_base[s_last_top_k[tid]] = static_cast<DiffT>(-1);
+      }
+      __syncthreads();
+  }
   
   // Parallel Token Expansion
   const int32_t fill_count = s_fill_count;
