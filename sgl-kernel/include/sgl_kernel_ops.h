@@ -62,7 +62,7 @@ void quest_retrieval_score_and_combine_indices(
     torch::Tensor out_indices,
     torch::Tensor out_lengths);
 
-void quest_update_sparse_metadata(
+void update_sparse_metadata(
     torch::Tensor page_table,
     torch::Tensor physical_pages,
     torch::Tensor valid_lengths,

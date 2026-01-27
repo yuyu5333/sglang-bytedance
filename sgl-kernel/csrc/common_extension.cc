@@ -632,9 +632,9 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("quest_retrieval_score_and_combine_indices", torch::kCUDA, &quest_retrieval_score_and_combine_indices);
 
   m.def(
-      "quest_update_sparse_metadata(Tensor! page_table, Tensor physical_pages, Tensor valid_lengths, Tensor sparse_mask, "
+      "update_sparse_metadata(Tensor! page_table, Tensor physical_pages, Tensor valid_lengths, Tensor sparse_mask, "
       "Tensor! cache_seqlens, Tensor seq_lens, Tensor original_cache_seqlens, int page_size) -> ()");
-  m.impl("quest_update_sparse_metadata", torch::kCUDA, &quest_update_sparse_metadata);
+  m.impl("update_sparse_metadata", torch::kCUDA, &update_sparse_metadata);
 }
 
 REGISTER_EXTENSION(common_ops)

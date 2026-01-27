@@ -10,7 +10,7 @@ from sglang.srt.mem_cache.sparsity.kernel.flashattn_metadata_kernels import (
     compute_sparse_seqlens_triton,
 )
 
-from sgl_kernel import quest_update_sparse_metadata
+from sgl_kernel import update_sparse_metadata
 from sglang.srt.mem_cache.sparsity.kernel.diff_kernel import invoke_sparse_diff_kernel
 
 if TYPE_CHECKING:
@@ -182,7 +182,7 @@ class FlashAttentionAdaptor(BackendAdaptor):
             :batch_size, : self.sparse_kv_cache_manager.req_states.topk_tokens_cnt // page_size
         ]
 
-        quest_update_sparse_metadata(
+        update_sparse_metadata(
             current_metadata.page_table,
             physical_pages,
             valid_lengths.to(torch.int32).contiguous(),

@@ -54,7 +54,7 @@ def quest_retrieval_score_and_combine_indices(
         out_lengths
     )
 
-def quest_update_sparse_metadata(
+def update_sparse_metadata(
     page_table: torch.Tensor,
     physical_pages: torch.Tensor,
     valid_lengths: torch.Tensor,
@@ -78,7 +78,7 @@ def quest_update_sparse_metadata(
         page_size: Page size
     """
     
-    return torch.ops.sgl_kernel.quest_update_sparse_metadata.default(
+    return torch.ops.sgl_kernel.update_sparse_metadata.default(
         page_table,
         physical_pages,
         valid_lengths,

@@ -430,7 +430,7 @@ __global__ void quest_compute_sparse_seqlens_kernel(
     }
 }
 
-void quest_update_sparse_metadata(
+void update_sparse_metadata(
     torch::Tensor page_table,
     torch::Tensor physical_pages,
     torch::Tensor valid_lengths,
