@@ -124,7 +124,12 @@ class ModelRunnerKVCacheMixin:
                 self.num_effective_layers,
             )
         elif mambaish := self.mambaish_config:
-            num_layers = len(mambaish.full_attention_layer_ids)
+            effective_layer_ids = [
+                i
+                for i in mambaish.full_attention_layer_ids
+                if self.start_layer <= i < self.end_layer
+            ]
+            num_layers = len(effective_layer_ids)
         else:
             num_layers = self.num_effective_layers
 
@@ -324,7 +329,6 @@ class ModelRunnerKVCacheMixin:
                 f"Not enough memory. Please try to increase --mem-fraction-static. "
                 f"Current value: {self.server_args.mem_fraction_static=}"
             )
-
         is_nsa_model = is_deepseek_nsa(self.model_config.hf_config)
         # Initialize req_to_token_pool
         if self.req_to_token_pool is None:
@@ -647,14 +651,37 @@ class ModelRunnerKVCacheMixin:
                             )
                         )
                     else:
-                        self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
-                            self.max_total_num_tokens,
-                            page_size=self.page_size,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device,
-                            kvcache=self.token_to_kv_pool,
-                            need_sort=need_sort,
-                        )
+                        if (
+                            self.server_args.enable_nsa_decode_hybrid_pool
+                            and is_nsa_model
+                        ):
+                            from sglang.srt.mem_cache.allocator import (
+                                NSAHybridTokenToKVPoolAllocator,
+                            )
+
+                            self.token_to_kv_pool_allocator = (
+                                NSAHybridTokenToKVPoolAllocator(
+                                    kv_size=self.max_total_num_tokens,
+                                    index_k_size=self.max_total_num_tokens,
+                                    page_size=self.page_size,
+                                    dtype=self.kv_cache_dtype,
+                                    device=self.device,
+                                    kvcache=self.token_to_kv_pool,
+                                    need_sort=need_sort,
+                                )
+                            )
+                        else:
+                            self.token_to_kv_pool_allocator = (
+                                PagedTokenToKVPoolAllocator(
+                                    self.max_total_num_tokens,
+                                    page_size=self.page_size,
+                                    dtype=self.kv_cache_dtype,
+                                    device=self.device,
+                                    kvcache=self.token_to_kv_pool,
+                                    need_sort=need_sort,
+                                )
+                            )
+
         else:
             assert self.is_draft_worker
             if self.is_hybrid_swa:

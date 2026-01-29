@@ -59,6 +59,7 @@ from sglang.srt.mem_cache.memory_pool import (
     NSATokenToKVPool,
     ReqToTokenPool,
 )
+from sglang.srt.mem_cache.sparsity import get_sparse_coordinator
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.tracing.trace import trace_event_batch, trace_slice_end
 from sglang.srt.utils import get_int_env_var
@@ -999,8 +1000,10 @@ class SchedulerDisaggregationDecodeMixin:
 
     def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
         """Create a schedulebatch for fake completed prefill"""
-        if self.grammar_queue:
-            self.move_ready_grammar_requests()
+        if self.grammar_manager.has_waiting_grammars():
+            ready_grammar_requests = self.grammar_manager.get_ready_grammar_requests()
+            for req in ready_grammar_requests:
+                self._add_request_to_queue(req)
 
         if len(self.waiting_queue) == 0:
             return None
@@ -1074,4 +1077,15 @@ class SchedulerDisaggregationDecodeMixin:
             alloc_reqs = (
                 self.disagg_decode_transfer_queue.pop_transferred()
             )  # the requests which kv has arrived
+
+            sparse_coordinator = get_sparse_coordinator()
+            if sparse_coordinator is not None:
+                for req in alloc_reqs:
+                    sparse_coordinator.on_request_begin(req)
+                    sparse_coordinator.trigger_async_offload_prompt_cache(req)
+                # TODO(hzh): Support async offload later; Async offload will Cause IMA Issue
+                sparse_coordinator.check_prompt_offload_completion(
+                    self.tree_cache, blocking=True
+                )
+
             self.waiting_queue.extend(alloc_reqs)

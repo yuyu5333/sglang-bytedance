@@ -872,6 +872,11 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         return self._kvcache.load_cpu_copy(kv_cache_cpu, indices)
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class NSAHybridTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     """Hybrid allocator with separate KV cache and index_k pools for NSA."""
 
@@ -897,6 +902,9 @@ class NSAHybridTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.index_k_max_total_size = index_k_size
         self.index_k_allocator = PagedTokenToKVPoolAllocator(
             index_k_size, page_size, dtype, device, kvcache, need_sort
+        )
+        logger.info(
+            f"NSAHybridTokenToKVPoolAllocator initialized with {kv_size=} and {index_k_size=}"
         )
 
     def alloc(self, need_size: int):

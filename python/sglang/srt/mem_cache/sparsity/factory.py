@@ -51,18 +51,47 @@ def _create_backend_adaptor(
     device: torch.device,
     sparse_algorithm: BaseSparseAlgorithm,
     req_to_token_pool,
-    decode_offload_manager,
+    sparse_kv_cache_manager,
 ):
     """Create backend adaptor."""
     if isinstance(sparse_algorithm, DeepSeekNSAAlgorithm):
-        logger.info("Creating NSA backend adaptor")
-        return NSABackendAdaptor(device, req_to_token_pool, decode_offload_manager)
+        return NSABackendAdaptor(device, req_to_token_pool, sparse_kv_cache_manager)
 
     if backend in ["fa3", "flashattention"]:
-        logger.info("Creating FlashAttention backend adaptor")
-        return FlashAttentionAdaptor(device)
+        return FlashAttentionAdaptor(device, req_to_token_pool, sparse_kv_cache_manager)
 
-    raise ValueError(f"Unknown backend: {backend}")
+    raise ValueError(f"Unknown attention backend: {backend}")
+
+
+def _parse_sparse_config(server_args) -> SparseConfig:
+    """Parse hierarchical sparse config"""
+    # Parse extra config if provided
+    extra_config_str = server_args.hierarchical_sparse_attention_extra_config
+    if extra_config_str is not None:
+        try:
+            extra_config = json.loads(extra_config_str)
+
+            # Extract algorithm and backend
+            algorithm = extra_config.pop("algorithm", "quest")
+            backend = extra_config.pop("backend", "flashattention")
+            topk_tokens_cnt = extra_config.pop("topk_tokens_cnt", 2048)
+            device_buffer_cnt = extra_config.pop("device_buffer_cnt", 2048)
+            # Everything else goes to algorithm_extra_config
+            sparse_extra_config = extra_config
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Failed to parse hierarchical_sparse_attention_extra_config: {e}"
+            )
+
+    config = SparseConfig(
+        algorithm=algorithm,
+        backend=backend,
+        page_size=server_args.page_size,
+        topk_tokens_cnt=topk_tokens_cnt,
+        device_buffer_cnt=device_buffer_cnt,
+        sparse_extra_config=sparse_extra_config,
+    )
+    return config
 
 
 def create_sparse_coordinator(
@@ -80,7 +109,6 @@ def create_sparse_coordinator(
     lru_len = int(os.environ.get("SPARSE_LRU_LEN", 4096))
     config = SparseConfig(page_size=page_size, algorithm="deepseek_nsa", lru_len=lru_len)
     algorithm = _create_sparse_algorithm(config, device, **kwargs)
-
     sparse_kv_cache_manager = SparseKVCacheManager(
         req_to_token_pool=req_to_token_pool,
         token_to_kv_pool_allocator=token_to_kv_pool_allocator,
@@ -115,3 +143,7 @@ def register_sparse_coordinator(coordinator: SparseCoordinator) -> None:
 
 def get_sparse_coordinator() -> Optional[SparseCoordinator]:
     return _global_sparse_coordinator
+
+
+def is_hierarchical_sparse_attention_enabled() -> bool:
+    return _global_sparse_coordinator is not None

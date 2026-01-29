@@ -235,7 +235,9 @@ class ServerArgs:
 
     # Attention
     attention_backend: str = None
-    diffusers_attention_backend: str = None  # for diffusers backend only
+    cache_dit_config: str | dict[str, Any] | None = (
+        None  # cache-dit config for diffusers
+    )
 
     # Distributed executor backend
     nccl_port: Optional[int] = None
@@ -265,6 +267,11 @@ class ServerArgs:
 
     pipeline_config: PipelineConfig = field(default_factory=PipelineConfig, repr=False)
 
+    # Pipeline override
+    pipeline_class_name: str | None = (
+        None  # Override pipeline class from model_index.json
+    )
+
     # LoRA parameters
     # (Wenxuan) prefer to keep it here instead of in pipeline config to not make it complicated.
     lora_path: str | None = None
@@ -284,6 +291,9 @@ class ServerArgs:
     vae_cpu_offload: bool | None = None
     use_fsdp_inference: bool = False
     pin_cpu_memory: bool = True
+
+    # ComfyUI integration
+    comfyui_mode: bool = False
 
     # STA (Sliding Tile Attention) parameters
     mask_strategy_file_path: str | None = None
@@ -319,6 +329,8 @@ class ServerArgs:
     webui_port: int | None = 12312
 
     scheduler_port: int = 5555
+
+    output_path: str | None = "outputs/"
 
     # Prompt text file for batch processing
     prompt_file_path: str | None = None
@@ -366,10 +378,14 @@ class ServerArgs:
             if self.vae_cpu_offload is None:
                 self.vae_cpu_offload = False
         else:
-            self.dit_cpu_offload = True
-            self.text_encoder_cpu_offload = True
-            self.image_encoder_cpu_offload = True
-            self.vae_cpu_offload = True
+            if self.dit_cpu_offload is None:
+                self.dit_cpu_offload = True
+            if self.text_encoder_cpu_offload is None:
+                self.text_encoder_cpu_offload = True
+            if self.image_encoder_cpu_offload is None:
+                self.image_encoder_cpu_offload = True
+            if self.vae_cpu_offload is None:
+                self.vae_cpu_offload = True
 
     def __post_init__(self):
         # configure logger before use
@@ -438,15 +454,25 @@ class ServerArgs:
             "--attention-backend",
             type=str,
             default=None,
-            choices=[e.name.lower() for e in AttentionBackendEnum] + ["fa3", "fa4"],
-            help="The attention backend to use. If not specified, the backend is automatically selected based on hardware and installed packages.",
+            help=(
+                "The attention backend to use. For SGLang-native pipelines, use "
+                "values like fa, torch_sdpa, sage_attn, etc. For diffusers pipelines, "
+                "use diffusers attention backend names such as flash, _flash_3_hub, "
+                "sage, or xformers."
+            ),
         )
         parser.add_argument(
             "--diffusers-attention-backend",
             type=str,
+            dest="attention_backend",
             default=None,
-            help="Attention backend for diffusers pipelines (e.g., flash, _flash_3_hub, sage, xformers). "
-            "See: https://huggingface.co/docs/diffusers/main/en/optimization/attention_backends",
+            help=argparse.SUPPRESS,
+        )
+        parser.add_argument(
+            "--cache-dit-config",
+            type=str,
+            default=ServerArgs.cache_dit_config,
+            help="Path to a Cache-DiT YAML/JSON config. Enables cache-dit for diffusers backend.",
         )
 
         # HuggingFace specific parameters
@@ -670,6 +696,12 @@ class ServerArgs:
             default=ServerArgs.webui_port,
             help="Whether to use webui for better display",
         )
+        parser.add_argument(
+            "--output-path",
+            type=str,
+            default=ServerArgs.output_path,
+            help="Directory path to save generated images/videos",
+        )
 
         # LoRA
         parser.add_argument(
@@ -726,17 +758,6 @@ class ServerArgs:
     ) -> int:
         """
         Find an available port with retry logic.
-
-        Args:
-            port: Initial port to check
-            port_inc: Port increment for each attempt
-            max_attempts: Maximum number of attempts to find an available port
-
-        Returns:
-            An available port number
-
-        Raises:
-            RuntimeError: If no available port is found after max_attempts
         """
         attempts = 0
         original_port = port
@@ -931,7 +952,10 @@ class ServerArgs:
 
         if not envs.SGLANG_CACHE_DIT_ENABLED:
             # TODO: need a better way to tell this
-            if "wan" in self.pipeline_config.__class__.__name__.lower():
+            if (
+                "wan" in self.pipeline_config.__class__.__name__.lower()
+                and self.dit_layerwise_offload is None
+            ):
                 logger.info(
                     "Automatically enable dit_layerwise_offload for Wan for best performance"
                 )
@@ -987,7 +1011,7 @@ class ServerArgs:
             raise ValueError("pipeline_config is not set in ServerArgs")
 
         self.pipeline_config.check_pipeline_config()
-        if self.attention_backend is None:
+        if self.attention_backend is None and self.backend != Backend.DIFFUSERS:
             self._set_default_attention_backend()
 
         # parallelism
@@ -1005,9 +1029,9 @@ class ServerArgs:
             has_sp = self.sp_degree > 1
             has_tp = self.tp_size > 1
             if has_sp and has_tp:
-                raise ValueError(
-                    "cache-dit does not support hybrid parallelism (SP + TP). "
-                    "Please use either sequence parallelism or tensor parallelism, not both."
+                logger.warning(
+                    "cache-dit is enabled with hybrid parallelism (SP + TP). "
+                    "Proceeding anyway (SGLang integration may support this mode)."
                 )
 
     def _set_default_attention_backend(self) -> None:
@@ -1073,13 +1097,6 @@ _global_server_args = None
 def prepare_server_args(argv: list[str]) -> ServerArgs:
     """
     Prepare the inference arguments from the command line arguments.
-
-    Args:
-        argv: The command line arguments. Typically, it should be `sys.argv[1:]`
-            to ensure compatibility with `parse_args` when no arguments are passed.
-
-    Returns:
-        The inference arguments.
     """
     parser = FlexibleArgumentParser()
     ServerArgs.add_cli_args(parser)

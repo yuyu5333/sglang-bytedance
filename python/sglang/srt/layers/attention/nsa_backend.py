@@ -22,9 +22,6 @@ from sglang.srt.layers.attention.nsa.transform_index import (
     transform_index_page_table_prefill,
 )
 from sglang.srt.layers.attention.nsa.utils import (
-    NSA_ENABLE_MTP_PRECOMPUTE_METADATA,
-    NSA_FLASHMLA_BACKEND_DECODE_COMPUTE_FP8,
-    NSA_FUSE_TOPK,
     can_nsa_prefill_cp_round_robin_split,
     compute_nsa_seqlens,
     is_nsa_enable_prefill_cp,
@@ -35,6 +32,9 @@ from sglang.srt.layers.attention.nsa.utils import (
 from sglang.srt.layers.attention.trtllm_mla_backend import _concat_mla_absorb_q_general
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.mem_cache.common import enable_nsa_hybrid_indexer_pool
+from sglang.srt.mem_cache.sparsity.factory import (
+    is_hierarchical_sparse_attention_enabled,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.utils import is_cuda, is_hip
 
@@ -119,6 +119,8 @@ class NSAMetadata:
     # Separated page table for index_k
     indexer_real_page_table: Optional[torch.Tensor] = None
     nsa_max_seqlen_q: Literal[1] = 1  # always 1 for decode, variable for extend
+    # Separated page table for index_k
+    indexer_real_page_table: Optional[torch.Tensor] = None
 
     flashmla_metadata: Optional[NSAFlashMLAMetadata] = None
     # DeepGEMM schedule metadata for paged MQA logits (decode/target_verify/draft_extend only).
@@ -180,8 +182,10 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
     def get_page_table_64(self) -> torch.Tensor:
         if self.attn_metadata.indexer_real_page_table is not None:
             return self.attn_metadata.indexer_real_page_table
-        
         return self.attn_metadata.real_page_table
+
+    def get_page_table_1(self) -> torch.Tensor:
+        return self.attn_metadata.page_table_1
 
     def get_seqlens_expanded(self) -> torch.Tensor:
         return self.attn_metadata.nsa_seqlens_expanded
@@ -236,7 +240,7 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
         else:
             page_table_size_1 = self.attn_metadata.page_table_1
 
-        if not NSA_FUSE_TOPK:
+        if not envs.SGLANG_NSA_FUSE_TOPK.get():
             return fast_topk_v2(logits, seq_lens_topk, topk, row_starts=ks)
         elif self.topk_transform_method == TopkTransformMethod.PAGED:
             # NOTE(dark): if fused, we return a transformed page table directly
@@ -380,7 +384,6 @@ class NativeSparseAttnBackend(
         # Build indexer_page_table for indexer_k
         indexer_page_table = None
         if self.enable_nsa_hybrid_indexer_pool:
-            
             indexer_page_table = self.req_to_token_pool.req_to_nsa_index_k[
                 forward_batch.req_pool_indices, :max_seqlen_k
             ]
@@ -652,9 +655,7 @@ class NativeSparseAttnBackend(
             nsa_cu_seqlens_k=nsa_cu_seqlens_k,
             nsa_seqlens_expanded=seqlens_expanded,
             nsa_extend_seq_lens_list=extend_seq_lens_cpu,
-            real_page_table=(
-                self._transform_table_1_to_real(page_table)
-            ),
+            real_page_table=self._transform_table_1_to_real(page_table),
             indexer_real_page_table=(
                 self._transform_table_1_to_real(indexer_page_table)
                 if indexer_page_table is not None
@@ -761,7 +762,6 @@ class NativeSparseAttnBackend(
                 dtype=torch.int32,
                 device=self.device,
             )
-
         self.decode_cuda_graph_metadata: Dict = {
             "cache_seqlens": torch.ones(
                 max_num_tokens, dtype=torch.int32, device=self.device
@@ -1316,12 +1316,6 @@ class NativeSparseAttnBackend(
         assert q_rope is not None
         kv_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
 
-        # when store in fp8 and compute in fp8, no need to convert dtype
-        if not (
-            NSA_FLASHMLA_BACKEND_DECODE_COMPUTE_FP8 and self.nsa_kv_cache_store_fp8
-        ):
-            kv_cache = kv_cache.to(q.dtype)
-
         if q_rope is not None:
             q_nope = q.view(-1, layer.tp_q_head_num, layer.v_head_dim)
             q_rope = q_rope.view(
@@ -1339,7 +1333,7 @@ class NativeSparseAttnBackend(
 
         # NOTE(dark): here, we use page size = 1
         topk_transform_method = self.get_topk_transform_method()
-        if NSA_FUSE_TOPK:
+        if envs.SGLANG_NSA_FUSE_TOPK.get():
             page_table_1 = topk_indices
         else:
             if topk_transform_method == TopkTransformMethod.RAGGED:
@@ -1363,7 +1357,16 @@ class NativeSparseAttnBackend(
                     page_size=1,
                 )
 
-        if self.nsa_prefill_impl == "tilelang":
+        nsa_impl = (
+            self.nsa_decode_impl
+            if (
+                forward_batch.forward_mode.is_target_verify()
+                or forward_batch.forward_mode.is_draft_extend(include_v2=True)
+            )
+            else self.nsa_prefill_impl
+        )
+
+        if nsa_impl == "tilelang":
             if q_rope is not None:
                 q_all = _concat_mla_absorb_q_general(q_nope, q_rope)
             return self._forward_tilelang(
@@ -1373,12 +1376,10 @@ class NativeSparseAttnBackend(
                 sm_scale=layer.scaling,
                 v_head_dim=layer.v_head_dim,
             )
-        elif self.nsa_prefill_impl == "flashmla_sparse":
+        elif nsa_impl == "flashmla_sparse":
             if q_rope is not None:
                 q_all = _concat_mla_absorb_q_general(q_nope, q_rope)
 
-            # NSA_FLASHMLA_BACKEND_DECODE_COMPUTE_FP8 has no effect here,
-            # because the flashmla_sparse kernel doesn't support fp8 compute
             if topk_transform_method == TopkTransformMethod.RAGGED:
                 if any(forward_batch.extend_prefix_lens_cpu):
                     page_table_1_flattened = (
@@ -1399,7 +1400,7 @@ class NativeSparseAttnBackend(
                 sm_scale=layer.scaling,
                 v_head_dim=layer.v_head_dim,
             )
-        elif self.nsa_prefill_impl == "flashmla_kv":
+        elif nsa_impl == "flashmla_kv":
             if q_rope is not None:
                 q_all = _concat_mla_absorb_q_general(q_nope, q_rope)
             return self._forward_flashmla_kv(
@@ -1412,7 +1413,7 @@ class NativeSparseAttnBackend(
                 metadata=metadata,
                 page_table_1=page_table_1,
             )
-        elif self.nsa_prefill_impl == "fa3":
+        elif nsa_impl == "fa3":
             return self._forward_fa3(
                 q_rope=q_rope,
                 kv_cache=kv_cache,
@@ -1428,7 +1429,7 @@ class NativeSparseAttnBackend(
                 page_size=1,
             )
         else:
-            raise ValueError(f"Unsupported {self.nsa_prefill_impl = }")
+            raise ValueError(f"Unsupported {nsa_impl = }")
 
     def forward_decode(
         self,
@@ -1478,14 +1479,19 @@ class NativeSparseAttnBackend(
         if topk_indices is not None:
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
-        if NSA_FUSE_TOPK:
+        if envs.SGLANG_NSA_FUSE_TOPK.get():
             page_table_1 = topk_indices
         else:
-            page_table_1 = transform_index_page_table_decode(
-                page_table=metadata.page_table_1,
-                topk_indices=topk_indices,
-                page_size=1,
-            )
+            # When hierarchical NSA is enabled, the sparse coordinator has already converted topk_indices into the actual page table.
+            use_hierarchical_nsa = is_hierarchical_sparse_attention_enabled()
+            if use_hierarchical_nsa:
+                page_table_1 = topk_indices
+            else:
+                page_table_1 = transform_index_page_table_decode(
+                    page_table=metadata.page_table_1,
+                    topk_indices=topk_indices,
+                    page_size=1,
+                )
 
         if self.nsa_decode_impl == "flashmla_sparse":
             if q_rope is not None:
@@ -1656,7 +1662,7 @@ class NativeSparseAttnBackend(
         kv_cache = kv_cache.view(-1, self.real_page_size, 1, self.kv_cache_dim)
         assert self.real_page_size == 64, "only page size 64 is supported"
 
-        if NSA_FLASHMLA_BACKEND_DECODE_COMPUTE_FP8 and not self.nsa_kv_cache_store_fp8:
+        if not self.nsa_kv_cache_store_fp8:
             # inefficiently quantize the whole cache
             kv_cache = quantize_k_cache(kv_cache)
 
@@ -1678,7 +1684,7 @@ class NativeSparseAttnBackend(
             block_table=torch.empty(
                 (q_all.shape[0], 0), dtype=torch.int32, device=q_all.device
             ),
-            is_fp8_kvcache=NSA_FLASHMLA_BACKEND_DECODE_COMPUTE_FP8,
+            is_fp8_kvcache=True,
         )
         return o
 
@@ -1881,7 +1887,7 @@ class NativeSparseAttnBackend(
 
     def get_topk_transform_method(self) -> TopkTransformMethod:
         """
-        NSA_FUSE_TOPK controls whether to fuse the topk transform into the topk kernel.
+        SGLANG_NSA_FUSE_TOPK controls whether to fuse the topk transform into the topk kernel.
         This method is used to select the topk transform method which can be fused or unfused.
         """
         if (
@@ -1914,7 +1920,7 @@ class NativeSparseAttnBackend(
             num_q_tokens_per_head_k=seq_len_q * self.num_q_heads // 1,
             num_heads_k=1,
             num_heads_q=self.num_q_heads,
-            is_fp8_kvcache=NSA_FLASHMLA_BACKEND_DECODE_COMPUTE_FP8,
+            is_fp8_kvcache=True,
             topk=self.nsa_index_topk,
         )
 
@@ -1966,7 +1972,7 @@ class NativeSparseAttnMultiStepBackend:
     def init_forward_metadata_replay_cuda_graph(
         self, forward_batch: ForwardBatch, bs: int
     ):
-        if NSA_ENABLE_MTP_PRECOMPUTE_METADATA:
+        if envs.SGLANG_NSA_ENABLE_MTP_PRECOMPUTE_METADATA.get():
             # Precompute metadata once (shared across all backends)
             precomputed = self.attn_backends[0]._precompute_replay_metadata(
                 bs=bs,
