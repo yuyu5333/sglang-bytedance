@@ -117,6 +117,31 @@ class SparseKVCacheManager:
         bs = sparse_mask.shape[0]
 
         block_size = 512 if top_k_result.size(1) == 2048 else 32
+
+        num_top_k = top_k_result.size(1)
+        max_pool_size = self.bitmap.size(0)
+
+        if (
+            self.missed_tokens is None
+            or self.missed_tokens.size(0) != max_pool_size
+            or self.missed_tokens.size(1) != num_top_k
+        ):
+            self.missed_tokens = torch.empty(
+                (max_pool_size, num_top_k),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.evict_slots = torch.empty(
+                (max_pool_size, num_top_k),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.miss_counts = torch.empty(
+                (max_pool_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )        
+
         if self.is_mla_pool:
             load_cache_to_device_buffer_mla(
                 top_k_tokens=top_k_result,
@@ -126,6 +151,9 @@ class SparseKVCacheManager:
                 host_cache=self.mem_pool_host.kv_buffer[layer_id],
                 device_buffer=self.mem_pool_device.kv_buffer[layer_id],
                 top_k_device_locs=self.req_states.curr_device_indices,
+                missed_tokens=self.missed_tokens[:bs],
+                evict_slots=self.evict_slots[:bs],
+                miss_counts=self.miss_counts[:bs],
                 page_table=page_table,
                 diff_map=self.bitmap,
                 req_pool_indices=req_pool_indices,
@@ -147,6 +175,9 @@ class SparseKVCacheManager:
                 device_buffer_k=self.mem_pool_device.k_buffer[layer_id],
                 device_buffer_v=self.mem_pool_device.v_buffer[layer_id],
                 top_k_device_locs=self.req_states.curr_device_indices,
+                missed_tokens=self.missed_tokens[:bs],
+                evict_slots=self.evict_slots[:bs],
+                miss_counts=self.miss_counts[:bs],
                 page_table=page_table,
                 diff_map=self.bitmap,
                 req_pool_indices=req_pool_indices,
