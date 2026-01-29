@@ -94,6 +94,9 @@ class SparseKVCacheManager:
             device=server_args.device,
         )
         self.req_states = None
+        self.missed_tokens = None
+        self.evict_slots = None
+        self.miss_counts = None
 
     def swap_in_selected_pages(
         self,
