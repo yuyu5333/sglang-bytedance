@@ -603,6 +603,9 @@ def setup_jit_kernel(
     top_k_device_locs = torch.full(
         (batch_size, top_k), -1, dtype=torch.int32, device="cuda"
     )
+    missed_tokens = torch.empty((batch_size, top_k), dtype=torch.int32, device="cuda")
+    evict_slots = torch.empty((batch_size, top_k), dtype=torch.int32, device="cuda")
+    miss_counts = torch.empty((batch_size,), dtype=torch.int32, device="cuda")
     bitmap = torch.full((batch_size, max_seq_len), -1, dtype=torch.int16, device="cuda")
     lru_slots = (
         torch.arange(top_k, dtype=torch.int16, device="cuda")
@@ -699,6 +702,9 @@ def setup_jit_kernel(
         "host_cache_locs": host_cache_locs,
         "top_k_tokens": top_k_tokens,
         "top_k_device_locs": top_k_device_locs,
+        "missed_tokens": missed_tokens,
+        "evict_slots": evict_slots,
+        "miss_counts": miss_counts,
         "page_table": page_table,
         "bitmap": bitmap,
         "lru_slots": lru_slots,
@@ -744,6 +750,9 @@ def execute_jit_kernel(context):
         host_cache=context["host_cache_cpu"],
         device_buffer=context["device_pool"].kv_buffer[context["layer_id"]],
         top_k_device_locs=context["top_k_device_locs"],
+        missed_tokens=context["missed_tokens"],
+        evict_slots=context["evict_slots"],
+        miss_counts=context["miss_counts"],
         page_table=context["page_table"],
         diff_map=context["bitmap"],
         req_pool_indices=context["req_pool_indices"],

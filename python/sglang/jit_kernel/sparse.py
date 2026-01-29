@@ -20,7 +20,7 @@ def _jit_sparse_module(
 ) -> Module:
     args = make_cpp_args(block_size, num_top_k, hot_buffer_size, is_mla)
     return load_jit(
-        "sparse_cache",
+        "sparse_cache_v2",
         *args,
         cuda_files=["sparse.cuh"],
         cuda_wrappers=[
@@ -37,6 +37,9 @@ def load_cache_to_device_buffer_mla(
     host_cache: torch.Tensor,
     device_buffer: torch.Tensor,
     top_k_device_locs: torch.Tensor,
+    missed_tokens: torch.Tensor,
+    evict_slots: torch.Tensor,
+    miss_counts: torch.Tensor,
     page_table: torch.Tensor,
     diff_map: torch.Tensor,
     req_pool_indices: torch.Tensor,
@@ -98,6 +101,9 @@ def load_cache_to_device_buffer_mla(
         device_buffer,
         empty,
         top_k_device_locs,
+        missed_tokens,
+        evict_slots,
+        miss_counts,
         page_table,
         diff_map,
         req_pool_indices,
@@ -119,6 +125,9 @@ def load_cache_to_device_buffer(
     device_buffer_k: torch.Tensor,
     device_buffer_v: torch.Tensor,
     top_k_device_locs: torch.Tensor,
+    missed_tokens: torch.Tensor,
+    evict_slots: torch.Tensor,
+    miss_counts: torch.Tensor,
     page_table: torch.Tensor,
     diff_map: torch.Tensor,
     req_pool_indices: torch.Tensor,
@@ -179,6 +188,9 @@ def load_cache_to_device_buffer(
         device_buffer_k,
         device_buffer_v,
         top_k_device_locs,
+        missed_tokens,
+        evict_slots,
+        miss_counts,
         page_table,
         diff_map,
         req_pool_indices,

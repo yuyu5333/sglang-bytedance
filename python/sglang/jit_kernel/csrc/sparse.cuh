@@ -73,7 +73,7 @@ __device__ __forceinline__ int warp_inclusive_scan(int* s_data, int lane_id, int
 // Each block processes one request
 // IndexT: type for req_pool_indices and seq_lens (int32_t or int64_t), The cuda graph mode requires int32_t
 template <int BLOCK_SIZE, int NUM_TOP_K, int HOT_BUFFER_SIZE, bool IsMLA, typename IndexT>
-__global__ void load_cache_to_device_buffer_kernel(
+__global__ void load_cache_to_device_buffer_phase1_kernel(
     const int32_t* __restrict__ top_k_tokens,
     int32_t* __restrict__ device_buffer_tokens,
     const int64_t* __restrict__ host_cache_locs,
@@ -83,6 +83,9 @@ __global__ void load_cache_to_device_buffer_kernel(
     void* __restrict__ device_buffer_k,
     void* __restrict__ device_buffer_v,
     int32_t* __restrict__ top_k_device_locs,
+    int32_t* __restrict__ missed_tokens,
+    int32_t* __restrict__ evict_slots,
+    int32_t* __restrict__ miss_counts,
     const int32_t* __restrict__ page_table,
     int16_t* __restrict__ diff_map,
     const IndexT* __restrict__ req_pool_indices,
@@ -93,6 +96,7 @@ __global__ void load_cache_to_device_buffer_kernel(
     int64_t host_stride,
     int64_t page_table_stride,
     int64_t diff_map_stride,
+    int64_t miss_stride,
     int64_t page_size,
     int64_t layer_id,
     int64_t item_size_bytes) {
@@ -121,6 +125,8 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int64_t* my_host_cache_locs = host_cache_locs + host_offset;
   const int32_t* my_device_buffer_locs = device_buffer_locs + buffer_offset;
   int32_t* my_top_k_device_locs = top_k_device_locs + top_k_offset;
+  int32_t* my_missed_tokens = missed_tokens + bid * miss_stride;
+  int32_t* my_evict_slots = evict_slots + bid * miss_stride;
   const int32_t* my_page_table = page_table + page_table_offset;
   int16_t* my_diff_map = diff_map + diff_map_offset;
 
@@ -132,6 +138,9 @@ __global__ void load_cache_to_device_buffer_kernel(
         int32_t page_start = my_page_table[top_k_val * page_size];
         my_top_k_device_locs[i] = page_start / page_size;
       }
+    }
+    if (tid == 0) {
+      miss_counts[bid] = 0;
     }
     return;
   }
@@ -156,13 +165,19 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
     int32_t top_k_val = my_top_k_tokens[i];
+    if (top_k_val >= 0 && top_k_val < diff_map_stride) {
+      my_diff_map[top_k_val] = i;
+      top_k_max_value = max(top_k_max_value, top_k_val);
+      s_top_k_tokens[i] = top_k_val;
+    } else {
+      s_top_k_tokens[i] = TOKEN_HIT;
+      my_top_k_device_locs[i] = -1;
+    }
+  }
+
+  for (int i = tid; i < HOT_BUFFER_SIZE; i += BLOCK_SIZE) {
     int32_t device_buffer_val = my_device_buffer_tokens[i];
-    my_diff_map[top_k_val] = i;
-
-    top_k_max_value = max(top_k_max_value, top_k_val);
     device_buffer_max_value = max(device_buffer_max_value, device_buffer_val);
-
-    s_top_k_tokens[i] = top_k_val;
   }
 
   top_k_max_value = blockReduceMaxInt(top_k_max_value);
@@ -193,10 +208,17 @@ __global__ void load_cache_to_device_buffer_kernel(
     int32_t prev_max = s_device_buffer_max;
     int32_t curr_max = s_top_k_max;
     bool cross_page = curr_max != prev_max;
-    int my_found_top_k_idx = my_diff_map[my_buffer_token];
+    int my_found_top_k_idx = -1;
+    if (my_buffer_token >= 0 && my_buffer_token < diff_map_stride) {
+      my_found_top_k_idx = my_diff_map[my_buffer_token];
+    }
 
-    if (cross_page & my_buffer_token == prev_max) {
-      my_found_top_k_idx = my_diff_map[curr_max];
+    if (cross_page && (my_buffer_token == prev_max)) {
+      int tmp_found = -1;
+      if (curr_max >= 0 && curr_max < diff_map_stride) {
+        tmp_found = my_diff_map[curr_max];
+      }
+      my_found_top_k_idx = tmp_found;
       my_device_buffer_tokens[buf_slot] = curr_max;
     }
 
@@ -235,7 +257,9 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
     int32_t top_k_val = my_top_k_tokens[i];
-    my_diff_map[top_k_val] = -1;
+    if (top_k_val >= 0 && top_k_val < diff_map_stride) {
+      my_diff_map[top_k_val] = -1;
+    }
   }
   // Reset offsets for next phase
   for (int i = tid; i < NUM_BUFFER_CHUNKS + 1; i += BLOCK_SIZE) {
@@ -257,9 +281,10 @@ __global__ void load_cache_to_device_buffer_kernel(
     int local_miss_offset = 0;
 
     if (has_valid_token) {
-      is_miss = s_top_k_tokens[my_token_idx] != TOKEN_HIT;
+      int32_t token_val = s_top_k_tokens[my_token_idx];
+      is_miss = (token_val >= 0) && (token_val != TOKEN_HIT);
       if (is_miss) {
-        my_token = s_top_k_tokens[my_token_idx];
+        my_token = token_val;
       }
     }
 
@@ -284,34 +309,93 @@ __global__ void load_cache_to_device_buffer_kernel(
       int miss_offset = s_chunk_offset[chunk_idx] + local_miss_offset;
       int evict_slot = s_evictable_slots[miss_offset];
       s_missed_tokens[miss_offset] = my_token;
+      my_missed_tokens[miss_offset] = my_token;
+      my_evict_slots[miss_offset] = evict_slot;
       my_top_k_device_locs[my_token_idx] = my_device_buffer_locs[evict_slot];
       my_device_buffer_tokens[evict_slot] = my_token;
     }
     __syncthreads();
   }
 
-  // Transfer missed items from host cache to device buffer with paging support
-  for (int miss_idx = warp_id; miss_idx < s_total_misses; miss_idx += NUM_WARPS) {
-    const int32_t miss_token = s_missed_tokens[miss_idx];
-    const int evict_slot = s_evictable_slots[miss_idx];
+  if (tid == 0) {
+    miss_counts[bid] = s_total_misses;
+  }
+}
+
+template <int BLOCK_SIZE, int NUM_TOP_K, int HOT_BUFFER_SIZE, bool IsMLA, typename IndexT>
+__global__ void load_cache_to_device_buffer_copy_kernel(
+    const int64_t* __restrict__ host_cache_locs,
+    const int32_t* __restrict__ device_buffer_locs,
+    const void* __restrict__ host_cache_k,
+    const void* __restrict__ host_cache_v,
+    void* __restrict__ device_buffer_k,
+    void* __restrict__ device_buffer_v,
+    const int32_t* __restrict__ missed_tokens,
+    const int32_t* __restrict__ evict_slots,
+    const int32_t* __restrict__ miss_counts,
+    const IndexT* __restrict__ req_pool_indices,
+    int64_t buffer_stride_0,
+    int64_t buffer_stride_1,
+    int64_t host_stride,
+    int64_t miss_stride,
+    int64_t bs,
+    int64_t page_size,
+    int64_t layer_id,
+    int64_t item_size_bytes) {
+  constexpr int WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
+  const int tid = threadIdx.x;
+  const int lane_id = tid % WARP_SIZE;
+  const int warp_id = tid / WARP_SIZE;
+  const int64_t global_warp_id = static_cast<int64_t>(blockIdx.x) * WARPS_PER_BLOCK + warp_id;
+  const int64_t total_warps = bs * NUM_TOP_K;
+  if (global_warp_id >= total_warps) {
+    return;
+  }
+
+  const int32_t bid = static_cast<int32_t>(global_warp_id / NUM_TOP_K);
+  const int32_t miss_offset = static_cast<int32_t>(global_warp_id - static_cast<int64_t>(bid) * NUM_TOP_K);
+  const int32_t miss_count = miss_counts[bid];
+  if (miss_offset >= miss_count) {
+    return;
+  }
+
+  const int32_t miss_token = missed_tokens[static_cast<int64_t>(bid) * miss_stride + miss_offset];
+  const int32_t evict_slot = evict_slots[static_cast<int64_t>(bid) * miss_stride + miss_offset];
+  if (miss_token < 0 || evict_slot < 0) {
+    return;
+  }
+
+  const int64_t rid = req_pool_indices[bid];
+  const int64_t buffer_offset = rid * buffer_stride_0 + layer_id * buffer_stride_1;
+  const int64_t host_offset = rid * host_stride;
+
+  const int64_t* my_host_cache_locs = host_cache_locs + host_offset;
+  const int32_t* my_device_buffer_locs = device_buffer_locs + buffer_offset;
+  const int32_t device_loc = my_device_buffer_locs[evict_slot];
+  if (device_loc < 0) {
+    return;
+  }
 
 #pragma unroll
-    for (int page_offset = 0; page_offset < page_size; page_offset++) {
-      const int64_t src_offset = my_host_cache_locs[miss_token * page_size + page_offset] * item_size_bytes;
-      const int64_t dst_offset = (my_device_buffer_locs[evict_slot] * page_size + page_offset) * item_size_bytes;
+  for (int page_offset = 0; page_offset < page_size; page_offset++) {
+    const int64_t host_loc = my_host_cache_locs[static_cast<int64_t>(miss_token) * page_size + page_offset];
+    if (host_loc < 0) {
+      continue;
+    }
+    const int64_t src_offset = host_loc * item_size_bytes;
+    const int64_t dst_offset = (static_cast<int64_t>(device_loc) * page_size + page_offset) * item_size_bytes;
 
+    transfer_item_warp(
+        lane_id,
+        static_cast<const char*>(host_cache_k) + src_offset,
+        static_cast<char*>(device_buffer_k) + dst_offset,
+        item_size_bytes);
+    if constexpr (!IsMLA) {
       transfer_item_warp(
           lane_id,
-          static_cast<const char*>(host_cache_k) + src_offset,
-          static_cast<char*>(device_buffer_k) + dst_offset,
+          static_cast<const char*>(host_cache_v) + src_offset,
+          static_cast<char*>(device_buffer_v) + dst_offset,
           item_size_bytes);
-      if constexpr (!IsMLA) {
-        transfer_item_warp(
-            lane_id,
-            static_cast<const char*>(host_cache_v) + src_offset,
-            static_cast<char*>(device_buffer_v) + dst_offset,
-            item_size_bytes);
-      }
     }
   }
 }
@@ -327,6 +411,9 @@ void load_cache_to_device_buffer_impl(
     tvm::ffi::TensorView device_buffer_k,
     tvm::ffi::TensorView device_buffer_v,
     tvm::ffi::TensorView top_k_device_locs,
+    tvm::ffi::TensorView missed_tokens,
+    tvm::ffi::TensorView evict_slots,
+    tvm::ffi::TensorView miss_counts,
     tvm::ffi::TensorView page_table,
     tvm::ffi::TensorView diff_map,
     tvm::ffi::TensorView req_pool_indices,
@@ -343,6 +430,7 @@ void load_cache_to_device_buffer_impl(
   const int64_t buffer_stride_1 = device_buffer_tokens.strides()[1];
   const int64_t page_table_stride = page_table.shape()[1];
   const int64_t diff_map_stride = diff_map.shape()[1];
+  const int64_t miss_stride = missed_tokens.shape()[1];
 
   const int32_t* top_k_tokens_ptr = static_cast<const int32_t*>(top_k_tokens.data_ptr());
   int32_t* device_buffer_tokens_ptr = static_cast<int32_t*>(device_buffer_tokens.data_ptr());
@@ -354,6 +442,9 @@ void load_cache_to_device_buffer_impl(
   void* device_buffer_k_ptr = device_buffer_k.data_ptr();
   void* device_buffer_v_ptr = (IsMLA || device_buffer_v.ndim() == 0) ? nullptr : device_buffer_v.data_ptr();
   int32_t* top_k_device_locs_ptr = static_cast<int32_t*>(top_k_device_locs.data_ptr());
+  int32_t* missed_tokens_ptr = static_cast<int32_t*>(missed_tokens.data_ptr());
+  int32_t* evict_slots_ptr = static_cast<int32_t*>(evict_slots.data_ptr());
+  int32_t* miss_counts_ptr = static_cast<int32_t*>(miss_counts.data_ptr());
   const int32_t* page_table_ptr = static_cast<const int32_t*>(page_table.data_ptr());
   int16_t* diff_map_ptr = static_cast<int16_t*>(diff_map.data_ptr());
   const IndexT* req_pool_indices_ptr = static_cast<const IndexT*>(req_pool_indices.data_ptr());
@@ -362,9 +453,8 @@ void load_cache_to_device_buffer_impl(
 
   const auto device = LaunchKernel::resolve_device(top_k_tokens.device());
 
-  // Launch kernel with batch size as grid dimension
   LaunchKernel(bs, BLOCK_SIZE, device)(
-      load_cache_to_device_buffer_kernel<BLOCK_SIZE, NUM_TOP_K, HOT_BUFFER_SIZE, IsMLA, IndexT>,
+      load_cache_to_device_buffer_phase1_kernel<BLOCK_SIZE, NUM_TOP_K, HOT_BUFFER_SIZE, IsMLA, IndexT>,
       top_k_tokens_ptr,
       device_buffer_tokens_ptr,
       host_cache_locs_ptr,
@@ -374,6 +464,9 @@ void load_cache_to_device_buffer_impl(
       device_buffer_k_ptr,
       device_buffer_v_ptr,
       top_k_device_locs_ptr,
+      missed_tokens_ptr,
+      evict_slots_ptr,
+      miss_counts_ptr,
       page_table_ptr,
       diff_map_ptr,
       req_pool_indices_ptr,
@@ -384,6 +477,31 @@ void load_cache_to_device_buffer_impl(
       host_stride,
       page_table_stride,
       diff_map_stride,
+      miss_stride,
+      page_size,
+      layer_id,
+      item_size_bytes);
+
+  constexpr int64_t WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
+  const int64_t total_warps = bs * NUM_TOP_K;
+  const int64_t copy_grid = (total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+  LaunchKernel(copy_grid, BLOCK_SIZE, device)(
+      load_cache_to_device_buffer_copy_kernel<BLOCK_SIZE, NUM_TOP_K, HOT_BUFFER_SIZE, IsMLA, IndexT>,
+      host_cache_locs_ptr,
+      device_buffer_locs_ptr,
+      host_cache_k_ptr,
+      host_cache_v_ptr,
+      device_buffer_k_ptr,
+      device_buffer_v_ptr,
+      missed_tokens_ptr,
+      evict_slots_ptr,
+      miss_counts_ptr,
+      req_pool_indices_ptr,
+      buffer_stride_0,
+      buffer_stride_1,
+      host_stride,
+      miss_stride,
+      bs,
       page_size,
       layer_id,
       item_size_bytes);
@@ -401,6 +519,9 @@ void load_cache_to_device_buffer(
     tvm::ffi::TensorView device_buffer_k,
     tvm::ffi::TensorView device_buffer_v,
     tvm::ffi::TensorView top_k_device_locs,
+    tvm::ffi::TensorView missed_tokens,
+    tvm::ffi::TensorView evict_slots,
+    tvm::ffi::TensorView miss_counts,
     tvm::ffi::TensorView page_table,
     tvm::ffi::TensorView diff_map,
     tvm::ffi::TensorView req_pool_indices,
@@ -425,6 +546,9 @@ void load_cache_to_device_buffer(
         device_buffer_k,
         device_buffer_v,
         top_k_device_locs,
+        missed_tokens,
+        evict_slots,
+        miss_counts,
         page_table,
         diff_map,
         req_pool_indices,
@@ -444,6 +568,9 @@ void load_cache_to_device_buffer(
         device_buffer_k,
         device_buffer_v,
         top_k_device_locs,
+        missed_tokens,
+        evict_slots,
+        miss_counts,
         page_table,
         diff_map,
         req_pool_indices,
