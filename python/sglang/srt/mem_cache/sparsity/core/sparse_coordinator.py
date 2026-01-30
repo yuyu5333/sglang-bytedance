@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List, Optional
 
-import nvtx
 import torch
 
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import BaseSparseAlgorithm
@@ -142,8 +141,8 @@ class RequestTrackers:
 class SparseConfig:
     """Configuration for sparse attention."""
 
-    backend: str = "flashattention"
-    algorithm: str = "fake_random"
+    backend: str
+    algorithm: str
     page_size: int = 64
     topk_tokens_cnt: int = 2048  # Top-k tokens selected by sparse algorithm
     device_buffer_cnt: int = 2048  # Device buffer size for LRU management
@@ -153,7 +152,30 @@ class SparseConfig:
 
 
 class SparseCoordinator:
-    """Coordinator for sparse attention pipeline."""
+    """
+    Coordinator for sparse attention with retrievable KV cache compression.
+
+    This coordinator framework is designed for decode-phase retrievable algorithms
+    (e.g., Quest, PQCache, SnapKV) that dynamically select important KV cache entries
+    based on current queries. It manages the lifecycle of sparse attention including
+    representation construction, sparse retrieval, and token offloading.
+
+    Request Lifecycle and API Calls:
+        1. Request Start:
+           - on_request_begin(req) -> Register request and initialize state
+
+        2. Prefill Phase:
+           - attention_end(...)    -> Construct representations
+
+        3. Decode Phase:
+           - forward_begin(batch)  -> Wait for pending KVCache offloading
+           - attention_begin(...)  -> Identify important KV, load offloaded KVCache, adapt attention metadata
+           - attention_end(...)    -> Construct/update representations
+           - forward_end(batch)    -> Trigger KVCache offloading
+
+        4. Request End:
+           - on_request_end(req) -> Clean up state and resources
+    """
 
     def __init__(
         self,
@@ -178,9 +200,8 @@ class SparseCoordinator:
         self.device = device
         self.page_size = config.page_size
 
-        max_pool_size = req_to_token_pool.req_to_token.shape[0]
         self.states = RequestTrackers(
-            max_pool_size,
+            req_to_token_pool.req_to_token.shape[0],
             device,
             end_layer - start_layer + 1,
             self.config.topk_tokens_cnt,
@@ -200,11 +221,15 @@ class SparseCoordinator:
         )
 
         logger.info(
-            f"SparseCoordinator initialized: algorithm={type(algorithm).__name__}"
+            f"SparseCoordinator initialized with sparse algorithm={type(algorithm).__name__}"
         )
 
     def on_request_begin(self, req: "Req") -> None:
-        """Handle request begin."""
+        """
+        Handle request begin event. Called when a new request is created.
+
+        Registers the request in the state tracker to enable sparse attention processing.
+        """
         if req.req_pool_idx is not None:
             self.states.register(req.req_pool_idx, len(req.origin_input_ids))
 
@@ -270,26 +295,6 @@ class SparseCoordinator:
                 len(host_indices) == req_seqlen
             ), f"Host indices mismatch: {len(host_indices)} != {req_seqlen}"
 
-    def on_request_end(self, req: "Req") -> None:
-        """Handle request end."""
-        if req.req_pool_idx is None or self.sparse_kv_cache_manager is None:
-            return
-
-        self.sparse_kv_cache_manager.check_sparse_offload_progress()
-        host_indices = self.states.clear(req.req_pool_idx)
-
-        if host_indices.numel() > 0:
-            # Free host indices
-            self.sparse_kv_cache_manager.host_mem_pool.free(host_indices.cpu())
-            req_seqlen = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
-            assert (
-                len(host_indices) == req_seqlen
-            ), f"Host indices mismatch: {len(host_indices)} != {req_seqlen}"
-            logger.info(
-                f"Request {req.rid} ended, released {len(host_indices)} host indices"
-            )
-
-    @nvtx.annotate("SparseCoordinator.forward_begin", color="yellow")
     def forward_begin(self, forward_batch: "ForwardBatch") -> None:
         """
         Handle forward pass begin event. Called before each forward pass starts.
@@ -300,9 +305,12 @@ class SparseCoordinator:
         if self._should_check_offload(forward_batch):
             self.sparse_kv_cache_manager.poll_decode_offload_completion()
 
-    @nvtx.annotate("SparseCoordinator.forward_end", color="yellow")
     def forward_end(self, forward_batch: "ForwardBatch") -> None:
-        """Handle forward end."""
+        """
+        Handle forward pass end event. Called after each forward pass completes.
+
+        Trigger async KVCache offloading operations.
+        """
         if not self._should_check_offload(forward_batch):
             return
 
@@ -337,7 +345,12 @@ class SparseCoordinator:
         attn_metadata: Optional[Any],
         **kwargs,
     ) -> Optional[Any]:
-        """Handle attention begin."""
+        """
+        Handle attention begin event. Called before each attention pass starts.
+
+        Identify important KV entries via sparse algorithm, load offloaded KVCache if needed,
+        and adapt attention metadata for the attention backend.
+        """
         if layer.layer_id == self.start_layer:
             self.backend_adaptor.save_original_metadata(attn_metadata)
 
@@ -351,7 +364,11 @@ class SparseCoordinator:
         layer: "RadixAttention",
         forward_batch: "ForwardBatch",
     ) -> None:
-        """Handle attention end."""
+        """
+        Handle attention end event. Called after each attention pass completes.
+
+        Maybe construct and update sparse representations.
+        """
         layer_id = layer.layer_id
 
         # Maybe construct representations
