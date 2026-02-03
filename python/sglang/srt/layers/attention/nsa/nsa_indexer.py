@@ -1392,57 +1392,10 @@ class Indexer(MultiPlatformOp):
         pool = forward_batch.req_to_token_pool
 
         if isinstance(pool, NSADecodeReqToTokenPool):
-            num_draft_tokens = forward_batch.attn_backend.speculative_num_draft_tokens
-            print(
-                f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool num_draft_tokens={num_draft_tokens}"
-            )
-            print(
-                f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool forward_batch.seq_lens={forward_batch.seq_lens}"
-            )
-            print(
-                f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool forward_batch.req_pool_indices={forward_batch.req_pool_indices}"
-            )
-            print(
-                f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool pool.req_to_nsa_index_k shape={pool.req_to_nsa_index_k.shape}"
-            )
-
-            if forward_batch.forward_mode.is_decode_or_idle():
-                index_loc = pool.req_to_nsa_index_k[
-                    forward_batch.req_pool_indices, forward_batch.seq_lens - 1
-                ].to(torch.int64)
-            else:
-                if (
-                    forward_batch.extend_seq_lens is not None
-                    and forward_batch.positions is not None
-                ):
-                    token_to_req = torch.repeat_interleave(
-                        forward_batch.req_pool_indices,
-                        forward_batch.extend_seq_lens.to(torch.int64),
-                    )
-                    pos_in_req = forward_batch.positions.to(torch.int64)
-                else:
-                    bs = forward_batch.req_pool_indices.shape[0]
-                    num_tokens = forward_batch.input_ids.shape[0]
-                    token_per_req = num_tokens // bs if bs > 0 else 0
-                    token_to_req = forward_batch.req_pool_indices.repeat_interleave(
-                        token_per_req
-                    )
-                    pos_in_req = (
-                        forward_batch.seq_lens.to(torch.int64).unsqueeze(1)
-                        + torch.arange(
-                            token_per_req,
-                            device=forward_batch.seq_lens.device,
-                            dtype=torch.int64,
-                        ).unsqueeze(0)
-                    ).reshape(-1)
-
-                index_loc = pool.req_to_nsa_index_k[token_to_req, pos_in_req].to(
-                    torch.int64
-                )
-
-            print(
-                f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool index_loc={index_loc}"
-            )
+            index_loc = pool.req_to_nsa_index_k[
+                forward_batch.req_pool_indices, forward_batch.seq_lens - 1
+            ].to(torch.int64)
+            print(f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool index_loc={index_loc}")
         else:
             index_loc = forward_batch.out_cache_loc
             print(f"[DEBUG] [_get_indexer_out_cache_loc] out_cache_loc={index_loc}")
