@@ -1370,8 +1370,11 @@ class Indexer(MultiPlatformOp):
         pool = forward_batch.req_to_token_pool
 
         if isinstance(pool, NSADecodeReqToTokenPool):
+            num_draft_tokens = (
+                forward_batch.attn_backend.speculative_num_draft_tokens
+            )
             index_loc = pool.req_to_nsa_index_k[
-                forward_batch.req_pool_indices, forward_batch.seq_lens * self.speculative_num_draft_tokens - 1
+                forward_batch.req_pool_indices, forward_batch.seq_lens * num_draft_tokens - 1
             ].to(torch.int64)
             print(f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool index_loc={index_loc}")
         else:
