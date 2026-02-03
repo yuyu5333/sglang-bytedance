@@ -1,7 +1,7 @@
+import json
 import logging
 from typing import Optional
 
-import os
 import torch
 
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import BaseSparseAlgorithm
@@ -40,9 +40,8 @@ def _create_sparse_algorithm(
     factory = _ALGORITHM_REGISTRY.get(algorithm_name)
 
     if factory is None:
-        raise ValueError(f"Unknown algorithm: {algorithm_name}")
+        raise ValueError(f"Unknown sparse algorithm: {algorithm_name}")
 
-    logger.info(f"Creating {algorithm_name} algorithm")
     return factory(config, device, **kwargs)
 
 
@@ -96,7 +95,6 @@ def _parse_sparse_config(server_args) -> SparseConfig:
 
 def create_sparse_coordinator(
     device: torch.device,
-    page_size: int,
     req_to_token_pool,
     token_to_kv_pool,
     start_layer: int,
@@ -106,8 +104,7 @@ def create_sparse_coordinator(
     server_args,
     **kwargs,
 ) -> SparseCoordinator:
-    lru_len = int(os.environ.get("SPARSE_LRU_LEN", 4096))
-    config = SparseConfig(page_size=page_size, algorithm="deepseek_nsa", lru_len=lru_len)
+    config = _parse_sparse_config(server_args)
     algorithm = _create_sparse_algorithm(config, device, **kwargs)
     sparse_kv_cache_manager = SparseKVCacheManager(
         req_to_token_pool=req_to_token_pool,
@@ -132,7 +129,6 @@ def create_sparse_coordinator(
         device=device,
     )
     register_sparse_coordinator(coordinator)
-    logger.info(f"SparseCoordinator created: algorithm={config.algorithm}")
     return coordinator
 
 
