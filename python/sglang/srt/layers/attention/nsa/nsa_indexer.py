@@ -401,8 +401,6 @@ class Indexer(MultiPlatformOp):
         # When attn_tp_size > 1 or in the MAX_LEN padding mode, padding may exist in the hidden states,
         # and it is necessary to extract the actual q length.
         q_offset = sum(metadata.get_nsa_extend_len_cpu())
-        print(f"[DEBUG] [_get_topk_paged] q_fp8[:q_offset] shape={q_fp8[:q_offset].shape}")
-        print(f"[DEBUG] [_get_topk_paged] block_tables shape={block_tables.shape}")
         if _is_hip:
             from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits
 
@@ -428,8 +426,6 @@ class Indexer(MultiPlatformOp):
                 WavePerEU=5,
             )
         else:
-            print(f"[DEBUG] [_get_topk_paged] q_fp8[:q_offset] shape={q_fp8[:q_offset].shape}")
-            print(f"[DEBUG] [_get_topk_paged] block_tables shape={block_tables.shape}")
             logits = deep_gemm.fp8_paged_mqa_logits(
                 q_fp8[:q_offset],
                 kv_cache_fp8,
@@ -1425,10 +1421,8 @@ class Indexer(MultiPlatformOp):
                     index_loc = pool.req_to_nsa_index_k[
                         forward_batch.req_pool_indices, forward_batch.seq_lens - 1
                     ].to(torch.int64)
-            print(f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool index_loc={index_loc}")
         else:
             index_loc = forward_batch.out_cache_loc
-            print(f"[DEBUG] [_get_indexer_out_cache_loc] out_cache_loc={index_loc}")
 
         if not index_loc.is_contiguous():
             index_loc = index_loc.contiguous()
