@@ -1392,9 +1392,39 @@ class Indexer(MultiPlatformOp):
         pool = forward_batch.req_to_token_pool
 
         if isinstance(pool, NSADecodeReqToTokenPool):
-            index_loc = pool.req_to_nsa_index_k[
-                forward_batch.req_pool_indices, forward_batch.seq_lens - 1
-            ].to(torch.int64)
+            attn_metadata = getattr(forward_batch.attn_backend, "forward_metadata", None)
+            index_loc = (
+                getattr(attn_metadata, "indexer_out_cache_loc", None)
+                if attn_metadata is not None
+                else None
+            )
+            if index_loc is None:
+                token_to_batch_idx = (
+                    getattr(attn_metadata, "token_to_batch_idx", None)
+                    if attn_metadata is not None
+                    else None
+                )
+                seqlens_expanded = (
+                    getattr(attn_metadata, "nsa_seqlens_expanded", None)
+                    if attn_metadata is not None
+                    else None
+                )
+                if (
+                    token_to_batch_idx is not None
+                    and seqlens_expanded is not None
+                    and token_to_batch_idx.numel() > 0
+                ):
+                    req_idx = forward_batch.req_pool_indices[
+                        token_to_batch_idx.to(torch.int64)
+                    ]
+                    pos_in_req = seqlens_expanded.to(torch.int64) - 1
+                    index_loc = pool.req_to_nsa_index_k[req_idx, pos_in_req].to(
+                        torch.int64
+                    )
+                else:
+                    index_loc = pool.req_to_nsa_index_k[
+                        forward_batch.req_pool_indices, forward_batch.seq_lens - 1
+                    ].to(torch.int64)
             print(f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool index_loc={index_loc}")
         else:
             index_loc = forward_batch.out_cache_loc

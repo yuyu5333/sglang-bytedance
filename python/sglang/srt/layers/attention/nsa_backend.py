@@ -141,6 +141,7 @@ class NSAMetadata:
     indexer_seq_lens_cpu: Optional[torch.Tensor] = None
     # batch index for each token.
     token_to_batch_idx: Optional[torch.Tensor] = None
+    indexer_out_cache_loc: Optional[torch.Tensor] = None
 
 
 class TopkTransformMethod(IntEnum):
@@ -769,6 +770,9 @@ class NativeSparseAttnBackend(
             "cache_seqlens": torch.ones(
                 max_num_tokens, dtype=torch.int32, device=self.device
             ),
+            "indexer_out_cache_loc": torch.empty(
+                max_num_tokens, dtype=torch.int64, device=self.device
+            ),
             "cu_seqlens_q": torch.arange(
                 0, max_bs + 1, dtype=torch.int32, device=self.device
             ),
@@ -958,6 +962,9 @@ class NativeSparseAttnBackend(
             real_page_table=real_page_table,
             indexer_real_page_table=indexer_real_page_table,
             nsa_extend_seq_lens_list=nsa_extend_seq_lens_list,
+            indexer_out_cache_loc=self.decode_cuda_graph_metadata["indexer_out_cache_loc"][
+                :num_tokens
+            ],
         )
         self.decode_cuda_graph_metadata[bs] = metadata
         self.forward_metadata = metadata
@@ -1171,6 +1178,25 @@ class NativeSparseAttnBackend(
                 metadata.indexer_real_page_table[
                     : indexer_page_indices.shape[0], : indexer_page_indices.shape[1]
                 ].copy_(indexer_page_indices)
+
+            if forward_mode.is_decode_or_idle():
+                index_loc = self.req_to_token_pool.req_to_nsa_index_k[
+                    req_pool_indices, seq_lens - 1
+                ].to(torch.int64)
+            else:
+                if forward_mode.is_target_verify():
+                    req_idx = req_pool_indices.repeat_interleave(
+                        self.speculative_num_draft_tokens
+                    )
+                else:
+                    req_idx = req_pool_indices.repeat_interleave(
+                        extend_seq_lens.to(torch.int64)
+                    )
+                pos_in_req = seqlens_expanded.to(torch.int64) - 1
+                index_loc = self.req_to_token_pool.req_to_nsa_index_k[
+                    req_idx, pos_in_req
+                ].to(torch.int64)
+            metadata.indexer_out_cache_loc[: index_loc.shape[0]].copy_(index_loc)
 
         if self.nsa_decode_impl == "flashmla_kv":
             flashmla_metadata = metadata.flashmla_metadata.slice(
