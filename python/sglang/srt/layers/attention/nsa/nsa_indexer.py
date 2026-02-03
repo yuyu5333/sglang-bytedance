@@ -1371,10 +1371,12 @@ class Indexer(MultiPlatformOp):
 
         if isinstance(pool, NSADecodeReqToTokenPool):
             index_loc = pool.req_to_nsa_index_k[
-                forward_batch.req_pool_indices, forward_batch.seq_lens - 1
+                forward_batch.req_pool_indices, forward_batch.seq_lens * self.speculative_num_draft_tokens - 1
             ].to(torch.int64)
+            print(f"[DEBUG] [_get_indexer_out_cache_loc] NSADecodeReqToTokenPool index_loc={index_loc}")
         else:
             index_loc = forward_batch.out_cache_loc
+            print(f"[DEBUG] [_get_indexer_out_cache_loc] out_cache_loc={index_loc}")
 
         if not index_loc.is_contiguous():
             index_loc = index_loc.contiguous()
