@@ -1527,6 +1527,27 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
         llama_4_scaling: Optional[torch.Tensor] = None,
     ):
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+        import os
+
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
+        _debug_sync = os.environ.get("SGLANG_DEBUG_DEEPSEEK_NSA_SYNC", "0") != "0"
+        if _debug_run_batch:
+            try:
+                import torch.distributed as _dist
+
+                _rank = (
+                    _dist.get_rank()
+                    if _dist.is_available() and _dist.is_initialized()
+                    else None
+                )
+            except Exception:
+                _rank = None
+            print(
+                "[DEBUG][deepseek_v2.forward_absorb_prepare][0] enter "
+                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} "
+                f"forward_mode={forward_batch.forward_mode} use_nsa={self.use_nsa}",
+                flush=True,
+            )
 
         q_lora = None
         topk_indices = None
@@ -1642,6 +1663,25 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                         forward_batch=forward_batch,
                         layer_id=self.layer_id,
                     )
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][deepseek_v2.forward_absorb_prepare][1] indexer returned "
+                        f"pid={os.getpid()} layer_id={self.layer_id} "
+                        f"topk_is_none={topk_indices is None}",
+                        flush=True,
+                    )
+                    if _debug_sync and torch.cuda.is_available():
+                        print(
+                            "[DEBUG][deepseek_v2.forward_absorb_prepare][1.5] post-indexer synchronize begin "
+                            f"pid={os.getpid()}",
+                            flush=True,
+                        )
+                        torch.cuda.current_stream().synchronize()
+                        print(
+                            "[DEBUG][deepseek_v2.forward_absorb_prepare][1.6] post-indexer synchronize end "
+                            f"pid={os.getpid()}",
+                            flush=True,
+                        )
                 current_stream.wait_stream(self.alt_stream)
             else:
                 k_nope = k_nope.unsqueeze(1)
@@ -1671,6 +1711,25 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                             forward_batch=forward_batch,
                             layer_id=self.layer_id,
                         )
+                    if _debug_run_batch:
+                        print(
+                            "[DEBUG][deepseek_v2.forward_absorb_prepare][1] indexer returned "
+                            f"pid={os.getpid()} layer_id={self.layer_id} "
+                            f"topk_is_none={topk_indices is None}",
+                            flush=True,
+                        )
+                        if _debug_sync and torch.cuda.is_available():
+                            print(
+                                "[DEBUG][deepseek_v2.forward_absorb_prepare][1.5] post-indexer synchronize begin "
+                                f"pid={os.getpid()}",
+                                flush=True,
+                            )
+                            torch.cuda.current_stream().synchronize()
+                            print(
+                                "[DEBUG][deepseek_v2.forward_absorb_prepare][1.6] post-indexer synchronize end "
+                                f"pid={os.getpid()}",
+                                flush=True,
+                            )
         else:
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
@@ -1766,6 +1825,24 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                 latent_cache, forward_batch, k_nope, k_pe
             )
 
+        if _debug_run_batch:
+            print(
+                "[DEBUG][deepseek_v2.forward_absorb_prepare][2] before return "
+                f"pid={os.getpid()} layer_id={self.layer_id}",
+                flush=True,
+            )
+            if _debug_sync and torch.cuda.is_available():
+                print(
+                    "[DEBUG][deepseek_v2.forward_absorb_prepare][2.5] pre-return synchronize begin "
+                    f"pid={os.getpid()}",
+                    flush=True,
+                )
+                torch.cuda.current_stream().synchronize()
+                print(
+                    "[DEBUG][deepseek_v2.forward_absorb_prepare][2.6] pre-return synchronize end "
+                    f"pid={os.getpid()}",
+                    flush=True,
+                )
         return (
             q_pe,
             k_pe,
