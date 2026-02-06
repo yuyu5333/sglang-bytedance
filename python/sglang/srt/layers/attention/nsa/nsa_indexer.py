@@ -1152,7 +1152,18 @@ class Indexer(MultiPlatformOp):
                         flush=True,
                     )
                 else:
-                    torch.cuda.synchronize()
+                    sync_scope = os.environ.get(
+                        "SGLANG_DEBUG_RUN_BATCH_SYNC_SCOPE", "device"
+                    )
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][14.6] synchronize begin "
+                        f"pid={os.getpid()} scope={sync_scope}",
+                        flush=True,
+                    )
+                    if sync_scope == "current":
+                        torch.cuda.current_stream().synchronize()
+                    else:
+                        torch.cuda.synchronize()
             print(
                 "[DEBUG][nsa_indexer.forward_cuda][15] set_index_k_scale_buffer end "
                 f"pid={os.getpid()}",
@@ -1196,7 +1207,18 @@ class Indexer(MultiPlatformOp):
                         elif hasattr(torch.cuda, "is_current_stream_capturing"):
                             is_capturing = torch.cuda.is_current_stream_capturing()
                         if not is_capturing:
-                            torch.cuda.synchronize()
+                            sync_scope = os.environ.get(
+                                "SGLANG_DEBUG_RUN_BATCH_SYNC_SCOPE", "device"
+                            )
+                            print(
+                                "[DEBUG][nsa_indexer.forward_cuda][17.6] synchronize begin "
+                                f"pid={os.getpid()} scope={sync_scope}",
+                                flush=True,
+                            )
+                            if sync_scope == "current":
+                                torch.cuda.current_stream().synchronize()
+                            else:
+                                torch.cuda.synchronize()
                     print(
                         "[DEBUG][nsa_indexer.forward_cuda][17] _get_topk_paged end "
                         f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
@@ -1260,7 +1282,18 @@ class Indexer(MultiPlatformOp):
                             elif hasattr(torch.cuda, "is_current_stream_capturing"):
                                 is_capturing = torch.cuda.is_current_stream_capturing()
                             if not is_capturing:
-                                torch.cuda.synchronize()
+                                sync_scope = os.environ.get(
+                                    "SGLANG_DEBUG_RUN_BATCH_SYNC_SCOPE", "device"
+                                )
+                                print(
+                                    "[DEBUG][nsa_indexer.forward_cuda][19.6] synchronize begin "
+                                    f"pid={os.getpid()} scope={sync_scope}",
+                                    flush=True,
+                                )
+                                if sync_scope == "current":
+                                    torch.cuda.current_stream().synchronize()
+                                else:
+                                    torch.cuda.synchronize()
                         print(
                             "[DEBUG][nsa_indexer.forward_cuda][19] _get_topk_ragged end "
                             f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
