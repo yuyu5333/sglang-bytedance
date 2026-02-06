@@ -2268,14 +2268,41 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         split_forward_count: int = 1,
     ) -> ModelRunnerOutput:
         self.forward_pass_id += 1
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
+        if _debug_run_batch:
+            print(
+                "[DEBUG][model_runner.forward][0] "
+                f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                f"forward_pass_id={self.forward_pass_id} forward_mode={forward_batch.forward_mode} "
+                f"skip_attn_backend_init={skip_attn_backend_init}",
+                flush=True,
+            )
 
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
             forward_batch,
         ) as recorder_outputs:
             if self.sparse_coordinator is not None:
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][model_runner.forward][1] sparse_coordinator.forward_begin begin "
+                        f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                        flush=True,
+                    )
                 self.sparse_coordinator.forward_begin(forward_batch)
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][model_runner.forward][2] sparse_coordinator.forward_begin end "
+                        f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                        flush=True,
+                    )
 
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner.forward][3] _forward_raw begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             output = self._forward_raw(
                 forward_batch,
                 skip_attn_backend_init,
@@ -2283,9 +2310,28 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 reinit_attn_backend,
                 split_forward_count,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner.forward][4] _forward_raw end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"can_run_graph={output.can_run_graph}",
+                    flush=True,
+                )
 
             if self.sparse_coordinator is not None:
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][model_runner.forward][5] sparse_coordinator.forward_end begin "
+                        f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                        flush=True,
+                    )
                 self.sparse_coordinator.forward_end(forward_batch)
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][model_runner.forward][6] sparse_coordinator.forward_end end "
+                        f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                        flush=True,
+                    )
 
             elastic_ep_state = ElasticEPStateManager.instance()
             if (
@@ -2320,6 +2366,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if self.eplb_manager is not None:
             self.eplb_manager.on_forward_pass_end()
 
+        if _debug_run_batch:
+            print(
+                "[DEBUG][model_runner.forward][7] return "
+                f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                f"can_run_graph={output.can_run_graph}",
+                flush=True,
+            )
         return output
 
     def _forward_raw(
@@ -2330,6 +2383,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> ModelRunnerOutput:
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
         mode_check = (
             forward_batch.forward_mode.is_cpu_graph
             if self.device == "cpu"
@@ -2342,18 +2396,55 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
         if can_run_graph:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][0] graph_runner.replay begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"forward_mode={forward_batch.forward_mode}",
+                    flush=True,
+                )
             ret = self.graph_runner.replay(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][1] graph_runner.replay end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
         # For MLP sync
         if forward_batch.global_num_tokens_cpu is not None:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][2] prepare_mlp_sync_batch begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             forward_batch.prepare_mlp_sync_batch(self)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][3] prepare_mlp_sync_batch end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
         else:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][4] prepare_attn_tp_scatter_input begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             forward_batch.prepare_attn_tp_scatter_input(self)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][5] prepare_attn_tp_scatter_input end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
 
         # Normalize num_token_non_padded to be local to this attention TP rank if needed.
         if (
@@ -2367,25 +2458,73 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
 
         if forward_batch.forward_mode.is_decode():
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][6] forward_decode begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             ret = self.forward_decode(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][7] forward_decode end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
         elif forward_batch.forward_mode.is_split_prefill():
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][8] forward_split_prefill begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             ret = self.forward_split_prefill(
                 forward_batch,
                 reinit_attn_backend=reinit_attn_backend,
                 forward_count=split_forward_count,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][9] forward_split_prefill end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
         elif forward_batch.forward_mode.is_extend(include_draft_extend_v2=True):
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][10] forward_extend begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             ret = self.forward_extend(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][11] forward_extend end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
         elif forward_batch.forward_mode.is_idle():
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][12] forward_idle begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
             ret = self.forward_idle(forward_batch, pp_proxy_tensors=pp_proxy_tensors)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner._forward_raw][13] forward_idle end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
         else:
             raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 

@@ -434,6 +434,17 @@ class TpModelWorker(BaseTpWorker):
         is_verify: bool = False,
         skip_attn_backend_init=False,
     ) -> GenerationBatchResult:
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
+        if _debug_run_batch:
+            print(
+                "[DEBUG][tp_worker.forward_batch_generation][0] "
+                f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                f"pp_is_last={self.pp_group.is_last_rank} "
+                f"skip_attn_backend_init={skip_attn_backend_init} is_verify={is_verify} "
+                f"model_worker_batch_is_none={model_worker_batch is None}",
+                flush=True,
+            )
+
         # FIXME(lsyin): maybe remove skip_attn_backend_init in forward_batch_generation,
         #               which requires preparing replay to always be in this function
 
@@ -442,7 +453,24 @@ class TpModelWorker(BaseTpWorker):
             # update the consumer index of hicache to the running batch
             self.set_hicache_consumer(model_worker_batch.hicache_consumer_index)
 
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][tp_worker.forward_batch_generation][1] ForwardBatch.init_new begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"forward_mode={model_worker_batch.forward_mode} "
+                    f"bs={len(model_worker_batch.seq_lens)} "
+                    f"seq_lens_sum={int(model_worker_batch.seq_lens_cpu.sum().item()) if hasattr(model_worker_batch, 'seq_lens_cpu') and model_worker_batch.seq_lens_cpu is not None else 'NA'}",
+                    flush=True,
+                )
             forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][tp_worker.forward_batch_generation][2] ForwardBatch.init_new end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"forward_mode={forward_batch.forward_mode} "
+                    f"global_num_tokens_cpu={forward_batch.global_num_tokens_cpu}",
+                    flush=True,
+                )
         else:
             # FIXME(lsyin): unify the interface of forward_batch
             assert forward_batch is not None
@@ -451,11 +479,25 @@ class TpModelWorker(BaseTpWorker):
             return self._forward_batch_generation_dllm(forward_batch)
 
         if self.pp_group.is_last_rank:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][tp_worker.forward_batch_generation][3] model_runner.forward begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"forward_mode={forward_batch.forward_mode}",
+                    flush=True,
+                )
             out = self.model_runner.forward(
                 forward_batch,
                 pp_proxy_tensors=pp_proxy_tensors,
                 skip_attn_backend_init=skip_attn_backend_init,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][tp_worker.forward_batch_generation][4] model_runner.forward end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"can_run_cuda_graph={out.can_run_graph}",
+                    flush=True,
+                )
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
             batch_result = GenerationBatchResult(
                 logits_output=logits_output,
@@ -484,9 +526,21 @@ class TpModelWorker(BaseTpWorker):
 
             if not model_worker_batch.is_prefill_only:
                 # For normal requests, sample the next token ids.
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][tp_worker.forward_batch_generation][5] model_runner.sample begin "
+                        f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                        flush=True,
+                    )
                 batch_result.next_token_ids = self.model_runner.sample(
                     logits_output, forward_batch
                 )
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][tp_worker.forward_batch_generation][6] model_runner.sample end "
+                        f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                        flush=True,
+                    )
             else:
                 # For prefill-only requests, create dummy token IDs on CPU
                 # The size should match the batch size (number of sequences), not total tokens
@@ -500,17 +554,43 @@ class TpModelWorker(BaseTpWorker):
                     and logits_output.next_token_logits is not None
                 ):
                     # NOTE: Compute logprobs without full sampling
+                    if _debug_run_batch:
+                        print(
+                            "[DEBUG][tp_worker.forward_batch_generation][7] compute_logprobs_only begin "
+                            f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                            flush=True,
+                        )
                     self.model_runner.compute_logprobs_only(
                         logits_output, model_worker_batch
                     )
+                    if _debug_run_batch:
+                        print(
+                            "[DEBUG][tp_worker.forward_batch_generation][8] compute_logprobs_only end "
+                            f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                            flush=True,
+                        )
 
             return batch_result
         else:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][tp_worker.forward_batch_generation][9] model_runner.forward begin (pp non-last) "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"forward_mode={forward_batch.forward_mode}",
+                    flush=True,
+                )
             out = self.model_runner.forward(
                 forward_batch,
                 pp_proxy_tensors=pp_proxy_tensors,
                 skip_attn_backend_init=skip_attn_backend_init,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][tp_worker.forward_batch_generation][10] model_runner.forward end (pp non-last) "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"can_run_cuda_graph={out.can_run_graph}",
+                    flush=True,
+                )
             pp_proxy_tensors, can_run_cuda_graph = out.logits_output, out.can_run_graph
             return GenerationBatchResult(
                 pp_hidden_states_proxy_tensors=pp_proxy_tensors,
