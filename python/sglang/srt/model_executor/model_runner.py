@@ -2172,16 +2172,45 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         skip_attn_backend_init: bool = False,
         pp_proxy_tensors=None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
+        if _debug_run_batch:
+            print(
+                "[DEBUG][model_runner.forward_decode][0] enter "
+                f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                f"skip_attn_backend_init={skip_attn_backend_init} "
+                f"batch_size={forward_batch.batch_size} "
+                f"num_token_non_padded={forward_batch.num_token_non_padded}",
+                flush=True,
+            )
         if not skip_attn_backend_init:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner.forward_decode][1] init_forward_metadata begin "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank} "
+                    f"enable_pdmux={self.server_args.enable_pdmux}",
+                    flush=True,
+                )
             if self.server_args.enable_pdmux:
                 self.decode_attn_backend.init_forward_metadata(forward_batch)
                 forward_batch.attn_backend = self.decode_attn_backend
             else:
                 self.attn_backend.init_forward_metadata(forward_batch)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][model_runner.forward_decode][2] init_forward_metadata end "
+                    f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                    flush=True,
+                )
         # FIXME: add pp_proxy_tensors arg to all models
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
+        if _debug_run_batch:
+            print(
+                "[DEBUG][model_runner.forward_decode][3] model.forward begin "
+                f"pid={os.getpid()} tp_rank={self.tp_rank} pp_rank={self.pp_rank}",
+                flush=True,
+            )
         return self.model.forward(
             forward_batch.input_ids,
             forward_batch.positions,
