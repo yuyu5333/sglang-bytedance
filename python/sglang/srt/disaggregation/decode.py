@@ -1078,13 +1078,18 @@ class SchedulerDisaggregationDecodeMixin:
             )  # the requests which kv has arrived
 
             sparse_coordinator = get_sparse_coordinator()
+            print(f"[DEBUG] [process_decode_queue] 1")
             if sparse_coordinator is not None:
                 for req in alloc_reqs:
                     sparse_coordinator.on_request_begin(req)
                     sparse_coordinator.trigger_async_offload_prompt_cache(req)
                 # TODO(hzh): Support async offload later; Async offload will Cause IMA Issue
+                print(f"[DEBUG] [process_decode_queue] 2")
                 sparse_coordinator.check_prompt_offload_completion(
                     self.tree_cache, blocking=True
                 )
+                print(f"[DEBUG] [process_decode_queue] 3")
 
+            print(f"[DEBUG] [process_decode_queue] 4")
             self.waiting_queue.extend(alloc_reqs)
+            print(f"[DEBUG] [process_decode_queue] 5")
