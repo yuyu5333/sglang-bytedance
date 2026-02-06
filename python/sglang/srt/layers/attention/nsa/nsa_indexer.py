@@ -1135,8 +1135,24 @@ class Indexer(MultiPlatformOp):
             index_k_scale=k_scale,
         )
         if _debug_run_batch:
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][14.5] set_index_k_scale_buffer returned "
+                f"pid={os.getpid()}",
+                flush=True,
+            )
             if _debug_sync and (torch.cuda.is_available() or _is_hip):
-                torch.cuda.synchronize()
+                is_capturing = False
+                if get_is_capture_mode():
+                    is_capturing = True
+                elif hasattr(torch.cuda, "is_current_stream_capturing"):
+                    is_capturing = torch.cuda.is_current_stream_capturing()
+                if is_capturing:
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][15] skip cuda.synchronize due to cuda graph capture",
+                        flush=True,
+                    )
+                else:
+                    torch.cuda.synchronize()
             print(
                 "[DEBUG][nsa_indexer.forward_cuda][15] set_index_k_scale_buffer end "
                 f"pid={os.getpid()}",
@@ -1174,7 +1190,13 @@ class Indexer(MultiPlatformOp):
                 )
                 if _debug_run_batch:
                     if _debug_sync and (torch.cuda.is_available() or _is_hip):
-                        torch.cuda.synchronize()
+                        is_capturing = False
+                        if get_is_capture_mode():
+                            is_capturing = True
+                        elif hasattr(torch.cuda, "is_current_stream_capturing"):
+                            is_capturing = torch.cuda.is_current_stream_capturing()
+                        if not is_capturing:
+                            torch.cuda.synchronize()
                     print(
                         "[DEBUG][nsa_indexer.forward_cuda][17] _get_topk_paged end "
                         f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
@@ -1232,7 +1254,13 @@ class Indexer(MultiPlatformOp):
                     )
                     if _debug_run_batch:
                         if _debug_sync and (torch.cuda.is_available() or _is_hip):
-                            torch.cuda.synchronize()
+                            is_capturing = False
+                            if get_is_capture_mode():
+                                is_capturing = True
+                            elif hasattr(torch.cuda, "is_current_stream_capturing"):
+                                is_capturing = torch.cuda.is_current_stream_capturing()
+                            if not is_capturing:
+                                torch.cuda.synchronize()
                         print(
                             "[DEBUG][nsa_indexer.forward_cuda][19] _get_topk_ragged end "
                             f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",

@@ -290,6 +290,11 @@ class SetS:
 class SetKAndS:
     @classmethod
     def execute(cls, *args, buf, **kwargs):
+        import os
+
+        if os.environ.get("SGLANG_NSA_SETKS_VANILLA", "0") != "0":
+            return cls.vanilla(*args, **kwargs, buf=buf)
+
         if 0:
             # print("SetK, SetS comparison test")
             buf_cloned = buf.clone()
