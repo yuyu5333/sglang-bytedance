@@ -903,6 +903,8 @@ class Indexer(MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
+        import os
+
         if _is_hip:
             from sglang.srt.layers.attention.nsa.tilelang_kernel import act_quant
         elif not _is_npu:
@@ -911,6 +913,27 @@ class Indexer(MultiPlatformOp):
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
 
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
+        _debug_sync = os.environ.get("SGLANG_DEBUG_RUN_BATCH_SYNC", "0") != "0"
+        if _debug_run_batch:
+            try:
+                import torch.distributed as _dist
+
+                _rank = (
+                    _dist.get_rank() if _dist.is_available() and _dist.is_initialized() else None
+                )
+            except Exception:
+                _rank = None
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][0] enter "
+                f"pid={os.getpid()} rank={_rank} "
+                f"layer_id={layer_id} forward_mode={forward_batch.forward_mode} "
+                f"return_indices={return_indices} "
+                f"x_is_tuple={isinstance(x, tuple)} q_lora_shape={tuple(q_lora.shape)} "
+                f"positions_shape={tuple(positions.shape)}",
+                flush=True,
+            )
+
         # When upstream uses fused FP8 RMSNorm+quant, activations may be passed as
         # a tuple like (x_fp8, x_scale[, y]). Use `x_meta` for shape/device queries.
         x_meta = x[0] if isinstance(x, tuple) else x
@@ -918,6 +941,12 @@ class Indexer(MultiPlatformOp):
         metadata = forward_batch.attn_backend.get_indexer_metadata(
             layer_id, forward_batch
         )
+        if _debug_run_batch:
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][1] got metadata "
+                f"pid={os.getpid()} layer_id={layer_id} metadata_is_none={metadata is None}",
+                flush=True,
+            )
 
         enable_dual_stream = (
             self.alt_stream is not None
@@ -937,9 +966,23 @@ class Indexer(MultiPlatformOp):
             if forward_batch.seq_lens_cpu is not None:
                 max_kv_len = forward_batch.seq_lens_cpu.max().item()
                 skip_logits_computation = max_kv_len <= self.index_topk
+        if _debug_run_batch:
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][2] decisions "
+                f"pid={os.getpid()} enable_dual_stream={enable_dual_stream} "
+                f"skip_logits_computation={skip_logits_computation} "
+                f"nsa_enable_prefill_cp={self.nsa_enable_prefill_cp}",
+                flush=True,
+            )
 
         # Optimization: fast path when skipping topk computation
         if skip_logits_computation and (not self.nsa_enable_prefill_cp):
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][3] fast_path _forward_cuda_k_only begin "
+                    f"pid={os.getpid()} layer_id={layer_id}",
+                    flush=True,
+                )
             return self._forward_cuda_k_only(
                 x,
                 positions,
@@ -954,19 +997,55 @@ class Indexer(MultiPlatformOp):
         if enable_dual_stream and forward_batch.forward_mode.is_decode_or_idle():
             current_stream = torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][4] dual_stream decode: _project_and_scale_head_gates begin "
+                    f"pid={os.getpid()}",
+                    flush=True,
+                )
             weights = self._project_and_scale_head_gates(x)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][5] dual_stream decode: _project_and_scale_head_gates end "
+                    f"pid={os.getpid()}",
+                    flush=True,
+                )
             with torch.cuda.stream(self.alt_stream):
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][6] dual_stream decode: _get_q_k_bf16 begin "
+                        f"pid={os.getpid()}",
+                        flush=True,
+                    )
                 query, key = self._get_q_k_bf16(
                     q_lora, x, positions, False, forward_batch=forward_batch
                 )
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][7] dual_stream decode: _get_q_k_bf16 end "
+                        f"pid={os.getpid()}",
+                        flush=True,
+                    )
                 q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
             current_stream.wait_stream(self.alt_stream)
             weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         else:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][8] _get_q_k_bf16 begin "
+                    f"pid={os.getpid()} enable_dual_stream={enable_dual_stream}",
+                    flush=True,
+                )
             query, key = self._get_q_k_bf16(
                 q_lora, x, positions, enable_dual_stream, forward_batch=forward_batch
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][9] _get_q_k_bf16 end "
+                    f"pid={os.getpid()} query_shape={tuple(query.shape)} key_shape={tuple(key.shape)}",
+                    flush=True,
+                )
 
             if enable_dual_stream:
                 current_stream = torch.cuda.current_stream()
@@ -977,8 +1056,20 @@ class Indexer(MultiPlatformOp):
                     k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
                 current_stream.wait_stream(self.alt_stream)
             else:
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][10] act_quant begin "
+                        f"pid={os.getpid()}",
+                        flush=True,
+                    )
                 q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][11] act_quant end "
+                        f"pid={os.getpid()} q_fp8_shape={tuple(q_fp8.shape)} k_fp8_shape={tuple(k_fp8.shape)}",
+                        flush=True,
+                    )
 
             # `_get_logits_head_gate` expects a Tensor. For tuple activations, dequantize
             # to a float tensor here (callsite), keeping `_get_logits_head_gate` backend-agnostic.
@@ -1012,19 +1103,45 @@ class Indexer(MultiPlatformOp):
             else:
                 x_for_gate = x
 
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][12] _get_logits_head_gate begin "
+                    f"pid={os.getpid()} x_for_gate_shape={tuple(x_for_gate.shape)}",
+                    flush=True,
+                )
             weights = self._get_logits_head_gate(x_for_gate, q_scale)
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][13] _get_logits_head_gate end "
+                    f"pid={os.getpid()} weights_shape={tuple(weights.shape)}",
+                    flush=True,
+                )
 
         # k_fp8: (seq_len, head_dim) fp8_e4m3fn
         # k_buffer: (num_total_tokens + page_size, head_dim) fp8_e4m3fn
         # k_scale: (seq_len, head_dim // block_size = 1) fp8_e4m3fn
         # k_scale_cache: (num_total_tokens + page_size, head_dim // block_size = 1) fp8_e4m3fn
         index_loc = self._get_indexer_out_cache_loc(forward_batch)
+        if _debug_run_batch:
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][14] set_index_k_scale_buffer begin "
+                f"pid={os.getpid()} index_loc_shape={tuple(index_loc.shape)}",
+                flush=True,
+            )
         forward_batch.token_to_kv_pool.set_index_k_scale_buffer(
             layer_id=layer_id,
             loc=index_loc,
             index_k=k_fp8,
             index_k_scale=k_scale,
         )
+        if _debug_run_batch:
+            if _debug_sync and (torch.cuda.is_available() or _is_hip):
+                torch.cuda.synchronize()
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][15] set_index_k_scale_buffer end "
+                f"pid={os.getpid()}",
+                flush=True,
+            )
 
         if _is_cuda or _is_hip:
             assert forward_batch.seq_lens_cpu is not None
@@ -1046,9 +1163,23 @@ class Indexer(MultiPlatformOp):
                 or forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend(include_v2=True)
             ):
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][16] _get_topk_paged begin "
+                        f"pid={os.getpid()}",
+                        flush=True,
+                    )
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
+                if _debug_run_batch:
+                    if _debug_sync and (torch.cuda.is_available() or _is_hip):
+                        torch.cuda.synchronize()
+                    print(
+                        "[DEBUG][nsa_indexer.forward_cuda][17] _get_topk_paged end "
+                        f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
+                        flush=True,
+                    )
             else:
                 if (
                     forward_batch.nsa_cp_metadata is not None
@@ -1090,10 +1221,30 @@ class Indexer(MultiPlatformOp):
                     )
                     return torch.cat([topk_result_prev, topk_result_next], dim=0)
                 else:
+                    if _debug_run_batch:
+                        print(
+                            "[DEBUG][nsa_indexer.forward_cuda][18] _get_topk_ragged begin "
+                            f"pid={os.getpid()}",
+                            flush=True,
+                        )
                     topk_result = self._get_topk_ragged(
                         forward_batch, layer_id, q_fp8, weights, metadata
                     )
+                    if _debug_run_batch:
+                        if _debug_sync and (torch.cuda.is_available() or _is_hip):
+                            torch.cuda.synchronize()
+                        print(
+                            "[DEBUG][nsa_indexer.forward_cuda][19] _get_topk_ragged end "
+                            f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
+                            flush=True,
+                        )
         else:
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][20] forward_indexer begin "
+                    f"pid={os.getpid()}",
+                    flush=True,
+                )
             topk_result = self.forward_indexer(
                 q_fp8.contiguous(),
                 weights,
@@ -1101,6 +1252,12 @@ class Indexer(MultiPlatformOp):
                 topk=self.index_topk,
                 layer_id=layer_id,
             )
+            if _debug_run_batch:
+                print(
+                    "[DEBUG][nsa_indexer.forward_cuda][21] forward_indexer end "
+                    f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
+                    flush=True,
+                )
         return topk_result
 
     def forward_npu(
