@@ -1816,6 +1816,30 @@ class NSATokenToKVPool(MLATokenToKVPool):
         index_k_scale: torch.Tensor,
     ) -> None:
         buf = self.index_k_with_scale_buffer[layer_id - self.start_layer]
+        if os.environ.get("SGLANG_DEBUG_NSA_SETKS", "0") != "0":
+            max_loc = buf.shape[0] * self.page_size - 1
+            try:
+                loc_min = int(loc.min().item()) if loc.numel() > 0 else None
+                loc_max = int(loc.max().item()) if loc.numel() > 0 else None
+            except Exception:
+                loc_min, loc_max = None, None
+            print(
+                "[DEBUG][set_index_k_scale_buffer] "
+                f"pid={os.getpid()} layer_id={layer_id} "
+                f"buf_shape={tuple(buf.shape)} page_size={self.page_size} max_loc={max_loc} "
+                f"loc_dtype={loc.dtype} loc_shape={tuple(loc.shape)} loc_min={loc_min} loc_max={loc_max} "
+                f"index_k_dtype={index_k.dtype} index_k_shape={tuple(index_k.shape)} "
+                f"index_k_scale_dtype={index_k_scale.dtype} index_k_scale_shape={tuple(index_k_scale.shape)}",
+                flush=True,
+            )
+            if (
+                os.environ.get("SGLANG_DEBUG_NSA_LOC_BOUNDS_CHECK", "0") != "0"
+                and loc.numel() > 0
+                and (loc_min is None or loc_max is None or loc_min < 0 or loc_max > max_loc)
+            ):
+                raise RuntimeError(
+                    f"NSA index_k loc out of bounds: loc_min={loc_min} loc_max={loc_max} max_loc={max_loc}"
+                )
         index_buf_accessor.SetKAndS.execute(
             pool=self, buf=buf, loc=loc, index_k=index_k, index_k_scale=index_k_scale
         )

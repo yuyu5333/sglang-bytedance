@@ -933,6 +933,23 @@ class Indexer(MultiPlatformOp):
                 f"positions_shape={tuple(positions.shape)}",
                 flush=True,
             )
+        if (
+            _debug_run_batch
+            and _debug_sync
+            and os.environ.get("SGLANG_DEBUG_RUN_BATCH_SYNC_PRE", "0") != "0"
+            and (torch.cuda.is_available() or _is_hip)
+        ):
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][0.5] pre-synchronize begin "
+                f"pid={os.getpid()} scope=current",
+                flush=True,
+            )
+            torch.cuda.current_stream().synchronize()
+            print(
+                "[DEBUG][nsa_indexer.forward_cuda][0.6] pre-synchronize end "
+                f"pid={os.getpid()}",
+                flush=True,
+            )
 
         # When upstream uses fused FP8 RMSNorm+quant, activations may be passed as
         # a tuple like (x_fp8, x_scale[, y]). Use `x_meta` for shape/device queries.
