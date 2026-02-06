@@ -343,6 +343,8 @@ class Indexer(MultiPlatformOp):
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
 
+        import os
+
         page_size = forward_batch.token_to_kv_pool.page_size
         # NOTE(dark): blocksize = 64 is hardcoded in deep_gemm
         if _is_hip:
@@ -357,6 +359,39 @@ class Indexer(MultiPlatformOp):
         kv_cache_fp8 = forward_batch.token_to_kv_pool.get_index_k_with_scale_buffer(
             layer_id=layer_id
         )
+        if os.environ.get("SGLANG_DEBUG_NSA_BLOCK_TABLE_CHECK", "0") != "0":
+            try:
+                bt_min = int(block_tables.min().item()) if block_tables.numel() > 0 else None
+                bt_max = int(block_tables.max().item()) if block_tables.numel() > 0 else None
+            except Exception:
+                bt_min, bt_max = None, None
+            max_page = int(kv_cache_fp8.shape[0] - 1)
+            print(
+                "[DEBUG][_get_topk_paged] "
+                f"pid={os.getpid()} layer_id={layer_id} "
+                f"page_size={page_size} "
+                f"block_tables_shape={tuple(block_tables.shape)} bt_min={bt_min} bt_max={bt_max} "
+                f"kv_cache_pages={kv_cache_fp8.shape[0]} max_page={max_page} "
+                f"max_seq_len={max_seq_len}",
+                flush=True,
+            )
+            if (
+                os.environ.get("SGLANG_DEBUG_NSA_BLOCK_TABLE_BOUNDS_CHECK", "0") != "0"
+                and block_tables.numel() > 0
+                and (
+                    bt_min is None
+                    or bt_max is None
+                    or bt_min < 0
+                    or bt_max > max_page
+                )
+            ):
+                raise RuntimeError(
+                    f"NSA block_tables out of bounds: bt_min={bt_min} bt_max={bt_max} max_page={max_page}"
+                )
+
+        if os.environ.get("SGLANG_NSA_CLAMP_INVALID_BLOCK_TABLES", "0") != "0":
+            max_page = kv_cache_fp8.shape[0] - 1
+            block_tables = block_tables.clamp_(0, max_page)
 
         blocksize = page_size
         if (
