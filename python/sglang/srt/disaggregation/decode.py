@@ -892,14 +892,10 @@ class SchedulerDisaggregationDecodeMixin:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
             # polling and allocating kv cache
-            print(f"[DEBUG] [event_loop_normal_disagg_decode] 1")
             self.process_decode_queue()
-            print(f"[DEBUG] [event_loop_normal_disagg_decode] 2")
 
             # Get the next batch to run
-            print(f"[DEBUG] [event_loop_normal_disagg_decode] 3")
             batch = self.get_next_disagg_decode_batch_to_run()
-            print(f"[DEBUG] [event_loop_normal_disagg_decode] 4")
             self.cur_batch = batch
 
             # Launch the current batch
