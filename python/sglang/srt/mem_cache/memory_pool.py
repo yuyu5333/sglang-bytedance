@@ -1816,6 +1816,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
         index_k_scale: torch.Tensor,
     ) -> None:
         buf = self.index_k_with_scale_buffer[layer_id - self.start_layer]
+        import os
         if os.environ.get("SGLANG_DEBUG_NSA_SETKS", "0") != "0":
             max_loc = buf.shape[0] * self.page_size - 1
             try:
