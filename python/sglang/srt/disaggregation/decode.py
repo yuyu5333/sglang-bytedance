@@ -892,19 +892,27 @@ class SchedulerDisaggregationDecodeMixin:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
             # polling and allocating kv cache
+            print(f"[DEBUG] [event_loop_normal_disagg_decode] 1")
             self.process_decode_queue()
+            print(f"[DEBUG] [event_loop_normal_disagg_decode] 2")
 
             # Get the next batch to run
+            print(f"[DEBUG] [event_loop_normal_disagg_decode] 3")
             batch = self.get_next_disagg_decode_batch_to_run()
+            print(f"[DEBUG] [event_loop_normal_disagg_decode] 4")
             self.cur_batch = batch
 
             # Launch the current batch
             if batch:
+                print(f"[DEBUG] [event_loop_normal_disagg_decode] 5")
                 result = self.run_batch(batch)
+                print(f"[DEBUG] [event_loop_normal_disagg_decode] 6")
                 self.process_batch_result(batch, result)
+                print(f"[DEBUG] [event_loop_normal_disagg_decode] 7")
             else:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
+            print(f"[DEBUG] [event_loop_normal_disagg_decode] 8")
 
             # Update last_batch
             self.last_batch = batch
@@ -1078,18 +1086,13 @@ class SchedulerDisaggregationDecodeMixin:
             )  # the requests which kv has arrived
 
             sparse_coordinator = get_sparse_coordinator()
-            print(f"[DEBUG] [process_decode_queue] 1")
             if sparse_coordinator is not None:
                 for req in alloc_reqs:
                     sparse_coordinator.on_request_begin(req)
                     sparse_coordinator.trigger_async_offload_prompt_cache(req)
                 # TODO(hzh): Support async offload later; Async offload will Cause IMA Issue
-                print(f"[DEBUG] [process_decode_queue] 2")
                 sparse_coordinator.check_prompt_offload_completion(
                     self.tree_cache, blocking=True
                 )
-                print(f"[DEBUG] [process_decode_queue] 3")
 
-            print(f"[DEBUG] [process_decode_queue] 4")
             self.waiting_queue.extend(alloc_reqs)
-            print(f"[DEBUG] [process_decode_queue] 5")
