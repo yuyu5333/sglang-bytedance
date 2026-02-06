@@ -522,6 +522,9 @@ class SparseCoordinator:
 
             if len(free_indices) > 0:
                 tree_cache.token_to_kv_pool_allocator.free(free_indices)
+                req_to_token_pool.req_to_token[
+                    req.req_pool_idx, free_start:allocated_len
+                ] = -1
 
             logger.info(
                 f"Token-wise truncated req {req.req_pool_idx}: allocated={allocated_len} -> {kv_keep_len}, freed [{free_start}:{allocated_len}]"
