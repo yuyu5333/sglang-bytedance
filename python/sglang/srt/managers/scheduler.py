@@ -2252,28 +2252,63 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
+        _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
+        if _debug_run_batch:
+            print(
+                "[DEBUG][run_batch][0] "
+                f"forward_ct={self.forward_ct} "
+                f"forward_mode={batch.forward_mode} "
+                f"is_generation={self.is_generation} "
+                f"enable_overlap={self.enable_overlap} "
+                f"enable_pdmux={self.enable_pdmux} "
+                f"spec_algorithm={type(self.spec_algorithm).__name__}",
+                flush=True,
+            )
 
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
+        if _debug_run_batch:
+            print("[DEBUG][run_batch][1] after _profile_batch_predicate", flush=True)
         if self.forward_sleep_time is not None:
             logger.info(f"Scheduler.run_batch sleep {self.forward_sleep_time}s")
+            if _debug_run_batch:
+                print(
+                    f"[DEBUG][run_batch][2] sleep {self.forward_sleep_time}s begin",
+                    flush=True,
+                )
             time.sleep(self.forward_sleep_time)
+            if _debug_run_batch:
+                print("[DEBUG][run_batch][3] sleep end", flush=True)
 
         # Capture prefill start time for EXTEND mode
         if batch.forward_mode == ForwardMode.EXTEND:
             current_time = time.perf_counter()
             for req in batch.reqs:
                 req.time_stats.prefill_start_time_host = current_time
+            if _debug_run_batch:
+                print("[DEBUG][run_batch][4] EXTEND set prefill_start_time_host", flush=True)
 
         # Place holder handling for pd-disagg decode event loop
         if batch.forward_mode.is_prebuilt():
+            if _debug_run_batch:
+                print("[DEBUG][run_batch][5] is_prebuilt -> _run_batch_prebuilt", flush=True)
             return self._run_batch_prebuilt(batch)
 
         # Run forward
         if self.is_generation:
             if self.spec_algorithm.is_none() or self.enable_overlap:
                 # In most cases, we use the model worker batch to run the forward.
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][run_batch][6] get_model_worker_batch begin",
+                        flush=True,
+                    )
                 worker_batch_or_batch = batch.get_model_worker_batch()
+                if _debug_run_batch:
+                    print(
+                        "[DEBUG][run_batch][7] get_model_worker_batch end",
+                        flush=True,
+                    )
             else:
                 # In speculative decoding v1 (non-overlap) case, we use the batch directly.
                 # TODO(lsyin): delete this branch after unifying the abstraction.
@@ -2281,31 +2316,57 @@ class Scheduler(
 
             if self.enable_overlap:
                 model_worker_batch = worker_batch_or_batch
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][8] enable_overlap record_batch_in_overlap begin", flush=True)
                 self.record_batch_in_overlap(model_worker_batch)
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][9] enable_overlap record_batch_in_overlap end", flush=True)
 
                 # Sampling info will be modified during forward, so we store a copy.
                 model_worker_batch.sampling_info = (
                     model_worker_batch.sampling_info.copy_for_forward()
                 )
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][10] enable_overlap copy_for_forward done", flush=True)
 
                 bs = len(model_worker_batch.seq_lens)
+                if _debug_run_batch:
+                    print(f"[DEBUG][run_batch][11] enable_overlap bs={bs} alloc_future_indices begin", flush=True)
                 future_indices = self.future_map.alloc_future_indices(bs)
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][12] enable_overlap alloc_future_indices end", flush=True)
 
                 with self.forward_stream_ctx:
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][13] enable_overlap forward_stream_ctx enter", flush=True)
                     self.forward_stream.wait_stream(self.default_stream)
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][14] enable_overlap wait_stream done", flush=True)
                     self.future_map.resolve_future(model_worker_batch)
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][15] enable_overlap resolve_future done", flush=True)
                     with self.record_forward_metrics(batch):
+                        if _debug_run_batch:
+                            print("[DEBUG][run_batch][16] enable_overlap forward_batch_generation begin", flush=True)
                         batch_result = self.model_worker.forward_batch_generation(
                             model_worker_batch
                             # here pp is not compatible with overlap
                         )
+                        if _debug_run_batch:
+                            print("[DEBUG][run_batch][17] enable_overlap forward_batch_generation end", flush=True)
                     # FIXME(lsyin): maybe move this to forward_batch_generation
                     batch_result.copy_done = self.device_module.Event()
                     if batch_result.delay_sample_func is None:
                         self.future_map.store_to_map(future_indices, batch_result)
+                        if _debug_run_batch:
+                            print("[DEBUG][run_batch][18] enable_overlap copy_to_cpu begin", flush=True)
                         batch_result.copy_to_cpu(return_logprob=batch.return_logprob)
+                        if _debug_run_batch:
+                            print("[DEBUG][run_batch][19] enable_overlap copy_to_cpu end", flush=True)
                     else:
                         batch_result.future_indices = future_indices
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][20] enable_overlap forward_stream_ctx exit", flush=True)
 
                 # FIXME(lsyin): move this assignment elsewhere
                 future_indices_or_next_token_ids = -future_indices.indices
@@ -2326,7 +2387,11 @@ class Scheduler(
                     # Current implementation strictly synchronizes the seq_lens
                     batch.seq_lens = batch_result.next_draft_input.new_seq_lens
             elif self.enable_pdmux and batch.forward_mode.is_split_prefill():
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][21] enable_pdmux split_prefill forward begin", flush=True)
                 batch_result = self.tp_worker.forward_batch_split_prefill(batch)
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][22] enable_pdmux split_prefill forward end", flush=True)
                 future_indices_or_next_token_ids = batch_result.next_token_ids
             else:
                 kwargs = (
@@ -2335,11 +2400,19 @@ class Scheduler(
                     else {}
                 )
                 with self.record_forward_metrics(batch):
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][23] forward_batch_generation begin", flush=True)
                     batch_result = self.model_worker.forward_batch_generation(
                         worker_batch_or_batch, **kwargs
                     )
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][24] forward_batch_generation end", flush=True)
                 future_indices_or_next_token_ids = batch_result.next_token_ids
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][25] update_cache_from_scheduler begin", flush=True)
                 self.update_cache_from_scheduler(batch, batch_result)
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][26] update_cache_from_scheduler end", flush=True)
 
             # NOTE: future_indices_or_next_token_ids is used in ScheduleBatch,
             #       which can probably be replaced by future_indices later [TODO(lsyin)].
@@ -2369,13 +2442,21 @@ class Scheduler(
                 self.record_batch_in_overlap(model_worker_batch)
                 with self.forward_stream_ctx:
                     self.forward_stream.wait_stream(self.default_stream)
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][27] embedding forward_batch_embedding begin", flush=True)
                     embeddings = self.tp_worker.forward_batch_embedding(
                         model_worker_batch
                     )
+                    if _debug_run_batch:
+                        print("[DEBUG][run_batch][28] embedding forward_batch_embedding end", flush=True)
                     ret = EmbeddingBatchResult(embeddings=embeddings)
                     ret.copy_to_cpu()
             else:
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][29] embedding forward_batch_embedding begin", flush=True)
                 embeddings = self.tp_worker.forward_batch_embedding(model_worker_batch)
+                if _debug_run_batch:
+                    print("[DEBUG][run_batch][30] embedding forward_batch_embedding end", flush=True)
                 ret = EmbeddingBatchResult(embeddings=embeddings)
 
         # Capture prefill end time for EXTEND mode
@@ -2383,6 +2464,8 @@ class Scheduler(
             current_time = time.perf_counter()
             for req in batch.reqs:
                 req.time_stats.prefill_end_time_host = current_time
+            if _debug_run_batch:
+                print("[DEBUG][run_batch][31] EXTEND set prefill_end_time_host", flush=True)
 
         if (
             self.server_args.enable_dp_attention
@@ -2397,6 +2480,8 @@ class Scheduler(
                 ActiveRanksOutput(status=dp_active_ranks.tolist())
             )
 
+        if _debug_run_batch:
+            print("[DEBUG][run_batch][32] return ret", flush=True)
         return ret
 
     def launch_batch_sample_if_needed(
