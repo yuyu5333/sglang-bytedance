@@ -114,8 +114,39 @@ class SparseKVCacheManager:
         Returns:
             Device indices of the selected pages/tokens
         """
+        import os
+
+        if os.environ.get("SGLANG_DISABLE_SPARSE_KV_SWAPIN", "0") != "0":
+            page_table_req = page_table[req_pool_indices]
+            indices = top_k_result.to(dtype=torch.int64)
+            if indices.numel() > 0:
+                indices = indices.clamp_(0, page_table_req.shape[1] - 1)
+            return torch.gather(page_table_req, dim=1, index=indices)
+
+        _debug = os.environ.get("SGLANG_DEBUG_SPARSE_SWAPIN", "0") != "0"
+        _debug_sync = os.environ.get("SGLANG_DEBUG_SPARSE_SWAPIN_SYNC", "0") != "0"
+
         bs = sparse_mask.shape[0]
         block_size = 512 if top_k_result.size(1) == 2048 else 32
+        if _debug:
+            try:
+                topk_min = int(top_k_result.min().item()) if top_k_result.numel() > 0 else None
+                topk_max = int(top_k_result.max().item()) if top_k_result.numel() > 0 else None
+            except Exception:
+                topk_min, topk_max = None, None
+            try:
+                mask_any = bool(sparse_mask.any().item())
+            except Exception:
+                mask_any = None
+            print(
+                "[DEBUG][SparseKVCacheManager.swap_in_selected_pages][0] begin "
+                f"pid={os.getpid()} layer_id={layer_id} bs={bs} page_size={page_size} "
+                f"sparse_mask_any={mask_any} "
+                f"topk_shape={tuple(top_k_result.shape)} topk_min={topk_min} topk_max={topk_max} "
+                f"seq_lens_max={int(seq_lens.max().item()) if seq_lens.numel() > 0 else None} "
+                f"page_table_shape={tuple(page_table.shape)}",
+                flush=True,
+            )
         if self.is_mla_pool:
             load_cache_to_device_buffer_mla(
                 top_k_tokens=top_k_result,
@@ -163,9 +194,28 @@ class SparseKVCacheManager:
                 block_size=block_size,
             )
 
+        if _debug and _debug_sync and torch.cuda.is_available():
+            print(
+                "[DEBUG][SparseKVCacheManager.swap_in_selected_pages][1] synchronize begin "
+                f"pid={os.getpid()} layer_id={layer_id}",
+                flush=True,
+            )
+            torch.cuda.current_stream().synchronize()
+            print(
+                "[DEBUG][SparseKVCacheManager.swap_in_selected_pages][2] synchronize end "
+                f"pid={os.getpid()} layer_id={layer_id}",
+                flush=True,
+            )
+
         result = self.req_states.curr_device_indices[
             :bs, : self.req_states.topk_tokens_cnt // page_size
         ]
+        if _debug:
+            print(
+                "[DEBUG][SparseKVCacheManager.swap_in_selected_pages][3] return "
+                f"pid={os.getpid()} layer_id={layer_id} result_shape={tuple(result.shape)}",
+                flush=True,
+            )
         return result
 
     def offload_decode_token_kvcache(
