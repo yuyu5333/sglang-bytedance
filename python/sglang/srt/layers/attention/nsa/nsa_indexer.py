@@ -433,7 +433,8 @@ class Indexer(MultiPlatformOp):
         assert len(weights.shape) == 3
         weights = weights.squeeze(2)
 
-        if os.environ.get("SGLANG_DEBUG_NSA_TOPK_STEPS", "0") != "0":
+        _debug_topk_steps = os.environ.get("SGLANG_DEBUG_NSA_TOPK_STEPS", "0") != "0"
+        if _debug_topk_steps:
             schedule_is_none = getattr(metadata, "paged_mqa_schedule_metadata", None) is None
             print(
                 "[DEBUG][_get_topk_paged][0] before deep_gemm "
