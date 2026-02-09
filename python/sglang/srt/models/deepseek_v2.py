@@ -1646,15 +1646,16 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                     and torch.cuda.is_available()
                     and os.environ.get("SGLANG_DEBUG_DEEPSEEK_NSA_SYNC_PRE", "0") != "0"
                 ):
+                    stream_ptr = int(torch.cuda.current_stream().cuda_stream)
                     print(
                         "[DEBUG][deepseek_v2.forward_absorb_prepare][1.2] pre-indexer synchronize begin "
-                        f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                        f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} stream={stream_ptr}",
                         flush=True,
                     )
                     torch.cuda.current_stream().synchronize()
                     print(
                         "[DEBUG][deepseek_v2.forward_absorb_prepare][1.3] pre-indexer synchronize end "
-                        f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                        f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} stream={stream_ptr}",
                         flush=True,
                     )
 
@@ -1713,15 +1714,16 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                         and os.environ.get("SGLANG_DEBUG_DEEPSEEK_NSA_SYNC_PRE", "0")
                         != "0"
                     ):
+                        stream_ptr = int(torch.cuda.current_stream().cuda_stream)
                         print(
                             "[DEBUG][deepseek_v2.forward_absorb_prepare][1.2] pre-indexer synchronize begin "
-                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} stream={stream_ptr}",
                             flush=True,
                         )
                         torch.cuda.current_stream().synchronize()
                         print(
                             "[DEBUG][deepseek_v2.forward_absorb_prepare][1.3] pre-indexer synchronize end "
-                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} stream={stream_ptr}",
                             flush=True,
                         )
                     if (
@@ -1756,15 +1758,36 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                             flush=True,
                         )
                         if _debug_sync and torch.cuda.is_available():
+                            stream_ptr = int(torch.cuda.current_stream().cuda_stream)
                             print(
                                 "[DEBUG][deepseek_v2.forward_absorb_prepare][1.5] post-indexer synchronize begin "
-                                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} stream={stream_ptr}",
                                 flush=True,
                             )
-                            torch.cuda.current_stream().synchronize()
+                            stream = torch.cuda.current_stream()
+                            stream = torch.cuda.current_stream()
+                            timeout_ms = int(
+                                os.environ.get("SGLANG_DEBUG_SYNC_TIMEOUT_MS", "0")
+                            )
+                            if timeout_ms > 0:
+                                import time
+
+                                t0 = time.time()
+                                while not stream.query():
+                                    if (time.time() - t0) * 1000.0 > timeout_ms:
+                                        print(
+                                            "[DEBUG][deepseek_v2.forward_absorb_prepare][1.55] post-indexer synchronize timeout "
+                                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} timeout_ms={timeout_ms}",
+                                            flush=True,
+                                        )
+                                        raise RuntimeError(
+                                            f"post-indexer stream synchronize timeout: rank={_rank} layer_id={self.layer_id}"
+                                        )
+                                    time.sleep(0.01)
+                            stream.synchronize()
                             print(
                                 "[DEBUG][deepseek_v2.forward_absorb_prepare][1.6] post-indexer synchronize end "
-                                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id} stream={stream_ptr}",
                                 flush=True,
                             )
         else:

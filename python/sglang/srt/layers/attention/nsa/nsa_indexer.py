@@ -1308,15 +1308,23 @@ class Indexer(MultiPlatformOp):
                             sync_scope = os.environ.get(
                                 "SGLANG_DEBUG_RUN_BATCH_SYNC_SCOPE", "device"
                             )
+                            stream_ptr = None
+                            if sync_scope == "current":
+                                stream_ptr = int(torch.cuda.current_stream().cuda_stream)
                             print(
                                 "[DEBUG][nsa_indexer.forward_cuda][17.6] synchronize begin "
-                                f"pid={os.getpid()} scope={sync_scope}",
+                                f"pid={os.getpid()} scope={sync_scope} stream={stream_ptr}",
                                 flush=True,
                             )
                             if sync_scope == "current":
                                 torch.cuda.current_stream().synchronize()
                             else:
                                 torch.cuda.synchronize()
+                            print(
+                                "[DEBUG][nsa_indexer.forward_cuda][17.7] synchronize end "
+                                f"pid={os.getpid()} scope={sync_scope} stream={stream_ptr}",
+                                flush=True,
+                            )
                     print(
                         "[DEBUG][nsa_indexer.forward_cuda][17] _get_topk_paged end "
                         f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
@@ -1383,15 +1391,23 @@ class Indexer(MultiPlatformOp):
                                 sync_scope = os.environ.get(
                                     "SGLANG_DEBUG_RUN_BATCH_SYNC_SCOPE", "device"
                                 )
+                                stream_ptr = None
+                                if sync_scope == "current":
+                                    stream_ptr = int(torch.cuda.current_stream().cuda_stream)
                                 print(
                                     "[DEBUG][nsa_indexer.forward_cuda][19.6] synchronize begin "
-                                    f"pid={os.getpid()} scope={sync_scope}",
+                                    f"pid={os.getpid()} scope={sync_scope} stream={stream_ptr}",
                                     flush=True,
                                 )
                                 if sync_scope == "current":
                                     torch.cuda.current_stream().synchronize()
                                 else:
                                     torch.cuda.synchronize()
+                                print(
+                                    "[DEBUG][nsa_indexer.forward_cuda][19.7] synchronize end "
+                                    f"pid={os.getpid()} scope={sync_scope} stream={stream_ptr}",
+                                    flush=True,
+                                )
                         print(
                             "[DEBUG][nsa_indexer.forward_cuda][19] _get_topk_ragged end "
                             f"pid={os.getpid()} topk_shape={tuple(topk_result.shape)}",
