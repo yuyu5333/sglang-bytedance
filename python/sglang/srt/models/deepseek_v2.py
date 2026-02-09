@@ -1641,6 +1641,24 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                     )
 
                 if (
+                    _debug_run_batch
+                    and _debug_sync
+                    and torch.cuda.is_available()
+                    and os.environ.get("SGLANG_DEBUG_DEEPSEEK_NSA_SYNC_PRE", "0") != "0"
+                ):
+                    print(
+                        "[DEBUG][deepseek_v2.forward_absorb_prepare][1.2] pre-indexer synchronize begin "
+                        f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                        flush=True,
+                    )
+                    torch.cuda.current_stream().synchronize()
+                    print(
+                        "[DEBUG][deepseek_v2.forward_absorb_prepare][1.3] pre-indexer synchronize end "
+                        f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                        flush=True,
+                    )
+
+                if (
                     forward_batch.forward_mode.is_decode()
                     and sparse_coordinator is not None
                 ):
@@ -1688,6 +1706,24 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                 k_nope = k_nope.unsqueeze(1)
                 q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
                 if q_lora is not None:
+                    if (
+                        _debug_run_batch
+                        and _debug_sync
+                        and torch.cuda.is_available()
+                        and os.environ.get("SGLANG_DEBUG_DEEPSEEK_NSA_SYNC_PRE", "0")
+                        != "0"
+                    ):
+                        print(
+                            "[DEBUG][deepseek_v2.forward_absorb_prepare][1.2] pre-indexer synchronize begin "
+                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                            flush=True,
+                        )
+                        torch.cuda.current_stream().synchronize()
+                        print(
+                            "[DEBUG][deepseek_v2.forward_absorb_prepare][1.3] pre-indexer synchronize end "
+                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
+                            flush=True,
+                        )
                     if (
                         forward_batch.forward_mode.is_decode()
                         and sparse_coordinator is not None
