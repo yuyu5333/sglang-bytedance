@@ -344,6 +344,12 @@ class Indexer(MultiPlatformOp):
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
 
         import os
+        try:
+            import torch.distributed as _dist
+
+            _rank = _dist.get_rank() if _dist.is_available() and _dist.is_initialized() else None
+        except Exception:
+            _rank = None
 
         page_size = forward_batch.token_to_kv_pool.page_size
         # NOTE(dark): blocksize = 64 is hardcoded in deep_gemm
@@ -368,7 +374,7 @@ class Indexer(MultiPlatformOp):
             max_page = int(kv_cache_fp8.shape[0] - 1)
             print(
                 "[DEBUG][_get_topk_paged] "
-                f"pid={os.getpid()} layer_id={layer_id} "
+                f"pid={os.getpid()} rank={_rank} layer_id={layer_id} "
                 f"page_size={page_size} "
                 f"block_tables_shape={tuple(block_tables.shape)} bt_min={bt_min} bt_max={bt_max} "
                 f"kv_cache_pages={kv_cache_fp8.shape[0]} max_page={max_page} "
@@ -427,6 +433,18 @@ class Indexer(MultiPlatformOp):
         assert len(weights.shape) == 3
         weights = weights.squeeze(2)
 
+        if os.environ.get("SGLANG_DEBUG_NSA_TOPK_STEPS", "0") != "0":
+            schedule_is_none = getattr(metadata, "paged_mqa_schedule_metadata", None) is None
+            print(
+                "[DEBUG][_get_topk_paged][0] before deep_gemm "
+                f"pid={os.getpid()} rank={_rank} layer_id={layer_id} "
+                f"schedule_is_none={schedule_is_none} "
+                f"q_fp8_shape={tuple(q_fp8.shape)} weights_shape={tuple(weights.shape)} "
+                f"kv_cache_fp8_shape={tuple(kv_cache_fp8.shape)} block_tables_shape={tuple(block_tables.shape)} "
+                f"max_seq_len={max_seq_len}",
+                flush=True,
+            )
+
         if _is_hip:
             from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits
 
@@ -452,6 +470,12 @@ class Indexer(MultiPlatformOp):
                 WavePerEU=5,
             )
         else:
+            if _debug_topk_steps:
+                print(
+                    "[DEBUG][_get_topk_paged][1] deep_gemm.fp8_paged_mqa_logits begin "
+                    f"pid={os.getpid()} rank={_rank} layer_id={layer_id}",
+                    flush=True,
+                )
             logits = deep_gemm.fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -462,9 +486,29 @@ class Indexer(MultiPlatformOp):
                 max_seq_len,
                 clean_logits=False,
             )
+            if _debug_topk_steps:
+                print(
+                    "[DEBUG][_get_topk_paged][2] deep_gemm.fp8_paged_mqa_logits end "
+                    f"pid={os.getpid()} rank={_rank} layer_id={layer_id} "
+                    f"logits_shape={tuple(logits.shape)}",
+                    flush=True,
+                )
 
         # NOTE(dark): logits should be cleaned in topk_transform
+        if _debug_topk_steps:
+            print(
+                "[DEBUG][_get_topk_paged][3] topk_transform begin "
+                f"pid={os.getpid()} rank={_rank} layer_id={layer_id}",
+                flush=True,
+            )
         topk_result = metadata.topk_transform(logits, self.index_topk)
+        if _debug_topk_steps:
+            print(
+                "[DEBUG][_get_topk_paged][4] topk_transform end "
+                f"pid={os.getpid()} rank={_rank} layer_id={layer_id} "
+                f"topk_shape={tuple(topk_result.shape)}",
+                flush=True,
+            )
         return topk_result
 
     def _should_chunk_mqa_logits(
@@ -950,6 +994,7 @@ class Indexer(MultiPlatformOp):
 
         _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
         _debug_sync = os.environ.get("SGLANG_DEBUG_RUN_BATCH_SYNC", "0") != "0"
+        _debug_topk_steps = os.environ.get("SGLANG_DEBUG_NSA_TOPK_STEPS", "0") != "0"
         if _debug_run_batch:
             try:
                 import torch.distributed as _dist

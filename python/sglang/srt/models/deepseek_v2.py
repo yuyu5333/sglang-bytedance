@@ -1531,6 +1531,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
 
         _debug_run_batch = os.environ.get("SGLANG_DEBUG_RUN_BATCH", "0") != "0"
         _debug_sync = os.environ.get("SGLANG_DEBUG_DEEPSEEK_NSA_SYNC", "0") != "0"
+        _rank = None
         if _debug_run_batch:
             try:
                 import torch.distributed as _dist
@@ -1673,13 +1674,13 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                     if _debug_sync and torch.cuda.is_available():
                         print(
                             "[DEBUG][deepseek_v2.forward_absorb_prepare][1.5] post-indexer synchronize begin "
-                            f"pid={os.getpid()}",
+                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
                             flush=True,
                         )
                         torch.cuda.current_stream().synchronize()
                         print(
                             "[DEBUG][deepseek_v2.forward_absorb_prepare][1.6] post-indexer synchronize end "
-                            f"pid={os.getpid()}",
+                            f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
                             flush=True,
                         )
                 current_stream.wait_stream(self.alt_stream)
@@ -1721,13 +1722,13 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                         if _debug_sync and torch.cuda.is_available():
                             print(
                                 "[DEBUG][deepseek_v2.forward_absorb_prepare][1.5] post-indexer synchronize begin "
-                                f"pid={os.getpid()}",
+                                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
                                 flush=True,
                             )
                             torch.cuda.current_stream().synchronize()
                             print(
                                 "[DEBUG][deepseek_v2.forward_absorb_prepare][1.6] post-indexer synchronize end "
-                                f"pid={os.getpid()}",
+                                f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
                                 flush=True,
                             )
         else:
@@ -1834,13 +1835,13 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
             if _debug_sync and torch.cuda.is_available():
                 print(
                     "[DEBUG][deepseek_v2.forward_absorb_prepare][2.5] pre-return synchronize begin "
-                    f"pid={os.getpid()}",
+                    f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
                     flush=True,
                 )
                 torch.cuda.current_stream().synchronize()
                 print(
                     "[DEBUG][deepseek_v2.forward_absorb_prepare][2.6] pre-return synchronize end "
-                    f"pid={os.getpid()}",
+                    f"pid={os.getpid()} rank={_rank} layer_id={self.layer_id}",
                     flush=True,
                 )
         return (
