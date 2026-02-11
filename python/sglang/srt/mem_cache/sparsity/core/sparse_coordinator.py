@@ -451,7 +451,7 @@ class SparseCoordinator:
                 page_size=self.page_size,
                 layer_id=layer.layer_id,
             )
-        return (selected_indices, result)
+        return (result, selected_indices)
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(
         self, req: "Req", req_to_token_pool, tree_cache

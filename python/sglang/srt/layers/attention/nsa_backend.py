@@ -1482,7 +1482,7 @@ class NativeSparseAttnBackend(
 
         # Align topk_indices with q dimensions
         # return (selected_indices, result)
-        selected_indices, topk_indices_return = topk_indices
+        topk_indices_return, selected_indices = topk_indices
         # padding
         print(f"[DEBUG] [forward_decode] topk_indices_return.shape: {topk_indices_return.shape}")
         print(f"[DEBUG] [forward_decode] selected_indices.shape: {selected_indices.shape}")
@@ -1504,10 +1504,10 @@ class NativeSparseAttnBackend(
             if use_hierarchical_nsa:
                 # return (selected_indices, result)
                 # selected_indices is topk_indices, result is page_table_1
-                page_table_1 = selected_indices
+                page_table_1 = topk_indices_return
                 page_table_2 = transform_index_page_table_decode(
                     page_table=metadata.page_table_1,
-                    topk_indices=topk_indices_return,
+                    topk_indices=selected_indices,
                     page_size=1,
                 )
                 print(f"[DEBUG] [forward_decode] page_table_1.shape: {page_table_1.shape}")
