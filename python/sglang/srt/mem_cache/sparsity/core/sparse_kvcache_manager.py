@@ -162,7 +162,6 @@ class SparseKVCacheManager:
                 item_size_bytes=self.mem_pool_host.token_stride_size,
                 block_size=block_size,
             )
-        return result
         result = self.req_states.curr_device_indices[
             :bs, : self.req_states.topk_tokens_cnt // page_size
         ]
