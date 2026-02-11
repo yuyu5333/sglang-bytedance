@@ -440,7 +440,7 @@ class SparseCoordinator:
             **kwargs,
         )
 
-        if torch.all(~sparse_mask).item():
+        if False and torch.all(~sparse_mask).item():
             from sglang.srt.layers.attention.nsa.transform_index import (
                 transform_index_page_table_decode,
             )
@@ -462,6 +462,7 @@ class SparseCoordinator:
                 page_size=self.page_size,
                 layer_id=layer.layer_id,
             )
+            print(f"[DEBUG] [_handle_sparse_retrieve] result shape: {result.shape}")
         return result
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(
