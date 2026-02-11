@@ -1481,8 +1481,15 @@ class NativeSparseAttnBackend(
             q_rope = q_all[:, :, layer.v_head_dim :]
 
         # Align topk_indices with q dimensions
-        if topk_indices is not None:
-            topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
+        # return (selected_indices, result)
+        selected_indices, topk_indices_return = topk_indices
+        # padding
+        if topk_indices_return is not None:
+            topk_indices_return = self._pad_topk_indices(topk_indices_return, q_nope.shape[0])
+        if selected_indices is not None:
+            selected_indices = self._pad_topk_indices(selected_indices, q_nope.shape[0])
+        # if topk_indices is not None:
+        #     topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
         if envs.SGLANG_NSA_FUSE_TOPK.get():
             page_table_1 = topk_indices
@@ -1491,12 +1498,16 @@ class NativeSparseAttnBackend(
             use_hierarchical_nsa = is_hierarchical_sparse_attention_enabled()
             print(f"[DEBUG] [forward_decode] use_hierarchical_nsa: {use_hierarchical_nsa}")
             if use_hierarchical_nsa:
-                # page_table_1 = topk_indices
-                page_table_1 = transform_index_page_table_decode(
+                # return (selected_indices, result)
+                # selected_indices is topk_indices, result is page_table_1
+                page_table_1 = selected_indices
+                page_table_2 = transform_index_page_table_decode(
                     page_table=metadata.page_table_1,
-                    topk_indices=topk_indices,
+                    topk_indices=topk_indices_return,
                     page_size=1,
                 )
+                # 比较page_table_1和page_table_2是否相等
+                assert torch.allclose(page_table_1, page_table_2), "page_table_1 and page_table_2 are not equal"
             else:
                 page_table_1 = transform_index_page_table_decode(
                     page_table=metadata.page_table_1,

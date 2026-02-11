@@ -455,7 +455,7 @@ class SparseCoordinator:
                 layer_id=layer.layer_id,
             )
             print(f"[DEBUG] [_handle_sparse_retrieve] result shape: {result.shape}")
-        return result
+        return (selected_indices, result)
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(
         self, req: "Req", req_to_token_pool, tree_cache
