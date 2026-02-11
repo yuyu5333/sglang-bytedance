@@ -1484,6 +1484,11 @@ class NativeSparseAttnBackend(
         # return (selected_indices, result)
         selected_indices, topk_indices_return = topk_indices
         # padding
+        print(f"[DEBUG] [forward_decode] topk_indices_return.shape: {topk_indices_return.shape}")
+        print(f"[DEBUG] [forward_decode] selected_indices.shape: {selected_indices.shape}")
+        
+        print(f"[DEBUG] [forward_decode] topk_indices_return: {topk_indices_return}")
+        print(f"[DEBUG] [forward_decode] selected_indices: {selected_indices}")
         if topk_indices_return is not None:
             topk_indices_return = self._pad_topk_indices(topk_indices_return, q_nope.shape[0])
         if selected_indices is not None:
@@ -1505,6 +1510,10 @@ class NativeSparseAttnBackend(
                     topk_indices=topk_indices_return,
                     page_size=1,
                 )
+                print(f"[DEBUG] [forward_decode] page_table_1.shape: {page_table_1.shape}")
+                print(f"[DEBUG] [forward_decode] page_table_2.shape: {page_table_2.shape}")
+                print(f"[DEBUG] [forward_decode] page_table_1: {page_table_1}")
+                print(f"[DEBUG] [forward_decode] page_table_2: {page_table_2}")
                 # 比较page_table_1和page_table_2是否相等
                 assert torch.allclose(page_table_1, page_table_2), "page_table_1 and page_table_2 are not equal"
             else:
