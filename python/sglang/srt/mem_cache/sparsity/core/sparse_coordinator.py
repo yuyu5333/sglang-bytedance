@@ -440,7 +440,7 @@ class SparseCoordinator:
             **kwargs,
         )
 
-        if True and torch.all(~sparse_mask).item():
+        if False and torch.all(~sparse_mask).item():
             return selected_indices
         else:
             # Adapt Attention Metadata
