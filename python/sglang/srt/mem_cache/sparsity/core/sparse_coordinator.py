@@ -445,6 +445,8 @@ class SparseCoordinator:
                 transform_index_page_table_decode,
             )
             max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
+            print(f"[DEBUG] [_handle_sparse_retrieve] topk_tokens_cnt: {self.config.topk_tokens_cnt}")
+            print(f"[DEBUG] [_handle_sparse_retrieve] max_seqlen_k: {max_seqlen_k}")
             result = transform_index_page_table_decode(
                 page_table=self.backend_adaptor.req_to_token_pool.req_to_token[:, :max_seqlen_k],
                 topk_indices=selected_indices,
