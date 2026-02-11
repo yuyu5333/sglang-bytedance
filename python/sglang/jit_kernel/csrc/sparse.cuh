@@ -292,9 +292,12 @@ __global__ void load_cache_to_device_buffer_kernel(
   if (!sparse_mask_val || (seq_len <= 0)) {
     for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
       int32_t top_k_val = my_top_k_tokens[i];
-      if (top_k_val >= 0) {
+      if (top_k_val >= 0 &&
+          static_cast<int64_t>(top_k_val) * page_size < page_table_stride) {
         int32_t page_start = my_page_table[top_k_val * page_size];
         my_top_k_device_locs[i] = page_start / page_size;
+      } else {
+        my_top_k_device_locs[i] = -1;
       }
     }
     if (tid == 0) {
