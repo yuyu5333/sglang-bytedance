@@ -440,7 +440,7 @@ class SparseCoordinator:
             **kwargs,
         )
 
-        if sparse_mask.all():
+        if torch.all(~sparse_mask).item():
             from sglang.srt.layers.attention.nsa.transform_index import (
                 transform_index_page_table_decode,
             )
