@@ -427,6 +427,9 @@ class SparseCoordinator:
         req_pool_indices = forward_batch.req_pool_indices
         # Compute Topk
         sparse_mask = self.states.hierarchical_sparse_enabled[req_pool_indices]
+        # 如果没有任何offload，sparse_mask应该把所有token设置为不进行交换
+        print(f"[DEBUG] [_handle_sparse_retrieve] sparse_mask: {sparse_mask}")
+        print(f"[DEBUG] [_handle_sparse_retrieve] req_pool_indices: {req_pool_indices}")
         selected_indices, valid_lengths = self.algorithm.retrieve_topk(
             queries=query,
             layer_id=layer.layer_id,
@@ -437,17 +440,28 @@ class SparseCoordinator:
             **kwargs,
         )
 
-        # Adapt Attention Metadata
-        result = self.backend_adaptor.adapt_for_attn_metadata(
-            selected_indices=selected_indices,
-            valid_lengths=valid_lengths,
-            sparse_mask=sparse_mask,
-            current_metadata=attn_metadata,
-            forward_batch=forward_batch,
-            req_to_token=self.req_to_token_pool.req_to_token,
-            page_size=self.page_size,
-            layer_id=layer.layer_id,
-        )
+        if sparse_mask.all():
+            from sglang.srt.layers.attention.nsa.transform_index import (
+                transform_index_page_table_decode,
+            )
+            max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
+            result = transform_index_page_table_decode(
+                page_table=self.backend_adaptor.req_to_token_pool.req_to_token[:, :max_seqlen_k],
+                topk_indices=selected_indices,
+                page_size=1,
+            )
+        else:
+            # Adapt Attention Metadata
+            result = self.backend_adaptor.adapt_for_attn_metadata(
+                selected_indices=selected_indices,
+                valid_lengths=valid_lengths,
+                sparse_mask=sparse_mask,
+                current_metadata=attn_metadata,
+                forward_batch=forward_batch,
+                req_to_token=self.req_to_token_pool.req_to_token,
+                page_size=self.page_size,
+                layer_id=layer.layer_id,
+            )
         return result
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(
