@@ -427,9 +427,6 @@ class SparseCoordinator:
         req_pool_indices = forward_batch.req_pool_indices
         # Compute Topk
         sparse_mask = self.states.hierarchical_sparse_enabled[req_pool_indices]
-        # 如果没有任何offload，sparse_mask应该把所有token设置为不进行交换
-        print(f"[DEBUG] [_handle_sparse_retrieve] sparse_mask: {sparse_mask}")
-        print(f"[DEBUG] [_handle_sparse_retrieve] req_pool_indices: {req_pool_indices}")
         selected_indices, valid_lengths = self.algorithm.retrieve_topk(
             queries=query,
             layer_id=layer.layer_id,

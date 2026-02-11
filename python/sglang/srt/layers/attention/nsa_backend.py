@@ -1496,7 +1496,6 @@ class NativeSparseAttnBackend(
         else:
             # When hierarchical NSA is enabled, the sparse coordinator has already converted topk_indices into the actual page table.
             use_hierarchical_nsa = is_hierarchical_sparse_attention_enabled()
-            print(f"[DEBUG] [forward_decode] use_hierarchical_nsa: {use_hierarchical_nsa}")
             if use_hierarchical_nsa:
                 # return (selected_indices, result)
                 # selected_indices is topk_indices, result is page_table_1
