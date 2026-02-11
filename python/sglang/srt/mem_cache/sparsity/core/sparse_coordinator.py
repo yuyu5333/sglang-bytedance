@@ -440,16 +440,8 @@ class SparseCoordinator:
             **kwargs,
         )
 
-        if False and torch.all(~sparse_mask).item():
-            from sglang.srt.layers.attention.nsa.transform_index import (
-                transform_index_page_table_decode,
-            )
-            max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
-            result = transform_index_page_table_decode(
-                page_table=self.backend_adaptor.req_to_token_pool.req_to_token[:, :self.config.topk_tokens_cnt],
-                topk_indices=selected_indices,
-                page_size=1,
-            )
+        if True and torch.all(~sparse_mask).item():
+            return selected_indices
         else:
             # Adapt Attention Metadata
             result = self.backend_adaptor.adapt_for_attn_metadata(
