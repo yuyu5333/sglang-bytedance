@@ -264,8 +264,10 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
   // 修复：使用正确的IndexT类型，避免类型转换问题
-  const IndexT rid_require = 0;
+  const int rid_require = 0;
+  
   if (tid == 0) {
+    printf("[DEBUG] [rid calculation] rid_require sizeof ：%zu \n", sizeof(rid_require));
     printf("[DEBUG] [rid calculation] 1 bid=%d, req_pool_indices[bid]=%d, rid_require=%d\n", 
            bid, req_pool_indices[bid], rid_require);
   }
