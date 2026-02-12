@@ -82,17 +82,17 @@ class NSABackendAdaptor(BackendAdaptor):
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
         
-        if False:
+        if True:
             # type 1
             page_table_dense = self.req_to_token_pool.req_to_token[
                 req_pool_indices, :max_seqlen_k
             ]
-            transformed_indices = transform_index_page_table_decode_ref(
+            transformed_indices_origin = transform_index_page_table_decode_ref(
                 page_table=page_table_dense,
                 topk_indices=selected_indices,
                 page_size=1,
             )
-        else:
+        if True:
             # type 2
             page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
@@ -105,6 +105,12 @@ class NSABackendAdaptor(BackendAdaptor):
                 page_size=1,
                 out_cache_loc=forward_batch.out_cache_loc,
             )
+
+        print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices_origin: {transformed_indices_origin}")
+        print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices: {transformed_indices}")
+        
+        # assert transformed_indices_origin == transformed_indices, f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
+        assert torch.allclose(transformed_indices_origin, transformed_indices), f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
 
         return transformed_indices
 
