@@ -309,7 +309,6 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int lru_slot_offset = rid_require * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
   if (tid == 0) {
     printf("[DEBUG] [rid calculation] 8 rid_require=%d\n", rid_require);
-    printf("[DEBUG] [rid calculation] 9 rid_require=%ld\n", rid_require);
   }
   // __syncthreads();
   if (tid == 0) {
