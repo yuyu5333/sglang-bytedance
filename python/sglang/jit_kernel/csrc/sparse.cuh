@@ -267,9 +267,10 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int rid_require = 0;
   
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] rid_require sizeof ：%zu \n", sizeof(rid_require));
+    printf("[DEBUG] [rid calculation] 0 rid_require sizeof ：%zu \n", sizeof(rid_require));
     printf("[DEBUG] [rid calculation] 1 bid=%d, req_pool_indices[bid]=%d, rid_require=%d\n", 
            bid, req_pool_indices[bid], rid_require);
+    printf("[DEBUG] [rid calculation] 1.1 rid_require=%d\n", rid_require);
   }
 
   // 添加同步
