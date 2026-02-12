@@ -94,7 +94,8 @@ class NSABackendAdaptor(BackendAdaptor):
             )
         if True:
             # type 2
-            page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
+            # 修复：使用与type 1相同的页面表索引方式
+            page_table_pool = self.req_to_token_pool.req_to_token[req_pool_indices, :max_seqlen_k]
             print(f"[DEBUG] [adapt_for_attn_metadata] sparse_mask: {sparse_mask}")
             print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices shape: {selected_indices.shape}")
             print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices first 10: {selected_indices[0, :10]}")

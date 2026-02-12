@@ -318,15 +318,15 @@ __global__ void load_cache_to_device_buffer_kernel(
       const int64_t block_base = bid * stride_per_block;
       const int64_t count_idx = block_base + tasks_per_block;
       transfer_tasks_src[count_idx] = 0;
-      printf("[DEBUG] Fast path completed for bid=%d\n", bid);
+      // printf("[DEBUG] Fast path completed for bid=%d\n", bid);
     }
     return;
   }
 
-  if (tid == 0) {
-    printf("[DEBUG] Entering sparse path: sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
-           sparse_mask_val, seq_len, bid);
-  }
+  // if (tid == 0) {
+  //   printf("[DEBUG] Entering sparse path: sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
+  //          sparse_mask_val, seq_len, bid);
+  // }
 
   __shared__ int32_t s_top_k_tokens[NUM_TOP_K];
   __shared__ int32_t s_chunk_offset[NUM_BUFFER_CHUNKS + 1];
