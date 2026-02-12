@@ -264,15 +264,12 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
   // 修复：使用正确的IndexT类型，避免类型转换问题
-  const int rid_require = 0;
+  const IndexT rid = req_pool_indices[bid];
   
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 0 rid_require sizeof ：%lu \n", sizeof(rid_require));
-    printf("[DEBUG] [rid calculation] 1 bid=%d, req_pool_indices[bid]=%d, rid_require=%d\n", 
-           bid, req_pool_indices[bid], rid_require);
-    printf("[DEBUG] [rid calculation] 1.1 rid_require=%d\n", rid_require);
-    printf("[DEBUG] [rid calculation] 1.2 bid=%d, req_pool_indices[bid]=%d, rid_require=%d\n", 
-           bid, req_pool_indices[bid], rid_require);
+    printf("[DEBUG] [rid calculation] 0 rid sizeof ：%lu \n", sizeof(rid));
+    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%d\n", 
+           bid, req_pool_indices[bid], rid);
   }
 
   // 添加同步
@@ -283,41 +280,35 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
-
-  // __syncthreads();
-  if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 2 bid=%d, req_pool_indices[bid]=%d, rid_require=%d\n", 
-           bid, req_pool_indices[bid], rid_require);
-  }
   // Calculate offsets for this request
   const int top_k_tokens_offset = bid * top_k_tokens_stride;
   const int top_k_device_locs_offset = bid * top_k_device_locs_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 3 rid_require=%d\n", rid_require);
+    printf("[DEBUG] [rid calculation] 3 rid=%d\n", rid);
   }
-  const int buffer_offset = rid_require * buffer_stride_0 + layer_id * buffer_stride_1;
+  const int buffer_offset = rid * buffer_stride_0 + layer_id * buffer_stride_1;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 4 rid_require=%d\n", rid_require);
+    printf("[DEBUG] [rid calculation] 4 rid=%d\n", rid);
   }
-  const int host_offset = rid_require * host_stride;
+  const int host_offset = rid * host_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 5 rid_require=%d\n", rid_require);
+    printf("[DEBUG] [rid calculation] 5 rid=%d\n", rid);
   }
-  const int page_table_offset = rid_require * page_table_stride;
+  const int page_table_offset = rid * page_table_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 6 rid_require=%d\n", rid_require);
+    printf("[DEBUG] [rid calculation] 6 rid=%d\n", rid);
   }
   const int diff_map_offset = bid * diff_map_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 7 rid_require=%d\n", rid_require);
+    printf("[DEBUG] [rid calculation] 7 rid=%d\n", rid);
   }
-  const int lru_slot_offset = rid_require * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
+  const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 8 rid_require=%d\n", rid_require);
+    printf("[DEBUG] [rid calculation] 8 rid=%d\n", rid);
   }
   // __syncthreads();
   // if (tid == 0) {
-  //   printf("[DEBUG] [offset calculation] bid=%d, rid_require=%d\n", bid, rid_require);
+  //   printf("[DEBUG] [offset calculation] bid=%d, rid=%d\n", bid, rid);
   //   printf("[DEBUG] [offset calculation] buffer_stride_0=%d, buffer_offset=%d\n", buffer_stride_0, buffer_offset);
   //   printf("[DEBUG] [offset calculation] host_stride=%d, host_offset=%d\n", host_stride, host_offset);
   //   printf("[DEBUG] [offset calculation] page_table_stride=%d, page_table_offset=%d\n", page_table_stride, page_table_offset);
