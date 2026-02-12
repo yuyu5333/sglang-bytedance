@@ -100,6 +100,17 @@ class NSABackendAdaptor(BackendAdaptor):
             print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices first 10: {selected_indices[0, :10]}")
             print(f"[DEBUG] [adapt_for_attn_metadata] page_table_dense first row first 10: {page_table_dense[0, :10]}")
             print(f"[DEBUG] [adapt_for_attn_metadata] page_table_pool first row first 10: {page_table_pool[0, :10]}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] page_table_dense shape: {page_table_dense.shape}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] page_table_pool shape: {page_table_pool.shape}")
+            
+            # 检查页面表内容是否一致
+            if req_pool_indices.numel() > 0:
+                req_idx = req_pool_indices[0].item()
+                print(f"[DEBUG] [adapt_for_attn_metadata] Comparing page_table_dense[0] vs page_table_pool[{req_idx}]:")
+                print(f"  page_table_dense[0, :10]: {page_table_dense[0, :10]}")
+                print(f"  page_table_pool[{req_idx}, :10]: {page_table_pool[req_idx, :10]}")
+                print(f"  Are they equal? {torch.allclose(page_table_dense[0], page_table_pool[req_idx])}")
             
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
                 req_pool_indices=req_pool_indices,
@@ -112,8 +123,8 @@ class NSABackendAdaptor(BackendAdaptor):
                 out_cache_loc=forward_batch.out_cache_loc,
             )
 
-        print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices_origin: {transformed_indices_origin}")
-        print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices: {transformed_indices}")
+        # print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices_origin: {transformed_indices_origin}")
+        # print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices: {transformed_indices}")
         
         # assert transformed_indices_origin == transformed_indices, f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
         assert torch.allclose(transformed_indices_origin, transformed_indices), f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
