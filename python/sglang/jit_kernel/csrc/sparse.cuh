@@ -264,9 +264,12 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
   // rid=req_pool_indices[bid] - 1,但是最小值为0,所以需要取max(0, req_pool_indices[bid] - 1)
+  // 添加调试信息
   const int64_t rid = req_pool_indices[bid] - 1 >= 0 ? req_pool_indices[bid] - 1 : 0;
-  // 修复：由于page_table_pool已经通过req_pool_indices索引，rid应该为0
-  // const int64_t rid = 0;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%ld\n", 
+           bid, req_pool_indices[bid], rid);
+  }
   const bool sparse_mask_val = sparse_mask[bid];
   const int64_t seq_len = seq_lens[bid] - 1;
   const int warp_id = tid / WARP_SIZE;
@@ -281,6 +284,14 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int page_table_offset = rid * page_table_stride;
   const int diff_map_offset = bid * diff_map_stride;
   const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
+
+  if (tid == 0) {
+    printf("[DEBUG] [offset calculation] bid=%d, rid=%ld\n", bid, rid);
+    printf("[DEBUG] [offset calculation] buffer_stride_0=%d, buffer_offset=%d\n", buffer_stride_0, buffer_offset);
+    printf("[DEBUG] [offset calculation] host_stride=%d, host_offset=%d\n", host_stride, host_offset);
+    printf("[DEBUG] [offset calculation] page_table_stride=%d, page_table_offset=%d\n", page_table_stride, page_table_offset);
+    printf("[DEBUG] [offset calculation] lru_slot_stride_0=%d, lru_slot_offset=%d\n", lru_slot_stride_0, lru_slot_offset);
+  }
 
   // if (tid == 0) {
   //   printf("[DEBUG] [Offset calculation] bid=%d, rid=%ld, page_table_stride=%ld, page_table_offset=%d\n", 
