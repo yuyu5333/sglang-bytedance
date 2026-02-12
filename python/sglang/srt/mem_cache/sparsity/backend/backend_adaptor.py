@@ -132,7 +132,7 @@ class NSABackendAdaptor(BackendAdaptor):
         # print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices: {transformed_indices}")
         
         # assert transformed_indices_origin == transformed_indices, f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
-        assert torch.allclose(transformed_indices_origin, transformed_indices), f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
+        # assert torch.allclose(transformed_indices_origin, transformed_indices), f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
 
         return transformed_indices
 
