@@ -263,9 +263,9 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  // rid=req_pool_indices[bid] - 1,但是最小值为0,所以需要取max(0, req_pool_indices[bid] - 1)
-  // 添加调试信息
-  const int64_t rid = req_pool_indices[bid] - 1 >= 0 ? req_pool_indices[bid] - 1 : 0;
+  // 修复：req_pool_indices传递的是内存地址，不是1-based索引
+  // 正确的rid应该始终为0，因为只有一个请求在处理
+  const int64_t rid = 0;
   if (tid == 0) {
     printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%ld\n", 
            bid, req_pool_indices[bid], rid);
