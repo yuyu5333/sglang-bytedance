@@ -263,15 +263,14 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  // 修复：req_pool_indices传递的是内存地址，不是1-based索引
-  // 正确的rid应该始终为0，因为只有一个请求在处理
-  const int64_t rid = 0;
+  // 修复：使用正确的IndexT类型，避免类型转换问题
+  const IndexT rid = req_pool_indices[bid];
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%ld\n", 
+    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%d\n", 
            bid, req_pool_indices[bid], rid);
   }
   const bool sparse_mask_val = sparse_mask[bid];
-  const int64_t seq_len = seq_lens[bid] - 1;
+  const IndexT seq_len = seq_lens[bid] - 1;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
