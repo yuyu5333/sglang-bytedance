@@ -287,11 +287,29 @@ __global__ void load_cache_to_device_buffer_kernel(
   // Calculate offsets for this request
   const int top_k_tokens_offset = bid * top_k_tokens_stride;
   const int top_k_device_locs_offset = bid * top_k_device_locs_stride;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 3 rid_require=%d\n", rid_require);
+  }
   const int buffer_offset = rid_require * buffer_stride_0 + layer_id * buffer_stride_1;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 4 rid_require=%d\n", rid_require);
+  }
   const int host_offset = rid_require * host_stride;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 5 rid_require=%d\n", rid_require);
+  }
   const int page_table_offset = rid_require * page_table_stride;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 6 rid_require=%d\n", rid_require);
+  }
   const int diff_map_offset = bid * diff_map_stride;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 7 rid_require=%d\n", rid_require);
+  }
   const int lru_slot_offset = rid_require * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 8 rid_require=%d\n", rid_require);
+  }
   // __syncthreads();
   if (tid == 0) {
     printf("[DEBUG] [offset calculation] bid=%d, rid_require=%ld\n", bid, rid_require);
