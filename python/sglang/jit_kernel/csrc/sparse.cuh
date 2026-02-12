@@ -279,6 +279,13 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int diff_map_offset = bid * diff_map_stride;
   const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
 
+  if (tid == 0) {
+    printf("[DEBUG] [Offset calculation] bid=%d, rid=%ld, page_table_stride=%ld, page_table_offset=%d\n", 
+           bid, rid, page_table_stride, page_table_offset);
+    printf("[DEBUG] [Offset calculation] page_table pointer: %p, my_page_table pointer: %p\n", 
+           page_table, page_table + page_table_offset);
+  }
+
   const int32_t* my_top_k_tokens = top_k_tokens + top_k_tokens_offset;
   int32_t* my_device_buffer_tokens = device_buffer_tokens + buffer_offset;
   const int64_t* my_host_cache_locs = host_cache_locs + host_offset;
