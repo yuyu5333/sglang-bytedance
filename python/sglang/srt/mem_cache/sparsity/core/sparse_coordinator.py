@@ -436,22 +436,17 @@ class SparseCoordinator:
             attn_metadata=attn_metadata,
             **kwargs,
         )
-
-        if False and torch.all(~sparse_mask).item():
-            return selected_indices
-        else:
-            # Adapt Attention Metadata
-            result = self.backend_adaptor.adapt_for_attn_metadata(
-                selected_indices=selected_indices,
-                valid_lengths=valid_lengths,
-                sparse_mask=sparse_mask,
-                current_metadata=attn_metadata,
-                forward_batch=forward_batch,
-                req_to_token=self.req_to_token_pool.req_to_token,
-                page_size=self.page_size,
-                layer_id=layer.layer_id,
-            )
-        return (result, selected_indices)
+        result = self.backend_adaptor.adapt_for_attn_metadata(
+            selected_indices=selected_indices,
+            valid_lengths=valid_lengths,
+            sparse_mask=sparse_mask,
+            current_metadata=attn_metadata,
+            forward_batch=forward_batch,
+            req_to_token=self.req_to_token_pool.req_to_token,
+            page_size=self.page_size,
+            layer_id=layer.layer_id,
+        )
+        return result
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(
         self, req: "Req", req_to_token_pool, tree_cache

@@ -1481,20 +1481,8 @@ class NativeSparseAttnBackend(
             q_rope = q_all[:, :, layer.v_head_dim :]
 
         # Align topk_indices with q dimensions
-        # return (selected_indices, result)
-        topk_indices_return, selected_indices = topk_indices
-        # padding
-        print(f"[DEBUG] [forward_decode] topk_indices_return.shape: {topk_indices_return.shape}")
-        print(f"[DEBUG] [forward_decode] selected_indices.shape: {selected_indices.shape}")
-        
-        print(f"[DEBUG] [forward_decode] topk_indices_return: {topk_indices_return}")
-        print(f"[DEBUG] [forward_decode] selected_indices: {selected_indices}")
-        if topk_indices_return is not None:
-            topk_indices_return = self._pad_topk_indices(topk_indices_return, q_nope.shape[0])
-        if selected_indices is not None:
-            selected_indices = self._pad_topk_indices(selected_indices, q_nope.shape[0])
-        # if topk_indices is not None:
-        #     topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
+        if topk_indices is not None:
+            topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
         if envs.SGLANG_NSA_FUSE_TOPK.get():
             page_table_1 = topk_indices
@@ -1502,20 +1490,7 @@ class NativeSparseAttnBackend(
             # When hierarchical NSA is enabled, the sparse coordinator has already converted topk_indices into the actual page table.
             use_hierarchical_nsa = is_hierarchical_sparse_attention_enabled()
             if use_hierarchical_nsa:
-                # return (selected_indices, result)
-                # selected_indices is topk_indices, result is page_table_1
-                page_table_1 = topk_indices_return
-                page_table_2 = transform_index_page_table_decode(
-                    page_table=metadata.page_table_1,
-                    topk_indices=selected_indices,
-                    page_size=1,
-                )
-                print(f"[DEBUG] [forward_decode] page_table_1.shape: {page_table_1.shape}")
-                print(f"[DEBUG] [forward_decode] page_table_2.shape: {page_table_2.shape}")
-                print(f"[DEBUG] [forward_decode] page_table_1: {page_table_1}")
-                print(f"[DEBUG] [forward_decode] page_table_2: {page_table_2}")
-                # 比较page_table_1和page_table_2是否相等
-                assert torch.allclose(page_table_1, page_table_2), "page_table_1 and page_table_2 are not equal"
+                page_table_1 = topk_indices
             else:
                 page_table_1 = transform_index_page_table_decode(
                     page_table=metadata.page_table_1,
