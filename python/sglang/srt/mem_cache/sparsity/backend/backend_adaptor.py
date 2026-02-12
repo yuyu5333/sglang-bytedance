@@ -95,6 +95,12 @@ class NSABackendAdaptor(BackendAdaptor):
         if True:
             # type 2
             page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
+            print(f"[DEBUG] [adapt_for_attn_metadata] sparse_mask: {sparse_mask}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices shape: {selected_indices.shape}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices first 10: {selected_indices[0, :10]}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] page_table_dense first row first 10: {page_table_dense[0, :10]}")
+            print(f"[DEBUG] [adapt_for_attn_metadata] page_table_pool first row first 10: {page_table_pool[0, :10]}")
+            
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
                 req_pool_indices=req_pool_indices,
                 top_k_result=selected_indices,
