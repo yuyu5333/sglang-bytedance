@@ -264,9 +264,9 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
   // 修复：使用正确的IndexT类型，避免类型转换问题
-  const IndexT rid = req_pool_indices[bid] - 1 >= 0 ? req_pool_indices[bid] - 1 : 0;
+  const IndexT rid = 0;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%d\n", 
+    printf("[DEBUG] [rid calculation] 1 bid=%d, req_pool_indices[bid]=%d, rid=%d\n", 
            bid, req_pool_indices[bid], rid);
   }
   const bool sparse_mask_val = sparse_mask[bid];
@@ -275,6 +275,11 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int lane_id = tid % WARP_SIZE;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
 
+
+  if (tid == 0) {
+    printf("[DEBUG] [rid calculation] 2 bid=%d, req_pool_indices[bid]=%d, rid=%d\n", 
+           bid, req_pool_indices[bid], rid);
+  }
   // Calculate offsets for this request
   const int top_k_tokens_offset = bid * top_k_tokens_stride;
   const int top_k_device_locs_offset = bid * top_k_device_locs_stride;
