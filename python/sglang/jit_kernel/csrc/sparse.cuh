@@ -263,7 +263,9 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  const int64_t rid = req_pool_indices[bid];
+  // const int64_t rid = req_pool_indices[bid];
+  // 修复：由于page_table_pool已经通过req_pool_indices索引，rid应该为0
+  const int64_t rid = 0;
   const bool sparse_mask_val = sparse_mask[bid];
   const int64_t seq_len = seq_lens[bid] - 1;
   const int warp_id = tid / WARP_SIZE;
