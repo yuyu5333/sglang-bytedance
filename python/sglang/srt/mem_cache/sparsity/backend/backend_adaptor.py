@@ -82,6 +82,10 @@ class NSABackendAdaptor(BackendAdaptor):
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
         
+        print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
+        print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices shape: {req_pool_indices.shape}")
+        print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices type: {req_pool_indices.dtype}")
+        
         if True:
             # type 1
             page_table_dense = self.req_to_token_pool.req_to_token[
