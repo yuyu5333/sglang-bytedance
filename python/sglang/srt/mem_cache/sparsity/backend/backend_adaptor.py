@@ -88,21 +88,20 @@ class NSABackendAdaptor(BackendAdaptor):
             page_size=1,
         )
 
-        if sparse_mask.any():
-            page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
-            swapped_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
-                req_pool_indices=req_pool_indices,
-                top_k_result=selected_indices,
-                seq_lens=forward_batch.seq_lens,
-                sparse_mask=sparse_mask,
-                page_table=page_table_pool,
-                layer_id=layer_id,
-                page_size=1,
-                out_cache_loc=forward_batch.out_cache_loc,
-            )
-            transformed_indices[sparse_mask] = swapped_indices[sparse_mask].to(
-                dtype=transformed_indices.dtype
-            )
+        page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
+        swapped_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
+            req_pool_indices=req_pool_indices,
+            top_k_result=selected_indices,
+            seq_lens=forward_batch.seq_lens,
+            sparse_mask=sparse_mask,
+            page_table=page_table_pool,
+            layer_id=layer_id,
+            page_size=1,
+            out_cache_loc=forward_batch.out_cache_loc,
+        )
+        transformed_indices[sparse_mask] = swapped_indices[sparse_mask].to(
+            dtype=transformed_indices.dtype
+        )
 
         return transformed_indices
 
