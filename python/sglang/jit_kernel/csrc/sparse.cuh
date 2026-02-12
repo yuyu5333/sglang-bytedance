@@ -263,9 +263,9 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  // const int64_t rid = req_pool_indices[bid];
+  const int64_t rid = req_pool_indices[bid] - 1;
   // 修复：由于page_table_pool已经通过req_pool_indices索引，rid应该为0
-  const int64_t rid = 0;
+  // const int64_t rid = 0;
   const bool sparse_mask_val = sparse_mask[bid];
   const int64_t seq_len = seq_lens[bid] - 1;
   const int warp_id = tid / WARP_SIZE;
@@ -281,12 +281,12 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int diff_map_offset = bid * diff_map_stride;
   const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
 
-  if (tid == 0) {
-    printf("[DEBUG] [Offset calculation] bid=%d, rid=%ld, page_table_stride=%ld, page_table_offset=%d\n", 
-           bid, rid, page_table_stride, page_table_offset);
-    printf("[DEBUG] [Offset calculation] page_table pointer: %p, my_page_table pointer: %p\n", 
-           page_table, page_table + page_table_offset);
-  }
+  // if (tid == 0) {
+  //   printf("[DEBUG] [Offset calculation] bid=%d, rid=%ld, page_table_stride=%ld, page_table_offset=%d\n", 
+  //          bid, rid, page_table_stride, page_table_offset);
+  //   printf("[DEBUG] [Offset calculation] page_table pointer: %p, my_page_table pointer: %p\n", 
+  //          page_table, page_table + page_table_offset);
+  // }
 
   const int32_t* my_top_k_tokens = top_k_tokens + top_k_tokens_offset;
   int32_t* my_device_buffer_tokens = device_buffer_tokens + buffer_offset;
@@ -299,26 +299,26 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   // Fast path: if sparse is disabled; Building page table directly
   if (!sparse_mask_val || (seq_len <= 0)) {
-    if (tid == 0) {
-      printf("[DEBUG] [Entering fast path] sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
-             sparse_mask_val, seq_len, bid);
-    }
+    // if (tid == 0) {
+    //   printf("[DEBUG] [Entering fast path] sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
+    //          sparse_mask_val, seq_len, bid);
+    // }
     for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
       int32_t top_k_val = my_top_k_tokens[i];
       if (top_k_val >= 0) {
         int32_t page_start = my_page_table[top_k_val * page_size];
         my_top_k_device_locs[i] = page_start / page_size;
-        if (tid == 0 && i < 5) { // 只输出前5个token的调试信息
-          printf("[DEBUG] [Entering fast path] bid=%d, i=%d, top_k_val=%d, page_start=%d, device_loc=%d\n", 
-                 bid, i, top_k_val, page_start, my_top_k_device_locs[i]);
-        }
+        // if (tid == 0 && i < 5) { // 只输出前5个token的调试信息
+        //   printf("[DEBUG] [Entering fast path] bid=%d, i=%d, top_k_val=%d, page_start=%d, device_loc=%d\n", 
+        //          bid, i, top_k_val, page_start, my_top_k_device_locs[i]);
+        // }
       }
       else {
         my_top_k_device_locs[i] = -1;
-        if (tid == 0 && i < 5) { // 只输出前5个token的调试信息
-          printf("[DEBUG] [Entering fast path] bid=%d, i=%d, top_k_val=%d (negative), device_loc=-1\n", 
-                 bid, i, top_k_val);
-        }
+        // if (tid == 0 && i < 5) { // 只输出前5个token的调试信息
+        //   printf("[DEBUG] [Entering fast path] bid=%d, i=%d, top_k_val=%d (negative), device_loc=-1\n", 
+        //          bid, i, top_k_val);
+        // }
       }
     }
     if (tid == 0) {
@@ -327,15 +327,15 @@ __global__ void load_cache_to_device_buffer_kernel(
       const int64_t block_base = bid * stride_per_block;
       const int64_t count_idx = block_base + tasks_per_block;
       transfer_tasks_src[count_idx] = 0;
-      printf("[DEBUG] [Entering fast path] Fast path completed for bid=%d\n", bid);
+      // printf("[DEBUG] [Entering fast path] Fast path completed for bid=%d\n", bid);
     }
     return;
   }
 
-  if (tid == 0) {
-    printf("[DEBUG] [Entering fast path] Entering sparse path: sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
-           sparse_mask_val, seq_len, bid);
-  }
+  // if (tid == 0) {
+  //   printf("[DEBUG] [Entering fast path] Entering sparse path: sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
+  //          sparse_mask_val, seq_len, bid);
+  // }
 
   __shared__ int32_t s_top_k_tokens[NUM_TOP_K];
   __shared__ int32_t s_chunk_offset[NUM_BUFFER_CHUNKS + 1];
