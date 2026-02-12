@@ -77,33 +77,34 @@ class NSABackendAdaptor(BackendAdaptor):
         **kwargs,
     ) -> Optional[torch.Tensor]:
         """Transform NSA topk indices to physical device indices."""
+        
+        
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
-        page_table_dense = self.req_to_token_pool.req_to_token[
-            req_pool_indices, :max_seqlen_k
-        ]
-        transformed_indices = transform_index_page_table_decode_ref(
-            page_table=page_table_dense,
-            topk_indices=selected_indices,
-            page_size=1,
-        )
-
-        page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
-        swapped_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
-            req_pool_indices=req_pool_indices,
-            top_k_result=selected_indices,
-            seq_lens=forward_batch.seq_lens,
-            sparse_mask=sparse_mask,
-            page_table=page_table_pool,
-            layer_id=layer_id,
-            page_size=1,
-            out_cache_loc=forward_batch.out_cache_loc,
-        )
-        transformed_indices = torch.where(
-            sparse_mask,
-            swapped_indices.to(dtype=transformed_indices.dtype),
-            transformed_indices
-        )
+        
+        if False:
+            # type 1
+            page_table_dense = self.req_to_token_pool.req_to_token[
+                req_pool_indices, :max_seqlen_k
+            ]
+            transformed_indices = transform_index_page_table_decode_ref(
+                page_table=page_table_dense,
+                topk_indices=selected_indices,
+                page_size=1,
+            )
+        else:
+            # type 2
+            page_table_pool = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
+            transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
+                req_pool_indices=req_pool_indices,
+                top_k_result=selected_indices,
+                seq_lens=forward_batch.seq_lens,
+                sparse_mask=sparse_mask,
+                page_table=page_table_pool,
+                layer_id=layer_id,
+                page_size=1,
+                out_cache_loc=forward_batch.out_cache_loc,
+            )
 
         return transformed_indices
 
