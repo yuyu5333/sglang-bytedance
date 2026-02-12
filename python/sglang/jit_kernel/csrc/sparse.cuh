@@ -311,13 +311,13 @@ __global__ void load_cache_to_device_buffer_kernel(
     printf("[DEBUG] [rid calculation] 8 rid_require=%d\n", rid_require);
   }
   // __syncthreads();
-  if (tid == 0) {
-    printf("[DEBUG] [offset calculation] bid=%d, rid_require=%d\n", bid, rid_require);
-    printf("[DEBUG] [offset calculation] buffer_stride_0=%d, buffer_offset=%d\n", buffer_stride_0, buffer_offset);
-    printf("[DEBUG] [offset calculation] host_stride=%d, host_offset=%d\n", host_stride, host_offset);
-    printf("[DEBUG] [offset calculation] page_table_stride=%d, page_table_offset=%d\n", page_table_stride, page_table_offset);
-    printf("[DEBUG] [offset calculation] lru_slot_stride_0=%d, lru_slot_offset=%d\n", lru_slot_stride_0, lru_slot_offset);
-  }
+  // if (tid == 0) {
+  //   printf("[DEBUG] [offset calculation] bid=%d, rid_require=%d\n", bid, rid_require);
+  //   printf("[DEBUG] [offset calculation] buffer_stride_0=%d, buffer_offset=%d\n", buffer_stride_0, buffer_offset);
+  //   printf("[DEBUG] [offset calculation] host_stride=%d, host_offset=%d\n", host_stride, host_offset);
+  //   printf("[DEBUG] [offset calculation] page_table_stride=%d, page_table_offset=%d\n", page_table_stride, page_table_offset);
+  //   printf("[DEBUG] [offset calculation] lru_slot_stride_0=%d, lru_slot_offset=%d\n", lru_slot_stride_0, lru_slot_offset);
+  // }
 
   // if (tid == 0) {
   //   printf("[DEBUG] [Offset calculation] bid=%d, rid=%ld, page_table_stride=%ld, page_table_offset=%d\n", 
