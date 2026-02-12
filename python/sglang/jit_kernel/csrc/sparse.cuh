@@ -268,7 +268,7 @@ __global__ void load_cache_to_device_buffer_kernel(
   
   if (tid == 0) {
     printf("[DEBUG] [rid calculation] 0 rid sizeof ：%lu \n", sizeof(rid));
-    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%d, rid=%d\n", 
+    printf("[DEBUG] [rid calculation] bid=%d, req_pool_indices[bid]=%ld, rid=%ld\n", 
            bid, req_pool_indices[bid], rid);
   }
 
@@ -284,31 +284,31 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int top_k_tokens_offset = bid * top_k_tokens_stride;
   const int top_k_device_locs_offset = bid * top_k_device_locs_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 3 rid=%d\n", rid);
+    printf("[DEBUG] [rid calculation] 3 rid=%ld\n", rid);
   }
   const int buffer_offset = rid * buffer_stride_0 + layer_id * buffer_stride_1;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 4 rid=%d\n", rid);
+    printf("[DEBUG] [rid calculation] 4 rid=%ld\n", rid);
   }
   const int host_offset = rid * host_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 5 rid=%d\n", rid);
+    printf("[DEBUG] [rid calculation] 5 rid=%ld\n", rid);
   }
   const int page_table_offset = rid * page_table_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 6 rid=%d\n", rid);
+    printf("[DEBUG] [rid calculation] 6 rid=%ld\n", rid);
   }
   const int diff_map_offset = bid * diff_map_stride;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 7 rid=%d\n", rid);
+    printf("[DEBUG] [rid calculation] 7 rid=%ld\n", rid);
   }
   const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
   if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 8 rid=%d\n", rid);
+    printf("[DEBUG] [rid calculation] 8 rid=%ld\n", rid);
   }
   // __syncthreads();
   // if (tid == 0) {
-  //   printf("[DEBUG] [offset calculation] bid=%d, rid=%d\n", bid, rid);
+  //   printf("[DEBUG] [offset calculation] bid=%d, rid=%ld\n", bid, rid);
   //   printf("[DEBUG] [offset calculation] buffer_stride_0=%d, buffer_offset=%d\n", buffer_stride_0, buffer_offset);
   //   printf("[DEBUG] [offset calculation] host_stride=%d, host_offset=%d\n", host_stride, host_offset);
   //   printf("[DEBUG] [offset calculation] page_table_stride=%d, page_table_offset=%d\n", page_table_stride, page_table_offset);
