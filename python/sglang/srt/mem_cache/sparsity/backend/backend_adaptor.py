@@ -99,8 +99,10 @@ class NSABackendAdaptor(BackendAdaptor):
             page_size=1,
             out_cache_loc=forward_batch.out_cache_loc,
         )
-        transformed_indices[sparse_mask] = swapped_indices[sparse_mask].to(
-            dtype=transformed_indices.dtype
+        transformed_indices = torch.where(
+            sparse_mask,
+            swapped_indices.to(dtype=transformed_indices.dtype),
+            transformed_indices
         )
 
         return transformed_indices
