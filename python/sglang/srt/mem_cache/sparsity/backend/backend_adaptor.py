@@ -109,8 +109,8 @@ class NSABackendAdaptor(BackendAdaptor):
             if req_pool_indices.numel() > 0:
                 req_idx = req_pool_indices[0].item()
                 print(f"[DEBUG] [adapt_for_attn_metadata] Comparing page_table_dense[0] vs page_table_pool[{req_idx}]:")
-                print(f"  page_table_dense[0, :10]: {page_table_dense[0, :10]}")
-                print(f"  page_table_pool[{req_idx}, :10]: {page_table_pool[req_idx, :10]}")
+                print(f"  page_table_dense: {page_table_dense}")
+                print(f"  page_table_pool: {page_table_pool}")
                 print(f"  Are they equal? {torch.allclose(page_table_dense[0], page_table_pool[req_idx])}")
             
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
