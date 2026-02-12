@@ -263,7 +263,8 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  const int64_t rid = req_pool_indices[bid] - 1;
+  // rid=req_pool_indices[bid] - 1,但是最小值为0,所以需要取max(0, req_pool_indices[bid] - 1)
+  const int64_t rid = max(0, req_pool_indices[bid] - 1);
   // 修复：由于page_table_pool已经通过req_pool_indices索引，rid应该为0
   // const int64_t rid = 0;
   const bool sparse_mask_val = sparse_mask[bid];
