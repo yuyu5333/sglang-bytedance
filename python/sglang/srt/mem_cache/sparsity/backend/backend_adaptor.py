@@ -96,7 +96,6 @@ class NSABackendAdaptor(BackendAdaptor):
             # type 2
             # 修复：使用与type 1相同的页面表索引方式
             page_table_pool = self.req_to_token_pool.req_to_token[req_pool_indices, :max_seqlen_k]
-            print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
                 req_pool_indices=req_pool_indices,
                 top_k_result=selected_indices,
