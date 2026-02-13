@@ -116,7 +116,7 @@ class NSABackendAdaptor(BackendAdaptor):
             #     print(f"  page_table_dense: {page_table_dense}")
             #     print(f"  page_table_pool: {page_table_pool}")
             #     print(f"  Are they equal? {torch.allclose(page_table_dense[0], page_table_pool[0])}")
-            
+            print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
                 req_pool_indices=req_pool_indices,
                 top_k_result=selected_indices,
