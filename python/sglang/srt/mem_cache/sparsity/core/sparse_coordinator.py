@@ -247,11 +247,6 @@ class SparseCoordinator:
         if req.req_pool_idx is not None:
             self.states.register(req.req_pool_idx, len(req.origin_input_ids))
 
-            if self.should_enable_hierarchical_sparse(
-                self.states.prompt_lens[req.req_pool_idx]
-            ).item():
-                self.states.init_topk_indices(req.req_pool_idx, self.req_to_token_pool)
-
             # In pd-disaggregation mode, decode node should Re-Construct representations
             self._maybe_construct_representations(
                 layer_ids=list(range(self.start_layer, self.end_layer)),
@@ -421,6 +416,26 @@ class SparseCoordinator:
                 forward_batch=None,
             )
 
+    def _ensure_sparse_states_initialized(
+        self, req_pool_indices: torch.Tensor
+    ) -> None:
+        """
+        Ensure sparse states are initialized for the given request indices.
+        If hierarchical_sparse_enabled is False but the request should have sparse
+        attention enabled, initialize the states here.
+        """
+        needs_init = ~self.states.hierarchical_sparse_enabled[req_pool_indices]
+        needs_init &= self.states.prompt_lens[req_pool_indices] >= self.states.device_buffer_cnt
+
+        if not needs_init.any():
+            return
+
+        needs_init_indices = req_pool_indices[needs_init]
+        for idx in needs_init_indices:
+            idx_item = idx.item() if idx.dim() > 0 else idx
+            self.states.hierarchical_sparse_enabled[idx_item] = True
+            self.states.init_topk_indices(idx_item, self.req_to_token_pool)
+
     def _handle_sparse_retrieve(
         self,
         query: torch.Tensor,
@@ -430,7 +445,9 @@ class SparseCoordinator:
         **kwargs,
     ) -> Optional[torch.Tensor]:
         req_pool_indices = forward_batch.req_pool_indices
-        # Compute Topk
+
+        self._ensure_sparse_states_initialized(req_pool_indices)
+
         sparse_mask = self.states.hierarchical_sparse_enabled[req_pool_indices]
         selected_indices, valid_lengths = self.algorithm.retrieve_topk(
             queries=query,
