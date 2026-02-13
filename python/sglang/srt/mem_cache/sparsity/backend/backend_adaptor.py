@@ -82,10 +82,6 @@ class NSABackendAdaptor(BackendAdaptor):
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
         
-        # print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
-        # print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices shape: {req_pool_indices.shape}")
-        # print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices type: {req_pool_indices.dtype}")
-        
         if False:
             # type 1
             page_table_dense = self.req_to_token_pool.req_to_token[
@@ -100,22 +96,6 @@ class NSABackendAdaptor(BackendAdaptor):
             # type 2
             # 修复：使用与type 1相同的页面表索引方式
             page_table_pool = self.req_to_token_pool.req_to_token[req_pool_indices, :max_seqlen_k]
-            # print(f"[DEBUG] [adapt_for_attn_metadata] sparse_mask: {sparse_mask}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices shape: {selected_indices.shape}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] selected_indices first 10: {selected_indices[0, :10]}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] page_table_dense first row first 10: {page_table_dense[0, :10]}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] page_table_pool first row first 10: {page_table_pool[0, :10]}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] page_table_dense shape: {page_table_dense.shape}")
-            # print(f"[DEBUG] [adapt_for_attn_metadata] page_table_pool shape: {page_table_pool.shape}")
-            
-            # # 检查页面表内容是否一致
-            # if req_pool_indices.numel() > 0:
-            #     req_idx = req_pool_indices[0].item()
-            #     print(f"[DEBUG] [adapt_for_attn_metadata] Comparing page_table_dense[0] vs page_table_pool[0]:")
-            #     print(f"  page_table_dense: {page_table_dense}")
-            #     print(f"  page_table_pool: {page_table_pool}")
-            #     print(f"  Are they equal? {torch.allclose(page_table_dense[0], page_table_pool[0])}")
             print(f"[DEBUG] [adapt_for_attn_metadata] req_pool_indices: {req_pool_indices}")
             transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
                 req_pool_indices=req_pool_indices,
@@ -127,12 +107,6 @@ class NSABackendAdaptor(BackendAdaptor):
                 page_size=1,
                 out_cache_loc=forward_batch.out_cache_loc,
             )
-
-        # print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices_origin: {transformed_indices_origin}")
-        # print(f"[DEBUG] [adapt_for_attn_metadata] transformed_indices: {transformed_indices}")
-        
-        # assert transformed_indices_origin == transformed_indices, f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
-        # assert torch.allclose(transformed_indices_origin, transformed_indices), f"transformed_indices_origin: {transformed_indices_origin}, transformed_indices: {transformed_indices}"
 
         return transformed_indices
 
