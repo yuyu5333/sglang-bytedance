@@ -425,14 +425,7 @@ class SparseCoordinator:
         **kwargs,
     ) -> Optional[torch.Tensor]:
         req_pool_indices = forward_batch.req_pool_indices
-
-        for idx in req_pool_indices:
-            idx_item = idx.item() if idx.dim() > 0 else idx
-            if not self.states.hierarchical_sparse_enabled[idx_item]:
-                if self.states.prompt_lens[idx_item] >= self.states.device_buffer_cnt:
-                    self.states.hierarchical_sparse_enabled[idx_item] = True
-                    self.states.init_topk_indices(idx_item, self.req_to_token_pool)
-
+        # Compute Topk
         sparse_mask = self.states.hierarchical_sparse_enabled[req_pool_indices]
         selected_indices, valid_lengths = self.algorithm.retrieve_topk(
             queries=query,

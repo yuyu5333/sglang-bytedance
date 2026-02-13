@@ -275,15 +275,9 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int top_k_device_locs_offset = bid * top_k_device_locs_stride;
   const int buffer_offset = rid * buffer_stride_0 + layer_id * buffer_stride_1;
   const int host_offset = rid * host_stride;
-  const int page_table_offset = rid * page_table_stride;
+  const int page_table_offset = bid * page_table_stride;
   const int diff_map_offset = bid * diff_map_stride;
-  if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 7 rid=%ld\n", rid);
-  }
   const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
-  if (tid == 0) {
-    printf("[DEBUG] [rid calculation] 8 rid=%ld\n", rid);
-  }
 
   const int32_t* my_top_k_tokens = top_k_tokens + top_k_tokens_offset;
   int32_t* my_device_buffer_tokens = device_buffer_tokens + buffer_offset;
@@ -296,26 +290,14 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   // Fast path: if sparse is disabled; Building page table directly
   if (!sparse_mask_val || (seq_len <= 0)) {
-    // if (tid == 0) {
-    //   printf("[DEBUG] [Entering fast path] sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
-    //          sparse_mask_val, seq_len, bid);
-    // }
     for (int i = tid; i < NUM_TOP_K; i += BLOCK_SIZE) {
       int32_t top_k_val = my_top_k_tokens[i];
       if (top_k_val >= 0) {
         int32_t page_start = my_page_table[top_k_val * page_size];
         my_top_k_device_locs[i] = page_start / page_size;
-        // if (tid == 0 && i < 5) { // 只输出前5个token的调试信息
-        //   printf("[DEBUG] [Entering fast path] bid=%d, i=%d, top_k_val=%d, page_start=%d, device_loc=%d\n", 
-        //          bid, i, top_k_val, page_start, my_top_k_device_locs[i]);
-        // }
       }
       else {
         my_top_k_device_locs[i] = -1;
-        // if (tid == 0 && i < 5) { // 只输出前5个token的调试信息
-        //   printf("[DEBUG] [Entering fast path] bid=%d, i=%d, top_k_val=%d (negative), device_loc=-1\n", 
-        //          bid, i, top_k_val);
-        // }
       }
     }
     if (tid == 0) {
@@ -324,15 +306,10 @@ __global__ void load_cache_to_device_buffer_kernel(
       const int64_t block_base = bid * stride_per_block;
       const int64_t count_idx = block_base + tasks_per_block;
       transfer_tasks_src[count_idx] = 0;
-      // printf("[DEBUG] [Entering fast path] Fast path completed for bid=%d\n", bid);
     }
     return;
   }
 
-  // if (tid == 0) {
-  //   printf("[DEBUG] [Entering fast path] Entering sparse path: sparse_mask_val=%d, seq_len=%d, bid=%d\n", 
-  //          sparse_mask_val, seq_len, bid);
-  // }
 
   __shared__ int32_t s_top_k_tokens[NUM_TOP_K];
   __shared__ int32_t s_chunk_offset[NUM_BUFFER_CHUNKS + 1];
