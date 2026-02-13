@@ -424,17 +424,30 @@ class SparseCoordinator:
         If hierarchical_sparse_enabled is False but the request should have sparse
         attention enabled, initialize the states here.
         """
-        needs_init = ~self.states.hierarchical_sparse_enabled[req_pool_indices]
-        needs_init &= self.states.prompt_lens[req_pool_indices] >= self.states.device_buffer_cnt
-
-        if not needs_init.any():
+        if req_pool_indices.numel() == 0:
             return
 
-        needs_init_indices = req_pool_indices[needs_init]
+        max_pool_size = self.states.hierarchical_sparse_enabled.shape[0]
+        req_pool_indices_cpu = req_pool_indices.cpu()
+        valid_mask = (req_pool_indices_cpu >= 0) & (req_pool_indices_cpu < max_pool_size)
+
+        if not valid_mask.all().item():
+            return
+
+        hierarchical_sparse_enabled_cpu = self.states.hierarchical_sparse_enabled.cpu()
+        prompt_lens_cpu = self.states.prompt_lens.cpu()
+        device_buffer_cnt = self.states.device_buffer_cnt
+
+        needs_init = ~hierarchical_sparse_enabled_cpu[req_pool_indices_cpu]
+        needs_init = needs_init & (prompt_lens_cpu[req_pool_indices_cpu] >= device_buffer_cnt)
+
+        if not needs_init.any().item():
+            return
+
+        needs_init_indices = req_pool_indices_cpu[needs_init].tolist()
         for idx in needs_init_indices:
-            idx_item = idx.item() if idx.dim() > 0 else idx
-            self.states.hierarchical_sparse_enabled[idx_item] = True
-            self.states.init_topk_indices(idx_item, self.req_to_token_pool)
+            self.states.hierarchical_sparse_enabled[idx] = True
+            self.states.init_topk_indices(idx, self.req_to_token_pool)
 
     def _handle_sparse_retrieve(
         self,
