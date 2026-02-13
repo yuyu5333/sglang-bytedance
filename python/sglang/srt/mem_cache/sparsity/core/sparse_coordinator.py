@@ -247,6 +247,11 @@ class SparseCoordinator:
         if req.req_pool_idx is not None:
             self.states.register(req.req_pool_idx, len(req.origin_input_ids))
 
+            if self.should_enable_hierarchical_sparse(
+                self.states.prompt_lens[req.req_pool_idx]
+            ).item():
+                self.states.init_topk_indices(req.req_pool_idx, self.req_to_token_pool)
+
             # In pd-disaggregation mode, decode node should Re-Construct representations
             self._maybe_construct_representations(
                 layer_ids=list(range(self.start_layer, self.end_layer)),
