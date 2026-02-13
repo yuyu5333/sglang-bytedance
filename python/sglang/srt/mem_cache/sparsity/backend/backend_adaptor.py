@@ -4,6 +4,9 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import nvtx
+from sglang.srt.layers.attention.nsa.transform_index import (
+    transform_index_page_table_decode_ref,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -76,7 +79,7 @@ class NSABackendAdaptor(BackendAdaptor):
         """Transform NSA topk indices to physical device indices."""
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())
-        page_table = self.req_to_token_pool.req_to_token[:, :max_seqlen_k]
+        page_table = self.req_to_token_pool.req_to_token[req_pool_indices, :max_seqlen_k]
         transformed_indices = self.sparse_kv_cache_manager.swap_in_selected_pages(
             req_pool_indices=req_pool_indices,
             top_k_result=selected_indices,
