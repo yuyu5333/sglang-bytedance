@@ -467,7 +467,19 @@ class SparseCoordinator:
         Two strategies based on page_size:
         - page_size > 1: Keep prefix + last page, free middle (page-based caching)
         - page_size == 1: Keep first target_len tokens, free rest (token-wise caching)
+
+        Note: In PD disaggregation mode, decode node should NOT truncate KV cache
+        because the KV cache is transferred from prefill node and should be kept intact.
         """
+        # Skip truncation in PD disaggregation decode node
+        if (
+            hasattr(self.sparse_kv_cache_manager, 'server_args')
+            and self.sparse_kv_cache_manager.server_args.disaggregation_mode == "decode"
+        ):
+            # For decode node, just mark as enabled without truncation
+            req.hierarchical_sparse_enabled = True
+            return
+
         if req.is_chunked > 0 or req.finished() or req.hierarchical_sparse_enabled:
             return
 
