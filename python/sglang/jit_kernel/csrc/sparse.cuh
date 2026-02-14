@@ -79,17 +79,22 @@ template <std::size_t kBytes, std::size_t kUnit, std::size_t kThreads>
 __always_inline __device__ auto load_vec(const void* __restrict__ src) {
   using Package = details::mem_package_t<kBytes, kUnit>;
   constexpr auto kBytesPerLoop = sizeof(Package) * kThreads;
-  constexpr auto kLoopCount = kBytes / kBytesPerLoop;
-  static_assert(kBytes % kBytesPerLoop == 0, "kBytes must be multiple of 128 bytes");
+  constexpr auto kLoopCount = (kBytes + kBytesPerLoop - 1) / kBytesPerLoop;
 
   const auto src_packed = static_cast<const Package*>(src);
   const auto lane_id = threadIdx.x % kThreads;
-  device_vec<Package, kLoopCount> vec;
+  device_vec<Package, kLoopCount> vec{};
 
 #pragma unroll kLoopCount
   for (std::size_t i = 0; i < kLoopCount; ++i) {
     const auto j = i * kThreads + lane_id;
-    vec.data[i] = details::load_nc(src_packed + j);
+    if constexpr (kBytes % kBytesPerLoop == 0) {
+      vec.data[i] = details::load_nc(src_packed + j);
+    } else {
+      if (j * sizeof(Package) < kBytes) {
+        vec.data[i] = details::load_nc(src_packed + j);
+      }
+    }
   }
 
   return vec;
@@ -99,8 +104,7 @@ template <std::size_t kBytes, std::size_t kUnit, std::size_t kThreads, typename 
 __always_inline __device__ void store_vec(void* __restrict__ dst, const Tp& vec) {
   using Package = details::mem_package_t<kBytes, kUnit>;
   constexpr auto kBytesPerLoop = sizeof(Package) * kThreads;
-  constexpr auto kLoopCount = kBytes / kBytesPerLoop;
-  static_assert(kBytes % kBytesPerLoop == 0, "kBytes must be multiple of 128 bytes");
+  constexpr auto kLoopCount = (kBytes + kBytesPerLoop - 1) / kBytesPerLoop;
   static_assert(std::is_same_v<Tp, device_vec<Package, kLoopCount>>);
 
   const auto dst_packed = static_cast<Package*>(dst);
@@ -109,7 +113,13 @@ __always_inline __device__ void store_vec(void* __restrict__ dst, const Tp& vec)
 #pragma unroll kLoopCount
   for (std::size_t i = 0; i < kLoopCount; ++i) {
     const auto j = i * kThreads + lane_id;
-    details::store_nc(dst_packed + j, vec.data[i]);
+    if constexpr (kBytes % kBytesPerLoop == 0) {
+      details::store_nc(dst_packed + j, vec.data[i]);
+    } else {
+      if (j * sizeof(Package) < kBytes) {
+        details::store_nc(dst_packed + j, vec.data[i]);
+      }
+    }
   }
 }
 
@@ -253,9 +263,9 @@ __global__ void load_cache_to_device_buffer_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  const int64_t rid = req_pool_indices[bid];
+  const IndexT rid = req_pool_indices[bid];
   const bool sparse_mask_val = sparse_mask[bid];
-  const int64_t seq_len = seq_lens[bid] - 1;
+  const IndexT seq_len = seq_lens[bid] - 1;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
@@ -265,7 +275,7 @@ __global__ void load_cache_to_device_buffer_kernel(
   const int top_k_device_locs_offset = bid * top_k_device_locs_stride;
   const int buffer_offset = rid * buffer_stride_0 + layer_id * buffer_stride_1;
   const int host_offset = rid * host_stride;
-  const int page_table_offset = rid * page_table_stride;
+  const int page_table_offset = bid * page_table_stride;
   const int diff_map_offset = bid * diff_map_stride;
   const int lru_slot_offset = rid * lru_slot_stride_0 + layer_id * lru_slot_stride_1;
 
@@ -285,6 +295,9 @@ __global__ void load_cache_to_device_buffer_kernel(
       if (top_k_val >= 0) {
         int32_t page_start = my_page_table[top_k_val * page_size];
         my_top_k_device_locs[i] = page_start / page_size;
+      }
+      else {
+        my_top_k_device_locs[i] = -1;
       }
     }
     if (tid == 0) {
