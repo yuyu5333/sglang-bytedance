@@ -245,21 +245,13 @@ class SparseCoordinator:
         Registers the request in the state tracker to enable sparse attention processing.
         """
         if req.req_pool_idx is not None:
-            prompt_len = len(req.origin_input_ids)
-            self.states.register(req.req_pool_idx, prompt_len)
-
-            # In pd-disaggregation mode, decode node should initialize topk indices
-            # for long requests that will use hierarchical sparse attention
-            if self.should_enable_hierarchical_sparse(
-                torch.tensor([prompt_len], device=self.device)
-            ).item():
-                self.states.init_topk_indices(req.req_pool_idx, self.req_to_token_pool)
+            self.states.register(req.req_pool_idx, len(req.origin_input_ids))
 
             # In pd-disaggregation mode, decode node should Re-Construct representations
             self._maybe_construct_representations(
                 layer_ids=list(range(self.start_layer, self.end_layer)),
                 req_pool_indices=torch.tensor([req.req_pool_idx], device=self.device),
-                seq_lens=torch.tensor([prompt_len], device=self.device),
+                seq_lens=torch.tensor([len(req.origin_input_ids)], device=self.device),
             )
 
     def trigger_async_offload_prompt_cache(self, req: "Req") -> None:
@@ -467,19 +459,7 @@ class SparseCoordinator:
         Two strategies based on page_size:
         - page_size > 1: Keep prefix + last page, free middle (page-based caching)
         - page_size == 1: Keep first target_len tokens, free rest (token-wise caching)
-
-        Note: In PD disaggregation mode, decode node should NOT truncate KV cache
-        because the KV cache is transferred from prefill node and should be kept intact.
         """
-        # Skip truncation in PD disaggregation decode node
-        if (
-            hasattr(self.sparse_kv_cache_manager, 'server_args')
-            and self.sparse_kv_cache_manager.server_args.disaggregation_mode == "decode"
-        ):
-            # For decode node, just mark as enabled without truncation
-            req.hierarchical_sparse_enabled = True
-            return
-
         if req.is_chunked > 0 or req.finished() or req.hierarchical_sparse_enabled:
             return
 
