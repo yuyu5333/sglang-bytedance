@@ -428,6 +428,7 @@ class SparseCoordinator:
         attn_metadata: Optional[Any],
         **kwargs,
     ) -> Optional[torch.Tensor]:
+        logger.info(f"[DEBUG] _handle_sparse_retrieve called, layer_id={layer.layer_id}")
         req_pool_indices = forward_batch.req_pool_indices
         # Compute Topk
         sparse_mask = self.states.hierarchical_sparse_enabled[req_pool_indices]
@@ -452,6 +453,7 @@ class SparseCoordinator:
             page_size=self.page_size,
             layer_id=layer.layer_id,
         )
+        logger.info(f"[DEBUG] _handle_sparse_retrieve finished")
         return result
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(

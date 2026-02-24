@@ -73,6 +73,7 @@ class NSABackendAdaptor(BackendAdaptor):
         layer_id: int,
         **kwargs,
     ) -> Optional[torch.Tensor]:
+        logger.info(f"[DEBUG] adapt_for_attn_metadata called, layer_id={layer_id}")
         """Transform NSA topk indices to physical device indices."""
         req_pool_indices = forward_batch.req_pool_indices
         max_seqlen_k = int(forward_batch.seq_lens_cpu.max().item())

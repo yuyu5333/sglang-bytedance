@@ -114,6 +114,7 @@ class SparseKVCacheManager:
         Returns:
             Device indices of the selected pages/tokens
         """
+        logger.info(f"[DEBUG] swap_in_selected_pages called, bs={bs}, layer_id={layer_id}")
         bs = sparse_mask.shape[0]
         block_size = 512 if top_k_result.size(1) == 2048 else 32
         if self.is_mla_pool:
@@ -166,6 +167,7 @@ class SparseKVCacheManager:
         result = self.req_states.curr_device_indices[
             :bs, : self.req_states.topk_tokens_cnt // page_size
         ]
+        logger.info(f"[DEBUG] swap_in_selected_pages finished")
         return result
 
     def offload_decode_token_kvcache(

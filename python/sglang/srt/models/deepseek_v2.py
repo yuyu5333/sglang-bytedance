@@ -1635,6 +1635,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                         q_lora=q_lora,
                         positions=positions,
                     )
+                    logger.info(f"[DEBUG] After attention_begin, layer_id={self.layer_id}")
                 else:
                     topk_indices = self.indexer(
                         x=hidden_states,
