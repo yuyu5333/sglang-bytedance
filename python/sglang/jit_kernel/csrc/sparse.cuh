@@ -338,9 +338,7 @@ __global__ void load_cache_to_device_buffer_kernel(
   for (int i = tid; i < HOT_BUFFER_SIZE; i += BLOCK_SIZE) {
     if (i < NUM_TOP_K) {
       int32_t top_k_val = my_top_k_tokens[i];
-      if (top_k_val >= 0 && top_k_val < diff_map_stride) {
-        my_diff_map[top_k_val] = i;
-      }
+      my_diff_map[top_k_val] = i;
       s_top_k_tokens[i] = top_k_val;
     }
     s_lru_bitmap[i] = false;
@@ -497,9 +495,7 @@ __global__ void load_cache_to_device_buffer_kernel(
   for (int i = tid; i < HOT_BUFFER_SIZE; i += BLOCK_SIZE) {
     if (i < NUM_TOP_K) {
       int32_t top_k_val = my_top_k_tokens[i];
-      if (top_k_val >= 0 && top_k_val < diff_map_stride) {
-        my_diff_map[top_k_val] = -1;
-      }
+      my_diff_map[top_k_val] = -1;
     }
     if (i < LRU_SIZE) {
       my_lru_slots[i] = s_lru_slots_out[i];
