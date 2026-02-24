@@ -126,6 +126,7 @@ class RequestTrackers:
 
     @nvtx.annotate(message="RequestTrackers.init_topk_indices", color="green")
     def init_topk_indices(self, req_pool_idx: int, req_to_token_pool) -> None:
+        logger.info(f"[DEBUG] init_topk_indices called for req_pool_idx={req_pool_idx}")
         # Store device indices
         if self.page_size > 1:
             num_pages = self.device_buffer_cnt // self.page_size
@@ -149,6 +150,8 @@ class RequestTrackers:
             )
             self.lru_slots[req_pool_idx] = torch.arange(indices_len, device=self.device)
         self.hierarchical_sparse_enabled[req_pool_idx] = True
+        
+        logger.info(f"[DEBUG] init_topk_indices finished for req_pool_idx={req_pool_idx}")
 
 
 @dataclass
@@ -285,6 +288,7 @@ class SparseCoordinator:
             self._maybe_truncate_kv_cache_after_prompt_offloaded(
                 req, self.req_to_token_pool, tree_cache
             )
+            logger.info(f"After truncate, req.hierarchical_sparse_enabled={req.hierarchical_sparse_enabled}")
 
             if req.hierarchical_sparse_enabled:
                 self.states.init_topk_indices(req.req_pool_idx, self.req_to_token_pool)

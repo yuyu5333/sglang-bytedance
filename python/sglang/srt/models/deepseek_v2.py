@@ -1622,6 +1622,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                     forward_batch.forward_mode.is_decode()
                     and sparse_coordinator is not None
                 ):
+                    logger.info(f"[DEBUG] Before attention_begin, forward_mode={forward_batch.forward_mode}")
                     topk_indices = sparse_coordinator.attention_begin(
                         query=None,
                         key=None,
