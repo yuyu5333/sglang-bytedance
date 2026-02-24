@@ -1623,6 +1623,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                     and sparse_coordinator is not None
                 ):
                     logger.info(f"[DEBUG] Before attention_begin, forward_mode={forward_batch.forward_mode}")
+                    logger.info(f"[DEBUG] Before calling NSA attention, layer {self.layer_id}")
                     topk_indices = sparse_coordinator.attention_begin(
                         query=None,
                         key=None,
@@ -1636,6 +1637,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                         positions=positions,
                     )
                     logger.info(f"[DEBUG] After attention_begin, layer_id={self.layer_id}")
+                    logger.info(f"[DEBUG] After attention_begin for layer {self.layer_id}, topk_indices shape: {topk_indices.shape if topk_indices is not None else None}")
                 else:
                     topk_indices = self.indexer(
                         x=hidden_states,

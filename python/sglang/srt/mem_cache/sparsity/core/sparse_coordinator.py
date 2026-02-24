@@ -454,6 +454,7 @@ class SparseCoordinator:
             layer_id=layer.layer_id,
         )
         logger.info(f"[DEBUG] _handle_sparse_retrieve finished")
+        logger.info(f"[DEBUG] _handle_sparse_retrieve returning, result shape={result.shape if result is not None else None}")
         return result
 
     def _maybe_truncate_kv_cache_after_prompt_offloaded(
