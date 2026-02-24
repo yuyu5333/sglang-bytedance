@@ -432,6 +432,7 @@ class SparseCoordinator:
         req_pool_indices = forward_batch.req_pool_indices
         # Compute Topk
         sparse_mask = self.states.hierarchical_sparse_enabled[req_pool_indices]
+        logger.info(f"[DEBUG] Layer {layer.layer_id}: before retrieve_topk")
         selected_indices, valid_lengths = self.algorithm.retrieve_topk(
             queries=query,
             layer_id=layer.layer_id,
@@ -441,8 +442,10 @@ class SparseCoordinator:
             attn_metadata=attn_metadata,
             **kwargs,
         )
+        logger.info(f"[DEBUG] Layer {layer.layer_id}: after retrieve_topk, selected_indices shape={selected_indices.shape}")
 
         # Adapt Attention Metadata
+        logger.info(f"[DEBUG] Layer {layer.layer_id}: before adapt_for_attn_metadata")
         result = self.backend_adaptor.adapt_for_attn_metadata(
             selected_indices=selected_indices,
             valid_lengths=valid_lengths,
@@ -453,7 +456,7 @@ class SparseCoordinator:
             page_size=self.page_size,
             layer_id=layer.layer_id,
         )
-        logger.info(f"[DEBUG] _handle_sparse_retrieve finished")
+        logger.info(f"[DEBUG] Layer {layer.layer_id}: after adapt_for_attn_metadata, result shape={result.shape if result is not None else None}")
         logger.info(f"[DEBUG] _handle_sparse_retrieve returning, result shape={result.shape if result is not None else None}")
         return result
 
