@@ -936,6 +936,7 @@ class Indexer(MultiPlatformOp):
         if metadata is None:
             logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: metadata is None, returning None")
             return None
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: metadata not None, continuing")
 
         # Determine if should skip topk based on sequence length
         # We can only skip the logits computation if cuda graph is not involved
@@ -944,9 +945,11 @@ class Indexer(MultiPlatformOp):
             if forward_batch.seq_lens_cpu is not None:
                 max_kv_len = forward_batch.seq_lens_cpu.max().item()
                 skip_logits_computation = max_kv_len <= self.index_topk
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: skip_logits_computation={skip_logits_computation}")
 
         # Optimization: fast path when skipping topk computation
         if skip_logits_computation and (not self.nsa_enable_prefill_cp):
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: taking fast path _forward_cuda_k_only")
             return self._forward_cuda_k_only(
                 x,
                 positions,
@@ -957,23 +960,31 @@ class Indexer(MultiPlatformOp):
                 metadata,
                 return_indices,
             )
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: NOT taking fast path, continuing to main path")
 
         if enable_dual_stream and forward_batch.forward_mode.is_decode_or_idle():
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: enable_dual_stream path")
             current_stream = torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: after wait_stream")
             weights = self._project_and_scale_head_gates(x)
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: after _project_and_scale_head_gates")
             with torch.cuda.stream(self.alt_stream):
                 query, key = self._get_q_k_bf16(
                     q_lora, x, positions, False, forward_batch=forward_batch
                 )
+                logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: after _get_q_k_bf16 in alt_stream")
                 q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
             current_stream.wait_stream(self.alt_stream)
             weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         else:
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: NOT enable_dual_stream path")
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: calling _get_q_k_bf16")
             query, key = self._get_q_k_bf16(
                 q_lora, x, positions, enable_dual_stream, forward_batch=forward_batch
             )
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: after _get_q_k_bf16")
 
             if enable_dual_stream:
                 current_stream = torch.cuda.current_stream()
@@ -984,8 +995,12 @@ class Indexer(MultiPlatformOp):
                     k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
                 current_stream.wait_stream(self.alt_stream)
             else:
+                logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: calling act_quant for query")
                 q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
+                logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: after act_quant for query")
+                logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: calling act_quant for key")
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
+                logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: after act_quant for key")
 
             # `_get_logits_head_gate` expects a Tensor. For tuple activations, dequantize
             # to a float tensor here (callsite), keeping `_get_logits_head_gate` backend-agnostic.
