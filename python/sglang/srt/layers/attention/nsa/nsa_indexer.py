@@ -903,6 +903,8 @@ class Indexer(MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
+        import logging
+        logger = logging.getLogger(__name__)
         logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: START")
         if _is_hip:
             from sglang.srt.layers.attention.nsa.tilelang_kernel import act_quant
