@@ -903,6 +903,7 @@ class Indexer(MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: START")
         if _is_hip:
             from sglang.srt.layers.attention.nsa.tilelang_kernel import act_quant
         elif not _is_npu:
@@ -914,10 +915,12 @@ class Indexer(MultiPlatformOp):
         # When upstream uses fused FP8 RMSNorm+quant, activations may be passed as
         # a tuple like (x_fp8, x_scale[, y]). Use `x_meta` for shape/device queries.
         x_meta = x[0] if isinstance(x, tuple) else x
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: x_meta.shape={x_meta.shape}")
 
         metadata = forward_batch.attn_backend.get_indexer_metadata(
             layer_id, forward_batch
         )
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: metadata fetched")
 
         enable_dual_stream = (
             self.alt_stream is not None
@@ -925,9 +928,11 @@ class Indexer(MultiPlatformOp):
             and q_lora.shape[0] > 0
             and q_lora.shape[0] <= DUAL_STREAM_TOKEN_THRESHOLD
         )
+        logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: enable_dual_stream={enable_dual_stream}")
 
         # skip NSA if attention backend choose to skip this batch
         if metadata is None:
+            logger.info(f"[DEBUG] Indexer forward_cuda layer={layer_id}: metadata is None, returning None")
             return None
 
         # Determine if should skip topk based on sequence length
