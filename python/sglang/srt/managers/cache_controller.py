@@ -674,7 +674,7 @@ class HiCacheController:
         with device_module.stream(self.write_stream):
             start_event.wait(self.write_stream)
             self.mem_pool_host.backup_from_device_all_layer(
-                self.mem_pool_device, host_indices, device_indices, self.io_backend
+                self.mem_pool_host.device_pool, host_indices, device_indices, self.io_backend
             )
             finish_event.record()
             # NOTE: We must save the host indices and device indices here,
@@ -738,7 +738,7 @@ class HiCacheController:
             producer_event.start_event.wait(self.load_stream)
             for i in range(self.layer_num):
                 self.mem_pool_host.load_to_device_per_layer(
-                    self.mem_pool_device,
+                    self.mem_pool_host.device_pool,
                     host_indices,
                     device_indices,
                     i,

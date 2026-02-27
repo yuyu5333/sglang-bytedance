@@ -1267,6 +1267,42 @@ class HybridLinearKVPool(KVCache):
     def get_kv_size_bytes(self):
         return self.full_kv_pool.get_kv_size_bytes()
 
+    @property
+    def layer_num(self):
+        return self.full_kv_pool.layer_num
+
+    @property
+    def k_buffer(self):
+        return self.full_kv_pool.k_buffer
+
+    @property
+    def v_buffer(self):
+        return self.full_kv_pool.v_buffer
+
+    @property
+    def k_data_ptrs(self):
+        return self.full_kv_pool.k_data_ptrs
+
+    @property
+    def v_data_ptrs(self):
+        return self.full_kv_pool.v_data_ptrs
+
+    @property
+    def data_ptrs(self):
+        return self.full_kv_pool.data_ptrs
+
+    @property
+    def data_strides(self):
+        return self.full_kv_pool.data_strides
+
+    @property
+    def kv_buffer(self):
+        return self.full_kv_pool.kv_buffer
+
+    def register_layer_transfer_counter(self, layer_transfer_counter: LayerDoneCounter):
+        self.layer_transfer_counter = layer_transfer_counter
+        self.full_kv_pool.register_layer_transfer_counter(layer_transfer_counter)
+
     def get_contiguous_buf_infos(self):
         return self.full_kv_pool.get_contiguous_buf_infos()
 

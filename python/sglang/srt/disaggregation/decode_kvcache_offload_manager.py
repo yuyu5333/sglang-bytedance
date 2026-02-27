@@ -13,6 +13,7 @@ from sglang.srt.managers.cache_controller import HiCacheController
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.memory_pool import (
+    HybridLinearKVPool,
     MHATokenToKVPool,
     MLATokenToKVPool,
     ReqToTokenPool,
@@ -54,6 +55,9 @@ class DecodeKVCacheOffloadManager:
                 self.page_size, (env_stride // self.page_size) * self.page_size
             )
         kv_cache = self.token_to_kv_pool_allocator.get_kvcache()
+        if isinstance(kv_cache, HybridLinearKVPool):
+            kv_cache = kv_cache.full_kv_pool
+
         if isinstance(kv_cache, MHATokenToKVPool):
             self.decode_host_mem_pool = MHATokenToKVPoolHost(
                 kv_cache,
