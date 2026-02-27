@@ -371,6 +371,12 @@ class MambaPool:
         self.copy_from(src_index, dst_index)
         return dst_index
 
+    def get_cpu_copy(self, indices):
+        return self.full_kv_pool.get_cpu_copy(indices)
+
+    def load_cpu_copy(self, kv_cache_cpu, indices):
+        return self.full_kv_pool.load_cpu_copy(kv_cache_cpu, indices)
+
     def get_contiguous_buf_infos(self):
         """
         Get buffer info for RDMA registration.
@@ -1305,6 +1311,12 @@ class HybridLinearKVPool(KVCache):
 
     def get_contiguous_buf_infos(self):
         return self.full_kv_pool.get_contiguous_buf_infos()
+
+    def get_cpu_copy(self, indices):
+        return self.full_kv_pool.get_cpu_copy(indices)
+
+    def load_cpu_copy(self, kv_cache_cpu, indices):
+        return self.full_kv_pool.load_cpu_copy(kv_cache_cpu, indices)
 
     def get_state_buf_infos(self):
         mamba_data_ptrs, mamba_data_lens, mamba_item_lens = (
