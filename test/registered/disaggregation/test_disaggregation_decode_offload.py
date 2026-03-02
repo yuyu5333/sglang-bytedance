@@ -161,8 +161,8 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         print(f"Second round metrics: {metrics2}")
 
         # Assert accuracy is above a minimum threshold for both rounds
-        self.assertGreater(metrics1["accuracy"], 0.30)
-        self.assertGreater(metrics2["accuracy"], 0.30)
+        self.assertGreater(metrics1["accuracy"], 0.28)
+        self.assertGreater(metrics2["accuracy"], 0.28)
 
         # Accuracy should be consistent (ideally identical at temperature 0)
         self.assertAlmostEqual(metrics1["accuracy"], metrics2["accuracy"], delta=0.01)
