@@ -27,6 +27,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
     def setUpClass(cls):
         # Set environment variable to make offloading more frequent for testing purposes
         cls.old_stride = os.environ.get("SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE")
+        os.environ["SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR"] = "/tmp/hicache"
         os.environ["SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE"] = "16"
 
         super().setUpClass()
@@ -89,6 +90,8 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "2",
             "--page-size",
             "16",
+            "--hicache-storage-backend",
+            "file",
         ]
         decode_args += cls.transfer_backend + cls.rdma_devices
         cls.process_decode = popen_launch_pd_server(
