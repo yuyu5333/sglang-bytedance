@@ -149,15 +149,20 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         print("Waiting for KV cache to be committed to disk...")
         time.sleep(10) 
 
-        print("--- Restarting Prefill Node and Router (To clear memory cache) ---")
+        print("--- Restarting All Nodes (Prefill, Decode, and Router) ---")
         kill_process_tree(self.process_prefill.pid)
+        kill_process_tree(self.process_decode.pid)
         kill_process_tree(self.process_lb.pid)
         self.process_prefill.wait()
+        self.process_decode.wait()
         self.process_lb.wait()
+
         self.start_prefill()
+        self.start_decode()
         self.launch_lb()
         self.wait_server_ready(self.prefill_url + "/health")
-        print("Prefill node and Router restarted and ready.")
+        self.wait_server_ready(self.decode_url + "/health")
+        print("All nodes restarted and ready.")
 
         print("--- Starting Second Round (Expected to Load KV Cache from Storage) ---")
         metrics2 = run_eval_few_shot_gsm8k(args)
