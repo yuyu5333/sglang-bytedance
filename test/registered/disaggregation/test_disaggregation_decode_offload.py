@@ -43,7 +43,9 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         # Using a small model for faster test execution and reduced memory footprint
         # cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
         # for test local model
-        cls.model = "/data00/Llama-3.2-1B-Instruct"
+        # cls.model = "/data00/Llama-3.2-1B-Instruct"
+        cls.model = "/data00/Llama-3.1-8B-Instruct"
+        
 
         # Non-blocking start of prefill and decode servers
         cls.start_prefill()
