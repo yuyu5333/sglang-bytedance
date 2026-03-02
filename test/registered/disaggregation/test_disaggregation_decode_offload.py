@@ -84,7 +84,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "1",
             "--disaggregation-decode-enable-offload-kvcache",
             "--num-reserved-decode-tokens",
-            "128",  # Small number of reserved tokens to trigger offload sooner
+            "128",
             "--hicache-ratio",
             "2",
             "--page-size",
@@ -108,7 +108,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             data_path=None,
             num_questions=20,
             max_new_tokens=512,
-            parallel=8,
+            parallel=16,
             host=f"http://{self.base_host}",
             port=int(self.lb_port),
         )
