@@ -454,7 +454,7 @@ class HiRadixCache(RadixCache):
             return None
 
         logger.info(
-            f"Loading back {len(host_indices)} tokens from host to device for node {last_hit_node.id}"
+            f"[DEBUG] [load_back] Loading back {len(host_indices)} tokens from host to device for node {last_hit_node.id}"
         )
         device_indices = self.cache_controller.load(
             host_indices=host_indices, node_id=last_hit_node.id
@@ -761,7 +761,7 @@ class HiRadixCache(RadixCache):
             # no sufficient host memory for prefetch
             return
         logger.info(
-            f"Prefetching {prefetch_length} tokens from storage to host for request {req_id}"
+            f"[DEBUG] [prefetch_from_storage] Prefetching {prefetch_length} tokens from storage to host for request {req_id}"
         )
         operation = self.cache_controller.prefetch(
             req_id, host_indices, new_input_tokens, last_hash, prefix_keys
