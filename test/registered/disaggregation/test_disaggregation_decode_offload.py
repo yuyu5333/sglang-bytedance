@@ -139,19 +139,14 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             num_examples=64,
             num_threads=32,
             return_latency=True,
-            data_dir="/data00/mmlu",
         )
 
-        print("--- Starting First Round (Expected to Offload KV Cache) ---")
-        metrics1, latency1 = run_eval(args)
-        print(f"First round metrics: {metrics1}, Latency: {latency1:.3f} s")
+        metrics1 = run_eval(args)
 
         # Ensure all offloads are committed to disk
         import time
-        print("Waiting for KV cache to be committed to disk...")
         time.sleep(10) 
 
-        print("--- Restarting All Nodes (Prefill, Decode, and Router) ---")
         kill_process_tree(self.process_prefill.pid)
         kill_process_tree(self.process_decode.pid)
         kill_process_tree(self.process_lb.pid)
@@ -164,11 +159,8 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         self.launch_lb()
         self.wait_server_ready(self.prefill_url + "/health")
         self.wait_server_ready(self.decode_url + "/health")
-        print("All nodes restarted and ready.")
 
-        print("--- Starting Second Round (Expected to Load KV Cache from Storage) ---")
-        metrics2, latency2 = run_eval(args)
-        print(f"Second round metrics: {metrics2}, Latency: {latency2:.3f} s")
+        metrics2 = run_eval(args)
 
         # Assert score is above a minimum threshold for both rounds
         self.assertGreater(metrics1["score"], 0.60)
@@ -176,15 +168,6 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
 
         # Score should be consistent
         self.assertAlmostEqual(metrics1["score"], metrics2["score"], delta=0.01)
-        
-        # for test
-        # Calculate improvements
-        latency_reduction = (latency1 - latency2) / latency1 * 100
-        
-        print(f"--- Comparison Results ---")
-        print(f"Score: Round 1 = {metrics1['score']:.3f}, Round 2 = {metrics2['score']:.3f}")
-        print(f"Latency: Round 1 = {latency1:.3f} s, Round 2 = {latency2:.3f} s")
-        print(f"Latency Reduction: {latency_reduction:.2f}%")
 
 
 if __name__ == "__main__":
