@@ -139,6 +139,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             num_examples=64,
             num_threads=32,
             return_latency=True,
+            data_dir="/data00/mmlu",
         )
 
         print("--- Starting First Round (Expected to Offload KV Cache) ---")
@@ -176,6 +177,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         # Score should be consistent
         self.assertAlmostEqual(metrics1["score"], metrics2["score"], delta=0.01)
         
+        # for test
         # Calculate improvements
         latency_reduction = (latency1 - latency2) / latency1 * 100
         
