@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_cuda_ci
-from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
+from sglang.test.run_eval import run_eval
 from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
 )
@@ -124,27 +124,26 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             other_args=decode_args,
         )
 
-    def test_gsm8k_double_eval(self):
+    def test_mmlu_double_eval(self):
         """
-        Run idx rounds of GSM8K evaluation:
+        Run two rounds of MMLU evaluation:
         1. First round: Decode node offloads KV cache back to disk (HiCache).
-        2. Restart Prefill node to clear its memory cache.
+        2. Restart All Nodes to clear memory cache.
         3. Second round: Prefill node loads KV cache from disk (HiCache).
-        Verify that both rounds produce consistent accuracy.
+        Verify that both rounds produce consistent scores and compare performance.
         """
         args = SimpleNamespace(
-            num_shots=5,
-            data_path=None,
-            num_questions=20,
-            max_new_tokens=512,
-            parallel=16,
-            host=f"http://{self.base_host}",
-            port=int(self.lb_port),
+            base_url=f"http://{self.base_host}:{self.lb_port}",
+            model=self.model,
+            eval_name="mmlu",
+            num_examples=64,
+            num_threads=32,
+            return_latency=True,
         )
 
         print("--- Starting First Round (Expected to Offload KV Cache) ---")
-        metrics1 = run_eval_few_shot_gsm8k(args)
-        print(f"First round metrics: {metrics1}")
+        metrics1, latency1 = run_eval(args)
+        print(f"First round metrics: {metrics1}, Latency: {latency1:.3f} s")
 
         # Ensure all offloads are committed to disk
         import time
@@ -167,26 +166,23 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         print("All nodes restarted and ready.")
 
         print("--- Starting Second Round (Expected to Load KV Cache from Storage) ---")
-        metrics2 = run_eval_few_shot_gsm8k(args)
-        print(f"Second round metrics: {metrics2}")
+        metrics2, latency2 = run_eval(args)
+        print(f"Second round metrics: {metrics2}, Latency: {latency2:.3f} s")
 
-        # Assert accuracy is above a minimum threshold for both rounds
-        self.assertGreater(metrics1["accuracy"], 0.28)
-        self.assertGreater(metrics2["accuracy"], 0.28)
+        # Assert score is above a minimum threshold for both rounds
+        self.assertGreater(metrics1["score"], 0.60)
+        self.assertGreater(metrics2["score"], 0.60)
 
-        # Accuracy should be consistent (ideally identical at temperature 0)
-        self.assertAlmostEqual(metrics1["accuracy"], metrics2["accuracy"], delta=0.01)
+        # Score should be consistent
+        self.assertAlmostEqual(metrics1["score"], metrics2["score"], delta=0.01)
         
         # Calculate improvements
-        latency_reduction = (metrics1["latency"] - metrics2["latency"]) / metrics1["latency"] * 100
-        throughput_improvement = (metrics2["output_throughput"] - metrics1["output_throughput"]) / metrics1["output_throughput"] * 100
+        latency_reduction = (latency1 - latency2) / latency1 * 100
         
         print(f"--- Comparison Results ---")
-        print(f"Accuracy: Round 1 = {metrics1['accuracy']:.3f}, Round 2 = {metrics2['accuracy']:.3f}")
-        print(f"Latency: Round 1 = {metrics1['latency']:.3f} s, Round 2 = {metrics2['latency']:.3f} s")
+        print(f"Score: Round 1 = {metrics1['score']:.3f}, Round 2 = {metrics2['score']:.3f}")
+        print(f"Latency: Round 1 = {latency1:.3f} s, Round 2 = {latency2:.3f} s")
         print(f"Latency Reduction: {latency_reduction:.2f}%")
-        print(f"Output Throughput: Round 1 = {metrics1['output_throughput']:.3f} token/s, Round 2 = {metrics2['output_throughput']:.3f} token/s")
-        print(f"Throughput Improvement: {throughput_improvement:.2f}%")
 
 
 if __name__ == "__main__":
