@@ -453,6 +453,9 @@ class HiRadixCache(RadixCache):
             self.dec_lock_ref(ancester_node)
             return None
 
+        logger.info(
+            f"Loading back {len(host_indices)} tokens from host to device for node {last_hit_node.id}"
+        )
         device_indices = self.cache_controller.load(
             host_indices=host_indices, node_id=last_hit_node.id
         )
@@ -757,6 +760,9 @@ class HiRadixCache(RadixCache):
             last_host_node.release_host()
             # no sufficient host memory for prefetch
             return
+        logger.info(
+            f"Prefetching {prefetch_length} tokens from storage to host for request {req_id}"
+        )
         operation = self.cache_controller.prefetch(
             req_id, host_indices, new_input_tokens, last_hash, prefix_keys
         )
