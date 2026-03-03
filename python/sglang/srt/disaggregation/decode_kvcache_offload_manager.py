@@ -226,7 +226,7 @@ class DecodeKVCacheOffloadManager:
                     self.offloaded_state[req.rid].last_hash = last_hash
             finish_count -= 1
 
-    def _release_finished_req(self, req: Req, start_offset: int, req_pool_idx: int = None):
+    def _release_finished_req(self, req: Req, start_offset: int):
         if not req.kv_committed_freed:
             kv_committed_len = req.pop_committed_kv_cache()
         else:
@@ -234,27 +234,29 @@ class DecodeKVCacheOffloadManager:
 
         start = start_offset
         end = kv_committed_len
-        # Free the incremental part of the request (NSA-aware)
-        kv_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, start:end]
-        self.token_to_kv_pool_allocator.free(kv_indices)
 
-        if req_pool_idx is not None and req_pool_idx != -1:
+        # Free the incremental part of the request (NSA-aware)
+        if req.req_pool_idx is not None and req.req_pool_idx != -1:
             # Ensure indices are within bounds
-            end = min(end, self.req_to_token_pool.req_to_token.shape[1])
-            if start < end:
-                kv_indices = self.req_to_token_pool.req_to_token[req_pool_idx, start:end]
+            end_bounded = min(end, self.req_to_token_pool.req_to_token.shape[1])
+            if start < end_bounded:
+                kv_indices = self.req_to_token_pool.req_to_token[
+                    req.req_pool_idx, start:end_bounded
+                ]
                 self.token_to_kv_pool_allocator.free(kv_indices)
 
         # Free overallocated (e.g. for speculative decoding)
         if not req.kv_overallocated_freed:
             start_p, end_p = req.pop_overallocated_kv_cache()
             if self.page_size > 1:
-                start_p = ((start_p + self.page_size - 1) // self.page_size) * self.page_size
+                start_p = (
+                    (start_p + self.page_size - 1) // self.page_size
+                ) * self.page_size
 
             if start_p < end_p:
-                if req_pool_idx is not None and req_pool_idx != -1:
+                if req.req_pool_idx is not None and req.req_pool_idx != -1:
                     indices_to_free = self.req_to_token_pool.req_to_token[
-                        req_pool_idx, start_p:end_p
+                        req.req_pool_idx, start_p:end_p
                     ]
                     self.token_to_kv_pool_allocator.free(indices_to_free)
 
@@ -274,7 +276,6 @@ class DecodeKVCacheOffloadManager:
 
             self.req_to_token_pool.free(req)
 
-        self.req_to_token_pool.free(req)
         self.tree_cache.protected_size_ -= len(req.prefix_indices)
         if req.rid in self.offloaded_state:
             del self.offloaded_state[req.rid]
@@ -335,4 +336,4 @@ class DecodeKVCacheOffloadManager:
                 f"Finalize release: freed prefill-aligned KV for req {req.rid}, len:{prefill_len}"
             )
         start_offset = prefill_len + inc_len
-        self._release_finished_req(req, start_offset, req.req_pool_idx)
+        self._release_finished_req(req, start_offset)
