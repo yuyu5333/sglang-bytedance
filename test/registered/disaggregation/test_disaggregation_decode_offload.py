@@ -137,8 +137,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             model=self.model,
             eval_name="mmlu",
             num_examples=64,
-            num_threads=32,
-            return_latency=True,
+            num_threads=32
         )
 
         metrics1 = run_eval(args)
