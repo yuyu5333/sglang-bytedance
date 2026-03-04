@@ -57,12 +57,20 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         self.quant_config = quant_config
         self.pp_group = get_pp_group()
 
-        self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+        self.fc = nn.Linear(
+            2 * config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            dtype=getattr(config, "torch_dtype", torch.float16),
+        )
         RMSNorm_cls = GemmaRMSNorm
         self.pre_fc_norm_embedding = RMSNorm_cls(
             config.hidden_size, config.rms_norm_eps
         )
         self.pre_fc_norm_hidden = RMSNorm_cls(config.hidden_size, config.rms_norm_eps)
+        # Ensure norms are also in the correct dtype
+        self.pre_fc_norm_embedding.to(getattr(config, "torch_dtype", torch.float16))
+        self.pre_fc_norm_hidden.to(getattr(config, "torch_dtype", torch.float16))
         config.num_hidden_layers = 1
         config.full_attention_interval = 1
         self.model = Qwen3_5ForCausalLM(
@@ -83,6 +91,7 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
                 )
 
         self.logits_processor = LogitsProcessor(config)
+        self.to(getattr(config, "torch_dtype", torch.float16))
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
@@ -128,7 +137,9 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
             hidden_states = self.pre_fc_norm_hidden(hidden_states)
         hidden_states = torch.cat([input_embeds, hidden_states], dim=-1)
 
-        hidden_states = self.fc(hidden_states)
+        hidden_states = self.fc(hidden_states.to(self.fc.weight.dtype)).to(
+            input_embeds.dtype
+        )
 
         hidden_states = self.model(
             input_ids,
