@@ -40,7 +40,9 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         os.makedirs(cls.hicache_dir, exist_ok=True)
 
         super().setUpClass()
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST
+        # cls.model = DEFAULT_MODEL_NAME_FOR_TEST
+        # for test 
+        cls.model = "/data00/Llama-3.1-8B-Instruct"
 
         # Non-blocking start of prefill and decode servers
         cls.start_prefill()
