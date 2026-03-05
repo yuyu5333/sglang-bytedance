@@ -1861,6 +1861,7 @@ def _execute_server_warmup(server_args: ServerArgs):
 
         else:
             logger.info(f"Start of pd disaggregation warmup ...")
+            request_name = "/generate"
             json_data = {
                 "sampling_params": {
                     "temperature": 0.0,
