@@ -149,7 +149,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if len(x_shapes) == 3:
                 output = output.view(x_shapes[0], x_shapes[1], -1)
             return output
-
+        print(f"[DEBUG] [UnquantizedLinearMethod] x dtype={x.dtype}, layer.weight dtype={layer.weight.dtype}, bias dtype={bias.dtype if bias is not None else None}")
         return F.linear(x, layer.weight, bias)
 
 
