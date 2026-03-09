@@ -777,12 +777,14 @@ class ModelConfig:
         if quant_cfg is not None and not isinstance(quant_cfg, dict):
             quant_cfg = quant_cfg.to_dict()
         if quant_cfg is not None and "quant_method" in quant_cfg:
+            print(f"[DEBUG] [_parse_quant_hf_config] quant_cfg 1")
             model_type = getattr(self.hf_config, "model_type", None)
             quant_method = quant_cfg.get("quant_method")
             if (
                 model_type == "kimi_k25" or model_type == "qwen3_5_moe"
                 and quant_method in ("compressed-tensors", "compressed_tensors")
             ):
+                print(f"[DEBUG] [_parse_quant_hf_config] quant_cfg 2")
                 quant_cfg["quant_method"] = "w4afp8"
                 if "group_size" not in quant_cfg:
                     sizes = set()
