@@ -778,13 +778,13 @@ class ModelConfig:
             quant_cfg = quant_cfg.to_dict()
         if quant_cfg is not None and "quant_method" in quant_cfg:
             model_type = getattr(self.hf_config, "model_type", None)
-            quant_method = quant_cfg.get("quant_method")
-            print(f"[DEBUG] [_parse_quant_hf_config] quant_cfg 1, model_type: {model_type}, quant_method: {quant_method}")
+            quant_method = str(quant_cfg.get("quant_method", "")).lower()
+            if "w4afp16" in quant_method or "w4a_fp16" in quant_method:
+                quant_cfg["quant_method"] = "w4afp8"
             if (
-                model_type == "kimi_k25" or model_type == "qwen3_5_moe"
+                model_type in ("kimi_k25", "qwen3_5_moe")
                 and quant_method in ("compressed-tensors", "compressed_tensors", "gptq")
             ):
-                print(f"[DEBUG] [_parse_quant_hf_config] quant_cfg 2")
                 quant_cfg["quant_method"] = "w4afp8"
                 if "group_size" not in quant_cfg:
                     sizes = set()
@@ -970,6 +970,8 @@ class ModelConfig:
         }
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
+            if self.quantization in ("w4afp16", "w4a_fp16"):
+                self.quantization = "w4afp8"
 
         # Parse quantization method from the HF and ModelSlim model config, if available.
         # Only one function should return config, other should return None.

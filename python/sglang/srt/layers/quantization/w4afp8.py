@@ -81,10 +81,22 @@ class W4AFp8Config(QuantizationConfig):
         return []
 
     @classmethod
+    def override_quantization_method(
+        cls, hf_quant_config: Dict[str, Any], user_quant: Optional[str]
+    ) -> Optional[str]:
+        quant_method = str(hf_quant_config.get("quant_method", "")).lower()
+        if "w4afp16" in quant_method or "w4a_fp16" in quant_method:
+            return "w4afp8"
+        return None
+
+    @classmethod
     def from_config(cls, config: Dict[str, Any]) -> W4AFp8Config:
         quant_method = cls.get_from_keys(config, ["quant_method"])
+        quant_method = str(quant_method).lower()
         is_checkpoint_fp8_serialized = "fp8" in quant_method
-        is_checkpoint_w4afp8_serialized = "w4afp8" in quant_method
+        is_checkpoint_w4afp8_serialized = (
+            "w4afp8" in quant_method or "w4afp16" in quant_method or "w4a_fp16" in quant_method
+        )
         linear_activation_scheme = "dynamic"
         moe_activation_scheme = "static"
         weight_block_size = [128, 128]
