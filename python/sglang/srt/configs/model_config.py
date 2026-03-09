@@ -680,6 +680,8 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None and not isinstance(quant_cfg, dict):
             quant_cfg = quant_cfg.to_dict()
+        if isinstance(quant_cfg, dict):
+            quant_cfg = dict(quant_cfg)
         if quant_cfg is not None:
             # Identify modelopt quantization
             if (
@@ -695,8 +697,16 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+            if quant_cfg is not None and not isinstance(quant_cfg, dict):
+                quant_cfg = quant_cfg.to_dict()
+            if isinstance(quant_cfg, dict):
+                quant_cfg = dict(quant_cfg)
         if quant_cfg is None:
             quant_cfg = getattr(self.hf_text_config, "compression_config", None)
+            if quant_cfg is not None and not isinstance(quant_cfg, dict):
+                quant_cfg = quant_cfg.to_dict()
+            if isinstance(quant_cfg, dict):
+                quant_cfg = dict(quant_cfg)
         if quant_cfg is None:
             # check if is modelopt or mixed-precision model -- Both of them don't have corresponding field
             # in hf `config.json` but has a standalone `hf_quant_config.json` in the root directory
@@ -774,11 +784,10 @@ class ModelConfig:
                 with open(quant_config_file) as f:
                     quant_config_dict = json.load(f)
                 quant_cfg = self._parse_modelopt_quant_config(quant_config_dict)
-        if quant_cfg is not None and not isinstance(quant_cfg, dict):
-            quant_cfg = quant_cfg.to_dict()
         if quant_cfg is not None and "quant_method" in quant_cfg:
             model_type = getattr(self.hf_config, "model_type", None)
-            quant_method = str(quant_cfg.get("quant_method", "")).lower()
+            original_quant_method = str(quant_cfg.get("quant_method", "")).lower()
+            quant_method = original_quant_method
             if "w4afp16" in quant_method or "w4a_fp16" in quant_method:
                 quant_cfg["quant_method"] = "w4afp8"
             if (
@@ -786,6 +795,9 @@ class ModelConfig:
                 and quant_method in ("compressed-tensors", "compressed_tensors", "gptq")
             ):
                 quant_cfg["quant_method"] = "w4afp8"
+                if original_quant_method == "gptq":
+                    quant_cfg["moe_source_format"] = "gptq"
+                    quant_cfg["enable_moe_gptq_on_the_fly"] = True
                 if "group_size" not in quant_cfg:
                     sizes = set()
                     v = quant_cfg.get("group_size")

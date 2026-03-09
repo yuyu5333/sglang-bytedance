@@ -103,11 +103,12 @@ class W4AFp8Config(QuantizationConfig):
         )
         linear_activation_scheme = "dynamic"
         moe_activation_scheme = "static"
+        enable_moe_gptq_on_the_fly = bool(config.get("enable_moe_gptq_on_the_fly", True))
         weight_block_size = [128, 128]
         group_size = cls.get_from_keys_or(config, ["group_size"], default=32)
         linear_quant_method = None
         linear_quant_config = None
-        moe_source_format = "w4afp8"
+        moe_source_format = str(config.get("moe_source_format", "w4afp8")).lower()
         try:
             linear_quant_config = GPTQConfig.from_config(config)
             linear_quant_method = "gptq"
@@ -123,7 +124,9 @@ class W4AFp8Config(QuantizationConfig):
         is_compressed_tensors = (
             quant_format in ("compressed-tensors", "compressed_tensors") or has_ct_schema
         )
-        if not is_checkpoint_w4afp8_serialized and linear_quant_method == "gptq":
+        if moe_source_format == "gptq":
+            moe_activation_scheme = "dynamic"
+        elif not is_checkpoint_w4afp8_serialized and linear_quant_method == "gptq":
             moe_source_format = "gptq"
             moe_activation_scheme = "dynamic"
         cfg = cls(
@@ -132,6 +135,7 @@ class W4AFp8Config(QuantizationConfig):
             linear_activation_scheme=linear_activation_scheme,
             moe_activation_scheme=moe_activation_scheme,
             moe_source_format=moe_source_format,
+            enable_moe_gptq_on_the_fly=enable_moe_gptq_on_the_fly,
             weight_block_size=weight_block_size,
             group_size=group_size,
             linear_quant_method=linear_quant_method,
