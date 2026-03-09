@@ -780,7 +780,7 @@ class ModelConfig:
             model_type = getattr(self.hf_config, "model_type", None)
             quant_method = quant_cfg.get("quant_method")
             if (
-                model_type == "kimi_k25"
+                model_type == "kimi_k25" or model_type == "qwen3_5_moe"
                 and quant_method in ("compressed-tensors", "compressed_tensors")
             ):
                 quant_cfg["quant_method"] = "w4afp8"
