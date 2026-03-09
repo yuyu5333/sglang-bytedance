@@ -55,6 +55,7 @@ def cutlass_w4a8_moe(
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
     routed_scaling_factor: float = 1.0,
+    act_scale_is_static: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -132,17 +133,39 @@ def cutlass_w4a8_moe(
         dtype=torch.float8_e4m3fn,
     )
 
-    pre_reorder_for_cutlass_moe(
-        a,
-        gateup_input,
-        src2dst,
-        topk_ids,
-        a1_scale,
-        num_local_experts,
-        topk,
-        m,
-        k,
-    )
+    if act_scale_is_static:
+        pre_reorder_for_cutlass_moe(
+            a,
+            gateup_input,
+            src2dst,
+            topk_ids,
+            a1_scale,
+            num_local_experts,
+            topk,
+            m,
+            k,
+        )
+    else:
+        gateup_input_pre_reorder = torch.empty(
+            (m * topk, k),
+            device=device,
+            dtype=a.dtype,
+        )
+        a1_mul = torch.ones((1,), device=device, dtype=torch.float32)
+        pre_reorder_for_cutlass_moe(
+            a,
+            gateup_input_pre_reorder,
+            src2dst,
+            topk_ids,
+            a1_mul,
+            num_local_experts,
+            topk,
+            m,
+            k,
+        )
+        per_tensor_quant_fp8(
+            gateup_input_pre_reorder, gateup_input, a1_scale.float(), False
+        )
 
     # NOTE: a_map and c_map are not used in the get_cutlass_w4a8_moe_mm_data kernel,
     # they are kept to allow for a quick switch of the permutation logic
@@ -183,9 +206,14 @@ def cutlass_w4a8_moe(
     intermediate_q = torch.empty(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
-    silu_mul_static_tensorwise_quant_for_cutlass_moe(
-        c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
-    )
+    if act_scale_is_static:
+        silu_mul_static_tensorwise_quant_for_cutlass_moe(
+            c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
+        )
+    else:
+        intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
+        silu_and_mul(c1, intermediate)
+        per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), False)
 
     cutlass_w4a8_moe_mm(
         c2,

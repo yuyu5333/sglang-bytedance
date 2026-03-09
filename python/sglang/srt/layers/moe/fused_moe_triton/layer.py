@@ -774,6 +774,49 @@ class FusedMoE(torch.nn.Module):
             )
             return
 
+        if (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "w4afp8"
+            and getattr(self.quant_config, "moe_source_format", None) == "gptq"
+            and getattr(self.quant_config, "enable_moe_gptq_on_the_fly", True)
+            and (
+                "qweight" in weight_name
+                or "qzeros" in weight_name
+                or weight_name.endswith(".scales")
+                or "w13_scales" in weight_name
+                or "w2_scales" in weight_name
+            )
+        ):
+            if "w13_" in weight_name and shard_id in ("w1", "w3"):
+                shard_size = expert_data.shape[1] // 2
+                start = 0 if shard_id == "w1" else shard_size
+                if loaded_weight.dim() != 2:
+                    raise ValueError(
+                        f"Expected 2D GPTQ expert tensor, got shape {loaded_weight.shape} for {weight_name}"
+                    )
+                if loaded_weight.shape[1] != shard_size:
+                    loaded_weight = loaded_weight.narrow(
+                        1, shard_size * tp_rank, shard_size
+                    )
+                expert_data[:, start : start + shard_size].copy_(loaded_weight)
+                return
+            if "w2_" in weight_name and shard_id == "w2":
+                if loaded_weight.dim() != 2:
+                    raise ValueError(
+                        f"Expected 2D GPTQ expert tensor, got shape {loaded_weight.shape} for {weight_name}"
+                    )
+                shard_size = expert_data.shape[0]
+                if loaded_weight.shape[0] != shard_size:
+                    loaded_weight = loaded_weight.narrow(
+                        0, shard_size * tp_rank, shard_size
+                    )
+                expert_data.copy_(loaded_weight)
+                return
+            if "w13_" in weight_name and shard_id == "w2":
+                raise ValueError(f"Unexpected shard_id {shard_id} for {weight_name}")
+            if "w2_" in weight_name and shard_id in ("w1", "w3"):
+                raise ValueError(f"Unexpected shard_id {shard_id} for {weight_name}")
+
         if "ModelOpt" in method.__class__.__name__:
             # Determine per-tensor weight scale patterns based on variant
             is_fp4_variant = isinstance(method, ModelOptNvFp4FusedMoEMethod)
