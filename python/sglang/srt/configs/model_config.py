@@ -782,7 +782,7 @@ class ModelConfig:
             print(f"[DEBUG] [_parse_quant_hf_config] quant_cfg 1, model_type: {model_type}, quant_method: {quant_method}")
             if (
                 model_type == "kimi_k25" or model_type == "qwen3_5_moe"
-                and quant_method in ("compressed-tensors", "compressed_tensors")
+                and quant_method in ("compressed-tensors", "compressed_tensors", "gptq")
             ):
                 print(f"[DEBUG] [_parse_quant_hf_config] quant_cfg 2")
                 quant_cfg["quant_method"] = "w4afp8"
