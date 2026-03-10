@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
@@ -109,6 +110,7 @@ class W4AFp8Config(QuantizationConfig):
         linear_quant_method = None
         linear_quant_config = None
         moe_source_format = str(config.get("moe_source_format", "w4afp8")).lower()
+        ignored_layers = list(config.get("ignored_layers") or [])
         try:
             linear_quant_config = GPTQConfig.from_config(config)
             linear_quant_method = "gptq"
@@ -119,6 +121,60 @@ class W4AFp8Config(QuantizationConfig):
             except Exception:
                 linear_quant_config = None
                 linear_quant_method = None
+
+        if linear_quant_method == "gptq":
+            dynamic = config.get("dynamic") or {}
+            if isinstance(dynamic, dict):
+                for pattern in dynamic.keys():
+                    if not isinstance(pattern, str) or not pattern.startswith("-:"):
+                        continue
+                    raw = pattern[2:]
+                    ignored_layers.append(f"re:{raw}")
+                    simplified = raw
+                    while simplified.startswith(".*"):
+                        simplified = simplified[2:]
+                    while simplified.endswith(".*"):
+                        simplified = simplified[:-2]
+                    if simplified and re.fullmatch(r"[A-Za-z0-9_\.]+", simplified):
+                        ignored_layers.append(simplified)
+                    else:
+                        tokens = re.split(r"[^A-Za-z0-9_]+", raw)
+                        for tok in tokens:
+                            if len(tok) < 4 or tok.isdigit():
+                                continue
+                            if tok in {
+                                "model",
+                                "layers",
+                                "layer",
+                                "linear",
+                                "proj",
+                                "weight",
+                                "hidden",
+                                "language",
+                                "language_model",
+                            }:
+                                continue
+                            ignored_layers.append(tok)
+
+            modules_to_not_convert = config.get("modules_to_not_convert") or []
+            if isinstance(modules_to_not_convert, list):
+                for item in modules_to_not_convert:
+                    if not isinstance(item, str) or not item:
+                        continue
+                    ignored_layers.append(item)
+                    ignored_layers.append(item.split(".")[-1])
+
+            seen = set()
+            deduped = []
+            for x in ignored_layers:
+                if not isinstance(x, str) or not x:
+                    continue
+                if x in seen:
+                    continue
+                seen.add(x)
+                deduped.append(x)
+            ignored_layers = deduped
+
         quant_format = config.get("format")
         has_ct_schema = bool(config.get("config_groups")) or "compression_config" in config
         is_compressed_tensors = (
@@ -136,6 +192,7 @@ class W4AFp8Config(QuantizationConfig):
             moe_activation_scheme=moe_activation_scheme,
             moe_source_format=moe_source_format,
             enable_moe_gptq_on_the_fly=enable_moe_gptq_on_the_fly,
+            ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
             group_size=group_size,
             linear_quant_method=linear_quant_method,
@@ -151,6 +208,10 @@ class W4AFp8Config(QuantizationConfig):
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 
         if isinstance(layer, LinearBase):
+            for ignored in self.ignored_layers:
+                if isinstance(ignored, str) and ignored.startswith("re:"):
+                    if re.match(ignored[3:], prefix):
+                        return UnquantizedLinearMethod()
             if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedLinearMethod()
             if (
