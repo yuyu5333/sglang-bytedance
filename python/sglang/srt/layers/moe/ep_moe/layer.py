@@ -38,6 +38,7 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
 from sglang.srt.layers.quantization.quark.schemes import QuarkW4A4MXFp4MoE
+from sglang.srt.layers.quantization.moe_wna16 import MoeWNA16Config, MoeWNA16Method
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
 from sglang.srt.utils import get_bool_env_var, is_hip, is_npu
 
@@ -125,7 +126,13 @@ class DeepEPMoE(FusedMoE):
             self.use_w4afp8 = True
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
+        elif isinstance(quant_config, MoeWNA16Config):
+            self.use_moe_wna16 = True
+            self.use_w4afp8 = False
+            self.use_fp8_w8a8 = False
+            self.use_block_quant = False
         else:
+            self.use_moe_wna16 = False
             self.use_w4afp8 = False
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
@@ -234,6 +241,11 @@ class DeepEPMoE(FusedMoE):
         elif DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
             if self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8(dispatch_output)
+            elif hasattr(self.quant_method, "apply_deepep_normal"):
+                output = self.quant_method.apply_deepep_normal(
+                    layer=self,
+                    dispatch_output=dispatch_output,
+                )
             else:
                 assert False, "forward_deepgemm_contiguous is deprecated"
         elif DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
@@ -244,6 +256,11 @@ class DeepEPMoE(FusedMoE):
                 output = self.forward_flashinfer_cutedsl(dispatch_output)
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
+            elif hasattr(self.quant_method, "apply_deepep_ll"):
+                output = self.quant_method.apply_deepep_ll(
+                    layer=self,
+                    dispatch_output=dispatch_output,
+                )
             else:
                 assert False, "forward_deepgemm_masked is deprecated"
 

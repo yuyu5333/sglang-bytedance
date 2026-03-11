@@ -74,7 +74,12 @@ _is_hip = is_hip()
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
+        DispatchOutput,
         StandardDispatchOutput,
+    )
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPLLDispatchOutput,
+        DeepEPNormalDispatchOutput,
     )
     from sglang.srt.models.utils import WeightsMapper
 
@@ -1000,7 +1005,7 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: torch.nn.Module,
-        dispatch_output: StandardDispatchOutput,
+        dispatch_output: DispatchOutput,
     ) -> CombineInput:
         """
         Use the output of create_weights and the CompressedTensorsScheme
@@ -1013,6 +1018,20 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
         return scheme.apply_weights(layer, dispatch_output)
+
+    def apply_deepep_normal(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ) -> CombineInput:
+        return self.apply(layer, dispatch_output)
+
+    def apply_deepep_ll(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ) -> CombineInput:
+        return self.apply(layer, dispatch_output)
 
     def apply_weights_with_router_logits(
         self,

@@ -29,7 +29,12 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
+        DispatchOutput,
         StandardDispatchOutput,
+    )
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPLLDispatchOutput,
+        DeepEPNormalDispatchOutput,
     )
 
 
@@ -367,7 +372,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
     def apply(
         self,
         layer: torch.nn.Module,
-        dispatch_output: StandardDispatchOutput,
+        dispatch_output: DispatchOutput,
     ) -> CombineInput:
         assert (
             self.moe_runner_config.activation == "silu"
@@ -388,6 +393,20 @@ class MoeWNA16Method(FusedMoEMethodBase):
             block_shape=[0, layer.group_size],
         )
         return self.runner.run(dispatch_output, quant_info)
+
+    def apply_deepep_normal(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ) -> CombineInput:
+        return self.apply(layer, dispatch_output)
+
+    def apply_deepep_ll(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ) -> CombineInput:
+        return self.apply(layer, dispatch_output)
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):

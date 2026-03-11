@@ -22,6 +22,12 @@ from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_xpu
 
 if TYPE_CHECKING:
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPLLCombineInput,
+        DeepEPLLDispatchOutput,
+        DeepEPNormalCombineInput,
+        DeepEPNormalDispatchOutput,
+    )
     from sglang.srt.layers.moe.token_dispatcher.standard import (
         StandardCombineInput,
         StandardDispatchOutput,
@@ -482,4 +488,175 @@ def post_permute_triton_to_standard(
 
     return StandardCombineInput(
         hidden_states=runner_output.hidden_states,
+    )
+
+
+@register_pre_permute("deepep_normal", "triton")
+def pre_permute_deepep_normal_to_triton(
+    dispatch_output: DeepEPNormalDispatchOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> TritonRunnerInput:
+    import torch.distributed as dist
+
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
+        get_config_dtype_str,
+        moe_align_block_size,
+        try_get_optimal_moe_config,
+    )
+
+    hidden_states, _, topk_ids, topk_weights, _ = dispatch_output
+
+    num_tokens = hidden_states.shape[0]
+    num_local_experts = runner_config.num_local_experts
+    num_experts = runner_config.num_experts
+
+    # Map global topk_ids to local expert indices.
+    # We use the rank within the TP/EP group to find the expert offset.
+    from sglang.srt.distributed import get_tensor_model_parallel_rank
+    rank = get_tensor_model_parallel_rank()
+    expert_offset = rank * num_local_experts
+    topk_ids_local = topk_ids - expert_offset
+
+    running_state["topk_ids"] = topk_ids
+    running_state["topk_weights"] = topk_weights
+
+    config_dtype = get_config_dtype_str(
+        use_fp8_w8a8=quant_info.use_fp8_w8a8,
+        use_int8_w8a8=quant_info.use_int8_w8a8,
+        use_int8_w8a16=quant_info.use_int8_w8a16,
+        use_int4_w4a16=quant_info.use_int4_w4a16,
+        dtype=hidden_states.dtype,
+    )
+
+    get_config_func = functools.partial(
+        try_get_optimal_moe_config,
+        quant_info.w13_weight.shape,
+        (
+            num_local_experts,
+            quant_info.w2_weight.shape[1],
+            quant_info.w2_weight.shape[2],
+        ),
+        topk_ids.shape[1],
+        config_dtype,
+        block_shape=quant_info.block_shape,
+        per_channel_quant=quant_info.per_channel_quant,
+    )
+
+    config = get_config_func(num_tokens)
+    running_state["config"] = config
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids_local, config["BLOCK_SIZE_M"], num_local_experts
+    )
+
+    return TritonRunnerInput(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids_local,
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=expert_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+    )
+
+
+@register_post_permute("triton", "deepep_normal")
+def post_permute_triton_to_deepep_normal(
+    runner_output: TritonRunnerOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> DeepEPNormalCombineInput:
+    from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPNormalCombineInput
+
+    return DeepEPNormalCombineInput(
+        hidden_states=runner_output.hidden_states,
+        topk_ids=running_state.get("topk_ids"),
+        topk_weights=running_state.get("topk_weights"),
+    )
+
+
+@register_pre_permute("deepep_ll", "triton")
+def pre_permute_deepep_ll_to_triton(
+    dispatch_output: DeepEPLLDispatchOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> TritonRunnerInput:
+    import torch.distributed as dist
+
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
+        get_config_dtype_str,
+        moe_align_block_size,
+        try_get_optimal_moe_config,
+    )
+
+    hidden_states, _, topk_ids, topk_weights, _, _ = dispatch_output
+
+    num_tokens = hidden_states.shape[0]
+    num_local_experts = runner_config.num_local_experts
+    num_experts = runner_config.num_experts
+
+    # Map global topk_ids to local expert indices.
+    from sglang.srt.distributed import get_tensor_model_parallel_rank
+    rank = get_tensor_model_parallel_rank()
+    expert_offset = rank * num_local_experts
+    topk_ids_local = topk_ids - expert_offset
+
+    running_state["topk_ids"] = topk_ids
+    running_state["topk_weights"] = topk_weights
+
+    config_dtype = get_config_dtype_str(
+        use_fp8_w8a8=quant_info.use_fp8_w8a8,
+        use_int8_w8a8=quant_info.use_int8_w8a8,
+        use_int8_w8a16=quant_info.use_int8_w8a16,
+        use_int4_w4a16=quant_info.use_int4_w4a16,
+        dtype=hidden_states.dtype,
+    )
+
+    get_config_func = functools.partial(
+        try_get_optimal_moe_config,
+        quant_info.w13_weight.shape,
+        (
+            num_local_experts,
+            quant_info.w2_weight.shape[1],
+            quant_info.w2_weight.shape[2],
+        ),
+        topk_ids.shape[1],
+        config_dtype,
+        block_shape=quant_info.block_shape,
+        per_channel_quant=quant_info.per_channel_quant,
+    )
+
+    config = get_config_func(num_tokens)
+    running_state["config"] = config
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids_local, config["BLOCK_SIZE_M"], num_local_experts
+    )
+
+    return TritonRunnerInput(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids_local,
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=expert_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+    )
+
+
+@register_post_permute("triton", "deepep_ll")
+def post_permute_triton_to_deepep_ll(
+    runner_output: TritonRunnerOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> DeepEPLLCombineInput:
+    from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPLLCombineInput
+
+    return DeepEPLLCombineInput(
+        hidden_states=runner_output.hidden_states,
+        topk_ids=running_state.get("topk_ids"),
+        topk_weights=running_state.get("topk_weights"),
     )
