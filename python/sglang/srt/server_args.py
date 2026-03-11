@@ -110,6 +110,8 @@ QUANTIZATION_CHOICES = [
     "moe_wna16",
     "qoq",
     "w4afp8",
+    "w4a8_moe_fp8",
+    "w4a8_moe_fp8_online",
     "mxfp4",
     "auto-round",
     "compressed-tensors",  # for Ktransformers
