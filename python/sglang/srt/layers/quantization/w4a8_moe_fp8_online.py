@@ -91,6 +91,8 @@ def _interleave_scales_2d(scales: torch.Tensor, alignment: int = 4) -> torch.Ten
     if scales.dim() != 2:
         raise ValueError(f"Expected 2D scales [O, Kg], got {tuple(scales.shape)}")
     o, kg = scales.shape
+    if alignment not in (1, 4):
+        raise ValueError(f"alignment must be 1 or 4, got {alignment}")
     if kg % alignment != 0:
         raise ValueError(f"Kg={kg} must be divisible by alignment={alignment}")
     t = scales.reshape(o, kg // alignment, alignment).permute(1, 0, 2).reshape(
@@ -259,6 +261,13 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
         w13_packed_cols = hidden_size // 8
         w2_packed_cols = intermediate_size_per_partition // 8
 
+        kg13 = hidden_size // tgt_group
+        kg2 = intermediate_size_per_partition // tgt_group
+        align13 = 4 if kg13 % 4 == 0 else 1
+        align2 = 4 if kg2 % 4 == 0 else 1
+        self._w13_scale_alignment = align13
+        self._w2_scale_alignment = align2
+
         w13_weight_packed = torch.nn.Parameter(
             torch.empty(
                 num_experts,
@@ -342,9 +351,9 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
         w13_weight_scale_inv = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size // tgt_group,
-                dtype=torch.float32,
+                kg13 // align13,
+                (2 * intermediate_size_per_partition) * align13,
+                dtype=torch.bfloat16,
             ),
             requires_grad=False,
         )
@@ -354,9 +363,9 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
         w2_weight_scale_inv = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                hidden_size,
-                intermediate_size_per_partition // tgt_group,
-                dtype=torch.float32,
+                kg2 // align2,
+                hidden_size * align2,
+                dtype=torch.bfloat16,
             ),
             requires_grad=False,
         )
@@ -422,6 +431,8 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
 
         device = layer.w13_weight.device
         num_experts = layer.w13_weight.shape[0]
+        align13 = int(getattr(self, "_w13_scale_alignment", 4))
+        align2 = int(getattr(self, "_w2_scale_alignment", 4))
         for e in range(num_experts):
             w13_packed_int8, w13_scale128 = _requant_and_pack_one_expert_from_group32_to_group128(
                 layer.w13_weight_packed[e],
@@ -439,8 +450,12 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
             layer.w13_weight.data[e].copy_(w13_packed_int8.to(device))
             layer.w2_weight.data[e].copy_(w2_packed_int8.to(device))
 
-            w13_scale_packed = _interleave_scales_2d(w13_scale128).to(torch.bfloat16)
-            w2_scale_packed = _interleave_scales_2d(w2_scale128).to(torch.bfloat16)
+            w13_scale_packed = _interleave_scales_2d(w13_scale128, alignment=align13).to(
+                torch.bfloat16
+            )
+            w2_scale_packed = _interleave_scales_2d(w2_scale128, alignment=align2).to(
+                torch.bfloat16
+            )
 
             layer.w13_weight_scale_inv.data[e].copy_(w13_scale_packed.to(device))
             layer.w2_weight_scale_inv.data[e].copy_(w2_scale_packed.to(device))
