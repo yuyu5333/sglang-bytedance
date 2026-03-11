@@ -87,6 +87,64 @@ def _dequant_groupwise_int4_from_int32(
     return w.reshape(e, o, i).to(torch.bfloat16)
 
 
+def _interleave_scales_2d(scales: torch.Tensor, alignment: int = 4) -> torch.Tensor:
+    if scales.dim() != 2:
+        raise ValueError(f"Expected 2D scales [O, Kg], got {tuple(scales.shape)}")
+    o, kg = scales.shape
+    if kg % alignment != 0:
+        raise ValueError(f"Kg={kg} must be divisible by alignment={alignment}")
+    t = scales.reshape(o, kg // alignment, alignment).permute(1, 0, 2).reshape(
+        kg // alignment, o * alignment
+    )
+    return t
+
+
+def _requant_and_pack_one_expert_from_group32_to_group128(
+    packed_int32: torch.Tensor,
+    scale32: torch.Tensor,
+    src_group_size: int,
+    dst_group_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if src_group_size != 32 or dst_group_size != 128:
+        raise ValueError("Only (src_group_size=32 -> dst_group_size=128) is supported.")
+    if packed_int32.dtype != torch.int32:
+        raise ValueError(f"Expected int32 packed, got {packed_int32.dtype}")
+    if scale32.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        raise ValueError(f"Unexpected scale dtype: {scale32.dtype}")
+
+    q = _unpack_int4_from_int32(packed_int32).to(torch.int16)
+    o, i = q.shape
+    if i % 128 != 0:
+        raise ValueError(f"I={i} must be divisible by 128")
+
+    kg32 = i // 32
+    kg128 = i // 128
+    if scale32.shape != (o, kg32):
+        raise ValueError(f"scale32 shape {tuple(scale32.shape)} expected {(o, kg32)}")
+
+    q = q.reshape(o, kg32, 32)
+    s32 = scale32.to(torch.float32).reshape(o, kg32, 1)
+
+    prod = (q.abs().to(torch.float32) * s32).reshape(o, kg128, 4, 32)
+    absmax128 = prod.amax(dim=-1).amax(dim=-1).clamp(min=1e-12)
+    s128 = absmax128 / 7.0
+
+    q32_f = q.to(torch.float32)
+    q128 = torch.empty((o, kg32, 32), dtype=torch.int16)
+    for sub in range(4):
+        g32_slice = slice(sub, kg32, 4)
+        g128_slice = slice(0, kg128)
+        num = q32_f[:, g32_slice, :] * s32[:, g32_slice, :]
+        den = s128[:, g128_slice].unsqueeze(-1)
+        q_sub = torch.round(num / den).clamp(min=-8, max=7).to(torch.int16)
+        q128[:, g32_slice, :] = q_sub
+
+    q128 = q128.reshape(o, i).to(torch.int8)
+    packed_int8 = _pack_int4_to_int8(q128).contiguous()
+    scales128 = s128.to(torch.float32).contiguous()
+    return packed_int8, scales128
+
+
 class W4A8MoEFp8OnlineConfig(QuantizationConfig):
     def __init__(
         self,
@@ -175,6 +233,7 @@ class W4A8MoEFp8OnlineConfig(QuantizationConfig):
 class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: W4A8MoEFp8OnlineConfig):
         self.quant_config = quant_config
+        self.process_weights_on_cpu = True
 
     def create_weights(
         self,
@@ -206,6 +265,7 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
                 2 * intermediate_size_per_partition,
                 w13_packed_cols,
                 dtype=torch.int32,
+                device="cpu",
             ),
             requires_grad=False,
         )
@@ -218,6 +278,7 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
                 hidden_size,
                 w2_packed_cols,
                 dtype=torch.int32,
+                device="cpu",
             ),
             requires_grad=False,
         )
@@ -234,6 +295,7 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
                 2 * intermediate_size_per_partition,
                 hidden_size // src_group,
                 dtype=torch.bfloat16,
+                device="cpu",
             ),
             requires_grad=False,
         )
@@ -246,6 +308,7 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
                 hidden_size,
                 intermediate_size_per_partition // src_group,
                 dtype=torch.bfloat16,
+                device="cpu",
             ),
             requires_grad=False,
         )
@@ -354,29 +417,33 @@ class W4A8MoEFp8OnlineMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         src_group = int(self.quant_config.source_group_size)
         tgt_group = int(self.quant_config.target_group_size)
+        if src_group != 32 or tgt_group != 128:
+            raise ValueError("w4a8_moe_fp8_online currently supports group32 -> group128 only.")
+
         device = layer.w13_weight.device
+        num_experts = layer.w13_weight.shape[0]
+        for e in range(num_experts):
+            w13_packed_int8, w13_scale128 = _requant_and_pack_one_expert_from_group32_to_group128(
+                layer.w13_weight_packed[e],
+                layer.w13_weight_scale[e],
+                src_group_size=src_group,
+                dst_group_size=tgt_group,
+            )
+            w2_packed_int8, w2_scale128 = _requant_and_pack_one_expert_from_group32_to_group128(
+                layer.w2_weight_packed[e],
+                layer.w2_weight_scale[e],
+                src_group_size=src_group,
+                dst_group_size=tgt_group,
+            )
 
-        w13_fp = _dequant_groupwise_int4_from_int32(
-            layer.w13_weight_packed.to(device),
-            layer.w13_weight_scale.to(device),
-            group_size=src_group,
-        )
-        w2_fp = _dequant_groupwise_int4_from_int32(
-            layer.w2_weight_packed.to(device),
-            layer.w2_weight_scale.to(device),
-            group_size=src_group,
-        )
+            layer.w13_weight.data[e].copy_(w13_packed_int8.to(device))
+            layer.w2_weight.data[e].copy_(w2_packed_int8.to(device))
 
-        w13_q, w13_scale = _requant_groupwise_int4(w13_fp, group_size=tgt_group)
-        w2_q, w2_scale = _requant_groupwise_int4(w2_fp, group_size=tgt_group)
+            w13_scale_packed = _interleave_scales_2d(w13_scale128).to(torch.bfloat16)
+            w2_scale_packed = _interleave_scales_2d(w2_scale128).to(torch.bfloat16)
 
-        layer.w13_weight = Parameter(_pack_int4_to_int8(w13_q), requires_grad=False)
-        layer.w2_weight = Parameter(_pack_int4_to_int8(w2_q), requires_grad=False)
-
-        w13_scale_i = interleave_scales(w13_scale).to(torch.bfloat16).contiguous()
-        w2_scale_i = interleave_scales(w2_scale).to(torch.bfloat16).contiguous()
-        layer.w13_weight_scale_inv = Parameter(w13_scale_i, requires_grad=False)
-        layer.w2_weight_scale_inv = Parameter(w2_scale_i, requires_grad=False)
+            layer.w13_weight_scale_inv.data[e].copy_(w13_scale_packed.to(device))
+            layer.w2_weight_scale_inv.data[e].copy_(w2_scale_packed.to(device))
 
         for name in ["w13_weight_packed", "w13_weight_scale", "w2_weight_packed", "w2_weight_scale"]:
             if hasattr(layer, name):
