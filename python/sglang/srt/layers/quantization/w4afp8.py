@@ -77,8 +77,12 @@ class W4AFp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> W4AFp8Config:
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_checkpoint_fp8_serialized = "fp8" in quant_method
-        is_checkpoint_w4afp8_serialized = "w4afp8" in quant_method
+        is_checkpoint_fp8_serialized = (
+            "fp8" in quant_method or "compressed-tensors" in quant_method
+        )
+        is_checkpoint_w4afp8_serialized = (
+            "w4afp8" in quant_method or "compressed-tensors" in quant_method
+        )
         linear_activation_scheme = "dynamic"
         moe_activation_scheme = "static"
         weight_block_size = [128, 128]
