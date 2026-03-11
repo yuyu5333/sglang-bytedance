@@ -34,6 +34,18 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
 FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
+def _normalize_per_tensor_scale(
+    scale: Optional[torch.Tensor], device: torch.device
+) -> Optional[torch.Tensor]:
+    if scale is None:
+        return None
+    if not isinstance(scale, torch.Tensor):
+        scale = torch.tensor(scale, device=device)
+    if scale.numel() == 1 and scale.dim() == 0:
+        scale = scale.view(1)
+    return scale
+
+
 def cutlass_w4a8_moe(
     a: torch.Tensor,
     w1_q: torch.Tensor,
@@ -271,6 +283,8 @@ def cutlass_w4a8_moe_calibrate(
 
     a1_max_abs = a.abs().amax().to(torch.float32)
     a1_scale = (a1_max_abs / FP8_MAX).clamp(min=1e-12)
+    a1_scale = _normalize_per_tensor_scale(a1_scale, device)
+    assert a1_scale is not None and a1_scale.dim() == 1 and a1_scale.numel() == 1
 
     gateup_input = torch.empty((m * topk, k), device=device, dtype=torch.float8_e4m3fn)
     pre_reorder_for_cutlass_moe(
@@ -322,6 +336,8 @@ def cutlass_w4a8_moe_calibrate(
     silu_and_mul(c1, intermediate)
     a2_max_abs = intermediate.abs().amax().to(torch.float32)
     a2_scale = (a2_max_abs / FP8_MAX).clamp(min=1e-12)
+    a2_scale = _normalize_per_tensor_scale(a2_scale, device)
+    assert a2_scale is not None and a2_scale.dim() == 1 and a2_scale.numel() == 1
 
     intermediate_q = torch.empty((m * topk, n), dtype=torch.float8_e4m3fn, device=device)
     per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
