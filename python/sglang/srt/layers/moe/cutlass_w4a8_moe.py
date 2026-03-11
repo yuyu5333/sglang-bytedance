@@ -31,6 +31,8 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
 
+FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+
 
 def cutlass_w4a8_moe(
     a: torch.Tensor,
@@ -218,6 +220,142 @@ def cutlass_w4a8_moe(
         routed_scaling_factor,
     )
     return output
+
+
+def cutlass_w4a8_moe_calibrate(
+    a: torch.Tensor,
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    a_strides1: torch.Tensor,
+    b_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    a_strides2: torch.Tensor,
+    b_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
+    s_strides13: torch.Tensor,
+    s_strides2: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    routed_scaling_factor: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
+    assert w1_q.dtype == torch.int8
+    assert w2_q.dtype == torch.int8
+    assert a.shape[1] // 2 == w1_q.shape[2], "Hidden size mismatch w1"
+    assert w1_q.shape[2] * 2 == w2_q.shape[1], "Hidden size mismatch w2"
+    assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
+    assert w1_q.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
+    assert w1_q.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
+
+    assert a_strides1.shape[0] == w1_q.shape[0], "A Strides 1 expert number mismatch"
+    assert b_strides1.shape[0] == w1_q.shape[0], "B Strides 1 expert number mismatch"
+    assert a_strides2.shape[0] == w2_q.shape[0], "A Strides 2 expert number mismatch"
+    assert b_strides2.shape[0] == w2_q.shape[0], "B Strides 2 expert number mismatch"
+
+    num_local_experts = w1_q.size(0)
+    m = a.size(0)
+    k = w1_q.size(2) * 2
+    n = w2_q.size(2) * 2
+    topk = topk_ids.size(1)
+
+    device = a.device
+    if get_moe_expert_parallel_world_size() > 1:
+        topk_ids = torch.where(topk_ids == -1, num_local_experts, topk_ids)
+
+    src2dst = cutlass_w4_run_moe_ep_preproess(topk_ids)
+
+    a1_max_abs = a.abs().amax().to(torch.float32)
+    a1_scale = (a1_max_abs / FP8_MAX).clamp(min=1e-12)
+
+    gateup_input = torch.empty((m * topk, k), device=device, dtype=torch.float8_e4m3fn)
+    pre_reorder_for_cutlass_moe(
+        a,
+        gateup_input,
+        src2dst,
+        topk_ids,
+        a1_scale,
+        num_local_experts,
+        topk,
+        m,
+        k,
+    )
+
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    get_cutlass_w4a8_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        a_map,
+        c_map,
+        num_local_experts,
+        n,
+        k,
+    )
+
+    c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
+    c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
+
+    cutlass_w4a8_moe_mm(
+        c1,
+        gateup_input,
+        w1_q,
+        a1_scale.float(),
+        w1_scale,
+        expert_offsets[:-1],
+        problem_sizes1,
+        a_strides1,
+        b_strides1,
+        c_strides1,
+        s_strides13,
+        128,
+        topk,
+    )
+
+    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
+    silu_and_mul(c1, intermediate)
+    a2_max_abs = intermediate.abs().amax().to(torch.float32)
+    a2_scale = (a2_max_abs / FP8_MAX).clamp(min=1e-12)
+
+    intermediate_q = torch.empty((m * topk, n), dtype=torch.float8_e4m3fn, device=device)
+    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
+
+    cutlass_w4a8_moe_mm(
+        c2,
+        intermediate_q,
+        w2_q,
+        a2_scale.float(),
+        w2_scale,
+        expert_offsets[:-1],
+        problem_sizes2,
+        a_strides2,
+        b_strides2,
+        c_strides2,
+        s_strides2,
+        128,
+        topk,
+    )
+
+    output = torch.empty_like(a)
+    post_reorder_for_cutlass_moe(
+        c2,
+        output,
+        src2dst,
+        topk_ids,
+        topk_weights,
+        num_local_experts,
+        topk,
+        m,
+        k,
+        routed_scaling_factor,
+    )
+    return output, a1_max_abs, a2_max_abs
 
 
 def cutlass_w4a8_moe_deepep_normal(

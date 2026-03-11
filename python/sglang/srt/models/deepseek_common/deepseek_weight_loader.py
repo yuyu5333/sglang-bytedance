@@ -130,6 +130,7 @@ class DeepseekV2WeightLoaderMixin:
         if self.quant_config and self.quant_config.get_name() in {
             "w4afp8",
             "w4a8_moe_fp8",
+            "w4a8_moe_fp8_online",
         }:
             expert_params_mapping += FusedMoE.make_expert_input_scale_params_mapping(
                 num_experts=self.config.n_routed_experts
