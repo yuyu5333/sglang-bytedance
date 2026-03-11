@@ -121,10 +121,32 @@ class W4A8MoEFp8OnlineConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "W4A8MoEFp8OnlineConfig":
-        source_group_size = int(cls.get_from_keys(config, ["source_group_size"], 32))
-        target_group_size = int(cls.get_from_keys(config, ["group_size", "target_group_size"], 128))
-        calibration_steps = int(cls.get_from_keys(config, ["calibration_steps"], 1))
-        calibration_max_tokens = int(cls.get_from_keys(config, ["calibration_max_tokens"], 2048))
+        source_group_size = cls.get_from_keys_or(config, ["source_group_size"], default=None)
+        if source_group_size is None:
+            try:
+                config_groups = config.get("config_groups", {})
+                if isinstance(config_groups, dict):
+                    for group_cfg in config_groups.values():
+                        if not isinstance(group_cfg, dict):
+                            continue
+                        weights_cfg = group_cfg.get("weights", {})
+                        if not isinstance(weights_cfg, dict):
+                            continue
+                        if "group_size" in weights_cfg:
+                            source_group_size = weights_cfg["group_size"]
+                            break
+            except Exception:
+                source_group_size = None
+        source_group_size = int(source_group_size if source_group_size is not None else 32)
+        target_group_size = int(
+            cls.get_from_keys_or(config, ["group_size", "target_group_size"], default=128)
+        )
+        calibration_steps = int(
+            cls.get_from_keys_or(config, ["calibration_steps"], default=1)
+        )
+        calibration_max_tokens = int(
+            cls.get_from_keys_or(config, ["calibration_max_tokens"], default=2048)
+        )
         return cls(
             source_group_size=source_group_size,
             target_group_size=target_group_size,

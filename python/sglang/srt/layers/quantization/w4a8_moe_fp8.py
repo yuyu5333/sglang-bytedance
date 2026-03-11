@@ -41,7 +41,7 @@ class W4A8MoEFp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "W4A8MoEFp8Config":
         moe_activation_scheme = "static"
-        group_size = int(cls.get_from_keys(config, ["group_size"], default=128))
+        group_size = int(cls.get_from_keys_or(config, ["group_size"], default=128))
         return cls(moe_activation_scheme=moe_activation_scheme, group_size=group_size)
 
     def get_quant_method(
