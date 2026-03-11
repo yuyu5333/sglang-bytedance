@@ -1045,6 +1045,24 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             f"avail mem={after_avail_memory:.2f} GB, "
             f"mem usage={self.weight_load_mem_usage:.2f} GB."
         )
+        if self.server_args.save_loaded_model_path:
+            save_dir = self.server_args.save_loaded_model_path
+            os.makedirs(save_dir, exist_ok=True)
+            file_name = (
+                f"state_dict.tp{self.tp_size}.pp{self.pp_size}."
+                f"tp_rank{self.tp_rank}.pp_rank{self.pp_rank}.pt"
+            )
+            save_path = os.path.join(save_dir, file_name)
+            tic_save = time.perf_counter()
+            try:
+                torch.save(self.model.state_dict(), save_path)
+                logger.info(
+                    "Saved loaded model state_dict to %s (elapsed=%.2f s).",
+                    save_path,
+                    time.perf_counter() - tic_save,
+                )
+            except Exception:
+                logger.exception("Failed to save loaded model to %s.", save_path)
         if self.server_args.debug_tensor_dump_output_folder is not None:
             register_forward_hook_for_model(
                 self.model,

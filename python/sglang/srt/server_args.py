@@ -639,6 +639,7 @@ class ServerArgs:
     enable_memory_saver: bool = False
     enable_weights_cpu_backup: bool = False
     enable_draft_weights_cpu_backup: bool = False
+    save_loaded_model_path: Optional[str] = None
     allow_auto_truncate: bool = False
     enable_custom_logit_processor: bool = False
     flashinfer_mla_disable_ragged: bool = False
@@ -5137,6 +5138,12 @@ class ServerArgs:
             "--enable-draft-weights-cpu-backup",
             action="store_true",
             help="Save draft model weights to CPU memory during release_weights_occupation and resume_weights_occupation",
+        )
+        parser.add_argument(
+            "--save-loaded-model-path",
+            type=str,
+            default=ServerArgs.save_loaded_model_path,
+            help="Save the loaded model state_dict to this directory right after loading finishes. In TP/PP, each rank saves its local shard.",
         )
         parser.add_argument(
             "--allow-auto-truncate",
