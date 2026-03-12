@@ -934,7 +934,7 @@ class ModelConfig:
             "petit_nvfp4": ["modelopt"],
             "w8a8_int8": ["compressed-tensors", "compressed_tensors"],
             "w8a8_fp8": ["compressed-tensors", "compressed_tensors"],
-            "w4a8_moe_fp8": ["compressed-tensors", "compressed_tensors"],
+            "w4a8_moe_fp8": ["compressed-tensors", "compressed_tensors", "w4afp8"],
             "w4a8_moe_fp8_online": ["compressed-tensors", "compressed_tensors"],
         }
         if self.quantization is not None:
