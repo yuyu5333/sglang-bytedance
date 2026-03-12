@@ -3,6 +3,9 @@
 
 from typing import Optional
 
+import os
+from functools import lru_cache
+
 import torch
 
 from sglang.srt.utils import is_cuda_alike
@@ -32,6 +35,14 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
 )
 
 FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+
+@lru_cache(maxsize=1)
+def _debug_cutlass_w4a8_moe() -> bool:
+    return os.getenv("SGLANG_DEBUG_CUTLASS_W4A8_MOE", "0").lower() in ("1", "true")
+
+
+_debug_cutlass_w4a8_moe_counter = 0
 
 
 def _normalize_per_tensor_scale(
@@ -110,9 +121,58 @@ def cutlass_w4a8_moe(
     Returns:
     - torch.Tensor: The fp8 output tensor after applying the MoE layer.
     """
-    
-    print(f"[DEBUG] [cutlass_w4a8_moe] run cutlass_w4a8_moe")
-    
+    global _debug_cutlass_w4a8_moe_counter
+    if _debug_cutlass_w4a8_moe():
+        _debug_cutlass_w4a8_moe_counter += 1
+        if _debug_cutlass_w4a8_moe_counter <= 20 or _debug_cutlass_w4a8_moe_counter % 1000 == 0:
+            try:
+                rank = (
+                    torch.distributed.get_rank()
+                    if torch.distributed.is_available() and torch.distributed.is_initialized()
+                    else -1
+                )
+            except Exception:
+                rank = -1
+            try:
+                topk_min = int(topk_ids.min().item()) if topk_ids.numel() else None
+                topk_max = int(topk_ids.max().item()) if topk_ids.numel() else None
+                topk_neg1 = int((topk_ids == -1).sum().item()) if topk_ids.numel() else 0
+            except Exception:
+                topk_min = topk_max = None
+                topk_neg1 = -1
+            print(
+                "[SGLANG_DEBUG_CUTLASS_W4A8_MOE] "
+                f"rank={rank} call={_debug_cutlass_w4a8_moe_counter} "
+                f"a={tuple(a.shape)} {a.dtype} {a.device} "
+                f"w1_q={tuple(w1_q.shape)} {w1_q.dtype} "
+                f"w2_q={tuple(w2_q.shape)} {w2_q.dtype} "
+                f"w1_scale={tuple(w1_scale.shape)} {w1_scale.dtype} "
+                f"w2_scale={tuple(w2_scale.shape)} {w2_scale.dtype} "
+                f"topk_ids={tuple(topk_ids.shape)} min={topk_min} max={topk_max} neg1={topk_neg1} "
+                f"topk_weights={tuple(topk_weights.shape)} {topk_weights.dtype} "
+                f"a1_scale={None if a1_scale is None else (tuple(a1_scale.shape), a1_scale.dtype)} "
+                f"a2_scale={None if a2_scale is None else (tuple(a2_scale.shape), a2_scale.dtype)} "
+                f"expert_offsets={tuple(expert_offsets.shape)} {expert_offsets.dtype} "
+                f"problem_sizes1={tuple(problem_sizes1.shape)} {problem_sizes1.dtype} "
+                f"problem_sizes2={tuple(problem_sizes2.shape)} {problem_sizes2.dtype}"
+            )
+            if a_strides1.numel() >= 3 and b_strides1.numel() >= 3 and c_strides1.numel() >= 3:
+                print(
+                    "[SGLANG_DEBUG_CUTLASS_W4A8_MOE] "
+                    f"a_strides1[0]={a_strides1[0].tolist()} "
+                    f"b_strides1[0]={b_strides1[0].tolist()} "
+                    f"c_strides1[0]={c_strides1[0].tolist()} "
+                    f"s_strides13[0]={s_strides13[0].tolist() if s_strides13.numel() >= 3 else None}"
+                )
+            if a_strides2.numel() >= 3 and b_strides2.numel() >= 3 and c_strides2.numel() >= 3:
+                print(
+                    "[SGLANG_DEBUG_CUTLASS_W4A8_MOE] "
+                    f"a_strides2[0]={a_strides2[0].tolist()} "
+                    f"b_strides2[0]={b_strides2[0].tolist()} "
+                    f"c_strides2[0]={c_strides2[0].tolist()} "
+                    f"s_strides2[0]={s_strides2[0].tolist() if s_strides2.numel() >= 3 else None}"
+                )
+
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert w1_q.dtype == torch.int8
     assert w2_q.dtype == torch.int8
@@ -271,8 +331,6 @@ def cutlass_w4a8_moe_calibrate(
     assert b_strides1.shape[0] == w1_q.shape[0], "B Strides 1 expert number mismatch"
     assert a_strides2.shape[0] == w2_q.shape[0], "A Strides 2 expert number mismatch"
     assert b_strides2.shape[0] == w2_q.shape[0], "B Strides 2 expert number mismatch"
-
-    print(f"[DEBUG] [cutlass_w4a8_moe_calibrate] run cutlass_w4a8_moe_calibrate")
 
     num_local_experts = w1_q.size(0)
     m = a.size(0)
