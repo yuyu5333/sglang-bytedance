@@ -1403,10 +1403,6 @@ class ShardedStateLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config, quant_config)
-                for _, module in model.named_modules():
-                    quant_method = getattr(module, "quant_method", None)
-                    if quant_method is not None:
-                        quant_method.process_weights_after_loading(module)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -1444,6 +1440,11 @@ class ShardedStateLoader(BaseModelLoader):
                         state_dict.pop(key)
             if state_dict:
                 raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
+
+            for _, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                if quant_method is not None:
+                    quant_method.process_weights_after_loading(module)
 
             post_load_weights(model, model_config)
 

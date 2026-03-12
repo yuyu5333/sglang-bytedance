@@ -37,7 +37,7 @@ class W4AFp8Config(QuantizationConfig):
 
     def __init__(
         self,
-        is_checkpoint_fp8_serialized: bool = True,
+        is_checkpoint_fp8_serialized: bool = False,
         is_checkpoint_w4afp8_serialized: bool = True,
         linear_activation_scheme: str = "dynamic",
         moe_activation_scheme: str = "static",
@@ -55,7 +55,7 @@ class W4AFp8Config(QuantizationConfig):
         self.linear_activation_scheme = linear_activation_scheme
         self.moe_activation_scheme = moe_activation_scheme
         self.ignored_layers = ignored_layers or []
-        self.weight_block_size = [128, 128]
+        self.weight_block_size = weight_block_size
         self.group_size = group_size
 
     @classmethod
@@ -81,7 +81,7 @@ class W4AFp8Config(QuantizationConfig):
         is_checkpoint_w4afp8_serialized = "w4afp8" in quant_method
         linear_activation_scheme = "dynamic"
         moe_activation_scheme = "static"
-        weight_block_size = [128, 128]
+        weight_block_size = None
         return cls(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             is_checkpoint_w4afp8_serialized=is_checkpoint_w4afp8_serialized,
