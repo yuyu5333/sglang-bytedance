@@ -188,6 +188,14 @@ def convert(
     out_safetensors_files = _copy_safetensors_files(model_dir, save_dir)
 
     weight_map, index_name = _load_index(model_dir)
+    
+    # Validate weight_map and rebuild if needed
+    if weight_map is not None:
+        sample_file = next(iter(weight_map.values()), None)
+        if sample_file and not os.path.exists(os.path.join(model_dir, sample_file)):
+            print(f"Warning: Files in weight_map not found in model_dir, rebuilding index...")
+            weight_map = None
+    
     if weight_map is None:
         weight_map = _build_index(model_dir, _list_safetensors_files(model_dir))
         index_name = "model.safetensors.index.json"
