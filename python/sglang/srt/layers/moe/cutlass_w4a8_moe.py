@@ -110,6 +110,9 @@ def cutlass_w4a8_moe(
     Returns:
     - torch.Tensor: The fp8 output tensor after applying the MoE layer.
     """
+    
+    print(f"[DEBUG] [cutlass_w4a8_moe] run cutlass_w4a8_moe")
+    
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert w1_q.dtype == torch.int8
     assert w2_q.dtype == torch.int8
@@ -268,6 +271,8 @@ def cutlass_w4a8_moe_calibrate(
     assert b_strides1.shape[0] == w1_q.shape[0], "B Strides 1 expert number mismatch"
     assert a_strides2.shape[0] == w2_q.shape[0], "A Strides 2 expert number mismatch"
     assert b_strides2.shape[0] == w2_q.shape[0], "B Strides 2 expert number mismatch"
+
+    print(f"[DEBUG] [cutlass_w4a8_moe_calibrate] run cutlass_w4a8_moe_calibrate")
 
     num_local_experts = w1_q.size(0)
     m = a.size(0)
