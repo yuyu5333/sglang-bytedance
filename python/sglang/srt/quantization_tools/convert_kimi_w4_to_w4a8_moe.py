@@ -117,17 +117,37 @@ def _dequant_from_packed_and_scale(
 
 
 def _iter_expert_weight_keys(keys: Iterable[str]) -> Iterator[ExpertWeightKeys]:
-    pat = re.compile(
+    # Kimi format: w13_weight, w2_weight, w13_input_scale, w2_weight_scale_inv
+    # Standard format: gate_proj.weight_packed, down_proj.weight_packed
+    kimi_pat = re.compile(
+        r"^(?P<base>.+\.mlp\.experts\.\d+\.)(w13_weight|w2_weight)$"
+    )
+    standard_pat = re.compile(
         r"^(?P<base>.+\.mlp\.experts\.\d+\.(?:gate_proj|up_proj|down_proj))\.weight_packed$"
     )
     for k in keys:
-        m = pat.match(k)
-        if not m:
-            continue
-        base = m.group("base")
-        yield ExpertWeightKeys(
-            base=base, packed_key=f"{base}.weight_packed", scale_key=f"{base}.weight_scale"
-        )
+        m_kimi = kimi_pat.match(k)
+        m_std = standard_pat.match(k)
+        if m_kimi:
+            base = m_kimi.group("base")
+            weight_suffix = m_kimi.group(2)
+            if weight_suffix == "w13":
+                yield ExpertWeightKeys(
+                    base=base.rstrip("."),
+                    packed_key=f"{base}w13_weight",
+                    scale_key=f"{base}w13_input_scale",
+                )
+            elif weight_suffix == "w2":
+                yield ExpertWeightKeys(
+                    base=base.rstrip("."),
+                    packed_key=f"{base}w2_weight",
+                    scale_key=f"{base}w2_weight_scale_inv",
+                )
+        elif m_std:
+            base = m_std.group("base")
+            yield ExpertWeightKeys(
+                base=base, packed_key=f"{base}.weight_packed", scale_key=f"{base}.weight_scale"
+            )
 
 
 def _copy_non_safetensors_files(src_dir: str, dst_dir: str) -> None:
@@ -174,7 +194,10 @@ def convert(
 
     converted: Dict[str, torch.Tensor] = {}
 
-    keys_to_process = [k for k in weight_map.keys() if k.endswith(".weight_packed")]
+    keys_to_process = [
+        k for k in weight_map.keys() 
+        if k.endswith(".weight_packed") or k.endswith(".w13_weight") or k.endswith(".w2_weight")
+    ]
     for w in _iter_expert_weight_keys(keys_to_process):
         packed_file = weight_map.get(w.packed_key)
         scale_file = weight_map.get(w.scale_key)
