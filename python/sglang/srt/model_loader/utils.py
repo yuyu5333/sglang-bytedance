@@ -131,6 +131,8 @@ def post_load_weights(model: nn.Module, model_config: ModelConfig):
             model.post_load_weights(is_nextn=True)
         else:
             model.post_load_weights()
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "post_load_weights"):
+        model.language_model.post_load_weights()
 
 
 def should_deepgemm_weight_requant_ue8m0(weight_block_size):

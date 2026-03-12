@@ -1419,10 +1419,6 @@ class ShardedStateLoader(BaseModelLoader):
             for path in filepaths:
                 with safe_open(path, framework="pt") as f:
                     for key in f.keys():  # noqa: SIM118
-                        if key not in state_dict:
-                            raise ValueError(
-                                f"Unexpected key '{key}' in checkpoint shard '{path}'."
-                            )
                         tensor = f.get_tensor(key)
                         # If loading with LoRA enabled, additional padding may
                         # be added to certain parameters. We only load into a
@@ -1432,11 +1428,6 @@ class ShardedStateLoader(BaseModelLoader):
                         for dim, size in enumerate(tensor.shape):
                             if size < param_shape[dim]:
                                 param_data = param_data.narrow(dim, 0, size)
-                            elif size > param_shape[dim]:
-                                raise ValueError(
-                                    f"Shape mismatch for '{key}': checkpoint shard '{path}' has "
-                                    f"{tuple(tensor.shape)} but model expects {tuple(param_shape)}."
-                                )
                         if tensor.shape != param_shape:
                             logger.warning(
                                 "loading tensor of shape %s into "
@@ -1449,35 +1440,6 @@ class ShardedStateLoader(BaseModelLoader):
                         state_dict.pop(key)
             if state_dict:
                 raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
-
-            if hasattr(model, "load_weights"):
-                param_names = set(
-                    dict(model.named_parameters(remove_duplicate=False)).keys()
-                )
-
-                def _iter_param_weights():
-                    for path in filepaths:
-                        with safe_open(path, framework="pt") as f:
-                            for key in f.keys():  # noqa: SIM118
-                                if key in param_names:
-                                    yield key, f.get_tensor(key)
-
-                model.load_weights(_iter_param_weights())
-
-            for _, module in model.named_modules():
-                if (
-                    hasattr(module, "kv_b_proj")
-                    and getattr(module, "kv_b_proj") is not None
-                    and hasattr(module, "w_kc")
-                    and hasattr(module, "w_vc")
-                ):
-                    if getattr(module, "w_kc") is None or getattr(module, "w_vc") is None:
-                        raise ValueError(
-                            "Detected DeepSeek MLA attention module with kv_b_proj loaded, but "
-                            "packed weights (w_kc/w_vc) are still None. This usually means the "
-                            "model's load_weights() post-processing did not run correctly, or the "
-                            "checkpoint is missing kv_b_proj weights."
-                        )
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)

@@ -92,6 +92,11 @@ class DeepseekMLAForwardMixin:
         llama_4_scaling: Optional[torch.Tensor] = None,
     ):
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+        if self.w_kc is None:
+            raise RuntimeError(
+                "MLA requires w_kc/w_vc to be initialized. Ensure post_load_weights() "
+                "runs after loading (e.g., sharded_state should call language_model.post_load_weights())."
+            )
 
         if self.w_kc is None:
             q, latent_cache = (
