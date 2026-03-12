@@ -480,6 +480,26 @@ class Scheduler(
                     trust_remote_code=server_args.trust_remote_code,
                     revision=server_args.revision,
                 )
+            tok_vocab_size = getattr(self.tokenizer, "vocab_size", None)
+            cfg_vocab_size = getattr(self.model_config.hf_config, "vocab_size", None)
+            logger.info(
+                "Tokenizer initialized: tokenizer_path=%s tokenizer_class=%s tokenizer_vocab_size=%s config_vocab_size=%s",
+                server_args.tokenizer_path,
+                type(self.tokenizer).__name__ if self.tokenizer is not None else None,
+                tok_vocab_size,
+                cfg_vocab_size,
+            )
+            if (
+                tok_vocab_size is not None
+                and cfg_vocab_size is not None
+                and int(tok_vocab_size) != int(cfg_vocab_size)
+            ):
+                raise ValueError(
+                    "Tokenizer vocab_size does not match model config vocab_size: "
+                    f"tokenizer_vocab_size={tok_vocab_size}, config_vocab_size={cfg_vocab_size}. "
+                    "Fix by setting --tokenizer-path to the original tokenizer directory "
+                    "that matches the checkpoint, or by copying tokenizer files into --model-path."
+                )
 
         # Set reasoning_parser and think_end_id if --reasoning_parser is enabled
         if self.server_args.reasoning_parser and self.tokenizer:
