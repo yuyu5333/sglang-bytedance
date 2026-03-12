@@ -140,6 +140,22 @@ def cutlass_w4a8_moe(
             except Exception:
                 topk_min = topk_max = None
                 topk_neg1 = -1
+            try:
+                a_abs_max = float(a.abs().amax().item()) if a.numel() else 0.0
+                a_isfinite = bool(torch.isfinite(a).all().item()) if a.numel() else True
+            except Exception:
+                a_abs_max = float("nan")
+                a_isfinite = False
+            try:
+                w1_s0_abs_max = (
+                    float(w1_scale[0].abs().amax().item()) if w1_scale.numel() else 0.0
+                )
+                w2_s0_abs_max = (
+                    float(w2_scale[0].abs().amax().item()) if w2_scale.numel() else 0.0
+                )
+            except Exception:
+                w1_s0_abs_max = float("nan")
+                w2_s0_abs_max = float("nan")
             print(
                 "[SGLANG_DEBUG_CUTLASS_W4A8_MOE] "
                 f"rank={rank} call={_debug_cutlass_w4a8_moe_counter} "
@@ -155,6 +171,13 @@ def cutlass_w4a8_moe(
                 f"expert_offsets={tuple(expert_offsets.shape)} {expert_offsets.dtype} "
                 f"problem_sizes1={tuple(problem_sizes1.shape)} {problem_sizes1.dtype} "
                 f"problem_sizes2={tuple(problem_sizes2.shape)} {problem_sizes2.dtype}"
+            )
+            print(
+                "[SGLANG_DEBUG_CUTLASS_W4A8_MOE] "
+                f"a_abs_max={a_abs_max:.6g} a_isfinite={a_isfinite} "
+                f"w1_scale[0]_abs_max={w1_s0_abs_max:.6g} w2_scale[0]_abs_max={w2_s0_abs_max:.6g} "
+                f"a1_scale_val={None if a1_scale is None else float(a1_scale.reshape(-1)[0].item())} "
+                f"a2_scale_val={None if a2_scale is None else float(a2_scale.reshape(-1)[0].item())}"
             )
             if a_strides1.numel() >= 3 and b_strides1.numel() >= 3 and c_strides1.numel() >= 3:
                 print(
@@ -294,6 +317,21 @@ def cutlass_w4a8_moe(
         k,
         routed_scaling_factor,
     )
+    if _debug_cutlass_w4a8_moe() and (
+        _debug_cutlass_w4a8_moe_counter <= 20 or _debug_cutlass_w4a8_moe_counter % 1000 == 0
+    ):
+        try:
+            out_abs_max = float(output.abs().amax().item()) if output.numel() else 0.0
+            out_isfinite = (
+                bool(torch.isfinite(output).all().item()) if output.numel() else True
+            )
+        except Exception:
+            out_abs_max = float("nan")
+            out_isfinite = False
+        print(
+            "[SGLANG_DEBUG_CUTLASS_W4A8_MOE] "
+            f"output_abs_max={out_abs_max:.6g} output_isfinite={out_isfinite}"
+        )
     return output
 
 

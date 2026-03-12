@@ -364,6 +364,39 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             if len(recv_obj.rids) > 0
             else []
         )
+        if os.environ.get("SGLANG_DEBUG_DETOKENIZER_OUTPUT", "").lower() in ("1", "true"):
+            counter = int(getattr(self, "_debug_detokenizer_output_counter", 0)) + 1
+            setattr(self, "_debug_detokenizer_output_counter", counter)
+            if counter <= 20 or counter % 1000 == 0:
+                for i in range(min(len(recv_obj.rids), 1)):
+                    rid = recv_obj.rids[i]
+                    try:
+                        token_tail = recv_obj.decode_ids[i][-32:]
+                    except Exception:
+                        token_tail = None
+                    try:
+                        out_piece = output_strs[i] if i < len(output_strs) else ""
+                        repl = out_piece.count("�")
+                    except Exception:
+                        out_piece = ""
+                        repl = -1
+                    try:
+                        ent = (
+                            float(recv_obj.output_token_entropy_val[i])
+                            if recv_obj.output_token_entropy_val is not None
+                            else None
+                        )
+                    except Exception:
+                        ent = None
+                    print(
+                        "[SGLANG_DEBUG_DETOKENIZER_OUTPUT] "
+                        f"call={counter} rid={rid} "
+                        f"finished={recv_obj.finished_reasons[i] if i < len(recv_obj.finished_reasons) else None} "
+                        f"entropy={ent} "
+                        f"decode_ids_len={len(recv_obj.decode_ids[i]) if i < len(recv_obj.decode_ids) else None} "
+                        f"decode_ids_tail={token_tail} "
+                        f"out_piece_repr={out_piece!r} repl={repl}"
+                    )
         routed_experts = self._extract_routed_experts(recv_obj)
 
         return BatchStrOutput(
