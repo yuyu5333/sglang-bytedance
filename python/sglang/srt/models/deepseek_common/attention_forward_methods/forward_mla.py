@@ -93,6 +93,39 @@ class DeepseekMLAForwardMixin:
     ):
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 
+        if self.w_kc is None:
+            q, latent_cache = (
+                get_attn_tp_context()
+                .fetch_qkv_latent()
+                .split(
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1
+                )
+            )
+            k_nope = latent_cache[..., : self.kv_lora_rank]
+            k_nope = self.kv_a_layernorm(k_nope).unsqueeze(1)
+            q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            k_pe = latent_cache[..., self.kv_lora_rank :].unsqueeze(1)
+            q_nope_out = q_nope
+
+            if (
+                self.rotary_emb is not None
+                and (not self._fuse_rope_for_trtllm_mla(forward_batch))
+            ):
+                q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+
+            return (
+                q_pe,
+                k_pe,
+                q_nope_out,
+                k_nope,
+                forward_batch,
+                zero_allocator,
+                positions,
+                None,
+                llama_4_scaling,
+            )
+
         q_lora = None
         topk_indices = None
         if self.q_lora_rank is not None:
