@@ -132,6 +132,14 @@ def cutlass_w4a8_moe(
         dtype=torch.float8_e4m3fn,
     )
 
+    if a1_scale is None:
+        a1_scale = (
+            torch.max(torch.abs(a))
+            .to(torch.float32)
+            .div_(torch.finfo(torch.float8_e4m3fn).max)
+            .view(1)
+        )
+
     pre_reorder_for_cutlass_moe(
         a,
         gateup_input,
@@ -183,6 +191,15 @@ def cutlass_w4a8_moe(
     intermediate_q = torch.empty(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
+
+    if a2_scale is None:
+        a2_scale = (
+            torch.max(torch.abs(c1))
+            .to(torch.float32)
+            .div_(torch.finfo(torch.float8_e4m3fn).max)
+            .view(1)
+        )
+
     silu_mul_static_tensorwise_quant_for_cutlass_moe(
         c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
     )
