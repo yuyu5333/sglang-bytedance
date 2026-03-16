@@ -222,6 +222,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             torch.ones(num_experts, dtype=torch.bfloat16),
             requires_grad=False,
         )
+        print(f"[DEBUG] [create_weights] w2_input_scale shape {w2_input_scale.shape}")
         layer.register_parameter("w2_input_scale", w2_input_scale)
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
