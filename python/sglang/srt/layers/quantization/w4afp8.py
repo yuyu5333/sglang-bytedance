@@ -161,7 +161,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
-
+        print(f"[DEBUG] [create_weights] w13_weight shape {w13_weight.shape}")
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
             torch.empty(
@@ -172,6 +172,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             ),
             requires_grad=False,
         )
+        print(f"[DEBUG] [create_weights] w2_weight shape {w2_weight.shape}")
+        
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
@@ -187,6 +189,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             ),
             requires_grad=False,
         )
+        print(f"[DEBUG] [create_weights] w13_weight_scale shape {w13_weight_scale.shape}")
+        
         layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
@@ -199,6 +203,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             ),
             requires_grad=False,
         )
+        print(f"[DEBUG] [create_weights] w2_weight_scale shape {w2_weight_scale.shape}")
+        
         layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
@@ -207,6 +213,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             torch.ones((num_experts, 2), dtype=torch.bfloat16),
             requires_grad=False,
         )
+        print(f"[DEBUG] [create_weights] w13_input_scale shape {w13_input_scale.shape}")
+        
         layer.register_parameter("w13_input_scale", w13_input_scale)
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
