@@ -178,7 +178,6 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
         )
-        print(f"[DEBUG] [create_weights] self.quant_config.group_size {self.quant_config.group_size}")
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
