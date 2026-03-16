@@ -741,11 +741,13 @@ class FusedMoE(torch.nn.Module):
                 and (param.data[expert_id] != 1).any()
                 and ((param.data[expert_id] - loaded_weight).abs() > 1e-5).any()
             ):
-                raise ValueError(
-                    "input_scales of w1 and w3 of a layer "
-                    f"must be equal. But got {param.data[expert_id]} "
-                    f"vs. {loaded_weight}"
-                )
+                # param.data[expert_id].max().item() 和 loaded_weight 取最大值
+                loaded_weight = max(param.data[expert_id].max().item(), loaded_weight.max().item())
+                # raise ValueError(
+                #     "input_scales of w1 and w3 of a layer "
+                #     f"must be equal. But got {param.data[expert_id]} "
+                #     f"vs. {loaded_weight}"
+                # )
 
             self._load_single_value(
                 param=param, loaded_weight=loaded_weight, expert_id=expert_id
