@@ -82,12 +82,19 @@ class W4AFp8Config(QuantizationConfig):
         linear_activation_scheme = "dynamic"
         moe_activation_scheme = "static"
         weight_block_size = [128, 128]
+        from sglang.srt.utils import get_bool_env_var
+        _is_kimi = get_bool_env_var("IS_KIMI", False)
+        if _is_kimi:
+            group_size = 32
+        else:
+            group_size = 128
         return cls(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             is_checkpoint_w4afp8_serialized=is_checkpoint_w4afp8_serialized,
             linear_activation_scheme=linear_activation_scheme,
             moe_activation_scheme=moe_activation_scheme,
             weight_block_size=weight_block_size,
+            group_size=group_size
         )
 
     def get_quant_method(
@@ -171,6 +178,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
         )
+        print(f"[DEBUG] [create_weights] self.quant_config.group_size {self.quant_config.group_size}")
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
