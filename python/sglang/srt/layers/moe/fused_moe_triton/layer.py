@@ -445,10 +445,12 @@ class FusedMoE(torch.nn.Module):
                 if not is_bias and self.use_triton_kernels:
                     # do not transpose for bias
                     loaded_weight = loaded_weight.transpose(-2, -1)
+                print(f"[DEBUG] [_load_w13] loaded_weight shape 1 {loaded_weight.shape}")
                 loaded_weight = loaded_weight.narrow(
                     shard_dim, shard_size * tp_rank, shard_size
                 )
-
+            print(f"[DEBUG] [_load_w13] shard_id={shard_id}, shard_dim={shard_dim}, tp_rank={tp_rank}, start={start}, shard_size={shard_size}")
+            print(f"[DEBUG] [_load_w13] loaded_weight shape 2 {loaded_weight.shape}")
             expert_data = expert_data.narrow(shard_dim, start, shard_size)
         expert_data.copy_(loaded_weight)
 
