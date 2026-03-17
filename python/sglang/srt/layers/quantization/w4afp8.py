@@ -324,6 +324,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         topk_output = dispatch_output.topk_output
         topk_weights, topk_ids, _ = topk_output
 
+        print(f"[DEBUG] input x max: {x.abs().max().item()}, min: {x.abs().min().item()}, mean: {x.abs().mean().item()}")
         output = cutlass_w4a8_moe(
             x,
             layer.w13_weight,
