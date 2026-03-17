@@ -134,13 +134,24 @@ def cutlass_w4a8_moe(
         device=device,
         dtype=torch.float8_e4m3fn,
     )
+    
+    a_q = torch.empty(
+        intermediate.shape, dtype=torch.float8_e4m3fn, device=device
+    )
+
+    # input: torch.Tensor,
+    # output_q: torch.Tensor,
+    # output_s: torch.Tensor,
+    # is_static: bool = False,
+    a1_scale_dynamic = torch.empty((1,), dtype=torch.float32, device=device)
+    per_tensor_quant_fp8(a, a_q, a1_scale_dynamic, False)
 
     pre_reorder_for_cutlass_moe(
-        a,
+        a_q,
         gateup_input,
         src2dst,
         topk_ids,
-        a1_scale,
+        a1_scale_dynamic,
         num_local_experts,
         topk,
         m,
@@ -171,7 +182,7 @@ def cutlass_w4a8_moe(
         c1,
         gateup_input,
         w1_q,
-        a1_scale.float(),
+        a1_scale_dynamic.float(),
         w1_scale,
         expert_offsets[:-1],
         problem_sizes1,
