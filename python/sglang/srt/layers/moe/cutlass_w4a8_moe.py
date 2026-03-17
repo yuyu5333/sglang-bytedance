@@ -143,11 +143,11 @@ def cutlass_w4a8_moe(
     # output_q: torch.Tensor,
     # output_s: torch.Tensor,
     # is_static: bool = False,
-    a1_scale_dynamic = torch.empty((1,), dtype=torch.float32, device=device)
+    a1_scale_dynamic = torch.empty((1, k), dtype=torch.float32, device=device)
     per_tensor_quant_fp8(a, a_q, a1_scale_dynamic, False)
 
     pre_reorder_for_cutlass_moe(
-        a_q,
+        a,
         gateup_input,
         src2dst,
         topk_ids,
@@ -205,7 +205,7 @@ def cutlass_w4a8_moe(
     # output_q: torch.Tensor,
     # output_s: torch.Tensor,
     # is_static: bool = False,
-    a2_scale_dynamic = torch.empty((1,), dtype=torch.float32, device=device)
+    a2_scale_dynamic = torch.empty((1, n), dtype=torch.float32, device=device)
     per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale_dynamic, False)
 
     cutlass_w4a8_moe_mm(
