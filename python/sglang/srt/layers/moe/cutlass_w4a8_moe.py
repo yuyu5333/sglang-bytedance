@@ -180,18 +180,25 @@ def cutlass_w4a8_moe(
         topk,
     )
 
+    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
+    silu_and_mul(c1, intermediate)
+
     intermediate_q = torch.empty(
-        (m * topk, n), dtype=torch.float8_e4m3fn, device=device
+        intermediate.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    silu_mul_static_tensorwise_quant_for_cutlass_moe(
-        c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
-    )
+    
+    # input: torch.Tensor,
+    # output_q: torch.Tensor,
+    # output_s: torch.Tensor,
+    # is_static: bool = False,
+    a2_scale_dynamic = torch.empty((1,), dtype=torch.float32, device=device)
+    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale_dynamic, False)
 
     cutlass_w4a8_moe_mm(
         c2,
         intermediate_q,
         w2_q,
-        a2_scale.float(),
+        a2_scale_dynamic.float(),
         w2_scale,
         expert_offsets[:-1],
         problem_sizes2,
