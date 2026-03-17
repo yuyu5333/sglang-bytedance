@@ -320,13 +320,10 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
-        if torch.isnan(x).any():
-            print(f"[DEBUG] NaN detected in x (hidden_states) at the start of W4A8MoEMethod.apply")
         x_scale = dispatch_output.hidden_states_scale
         topk_output = dispatch_output.topk_output
         topk_weights, topk_ids, _ = topk_output
 
-        print(f"[DEBUG] input x max: {x.abs().max().item()}, min: {x.abs().min().item()}, mean: {x.abs().mean().item()}")
         output = cutlass_w4a8_moe(
             x,
             layer.w13_weight,
