@@ -136,7 +136,7 @@ def cutlass_w4a8_moe(
     )
     
     a_q = torch.empty(
-        intermediate.shape, dtype=torch.float8_e4m3fn, device=device
+        a.shape, dtype=torch.float8_e4m3fn, device=device
     )
 
     # input: torch.Tensor,
