@@ -782,6 +782,8 @@ class KimiK25ForConditionalGeneration(nn.Module):
             positions=positions,
             pp_proxy_tensors=pp_proxy_tensors,
         )
+        if torch.isnan(hidden_states).any():
+            print(f"[DEBUG] NaN detected in hidden_states after general_mm_embed_routine in KimiK25ForConditionalGeneration.forward")
 
         return hidden_states
 

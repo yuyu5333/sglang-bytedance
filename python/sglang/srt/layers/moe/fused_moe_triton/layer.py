@@ -975,6 +975,9 @@ class FusedMoE(torch.nn.Module):
         origin_hidden_states_dim = hidden_states.shape[-1]
         assert self.quant_method is not None
 
+        if torch.isnan(hidden_states).any():
+            print(f"[DEBUG] NaN detected in hidden_states at the start of FusedMoE.forward_impl")
+
         dispatch_output = self.dispatcher.dispatch(
             hidden_states=hidden_states, topk_output=topk_output
         )
