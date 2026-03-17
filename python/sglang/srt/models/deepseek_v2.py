@@ -2192,10 +2192,12 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
             
             if isinstance(hidden_states, tuple):
                 hs_to_check = hidden_states[0]
+            elif hasattr(hidden_states, "next_token_logits"):
+                hs_to_check = hidden_states.next_token_logits
             else:
                 hs_to_check = hidden_states
                 
-            if torch.isnan(hs_to_check).any():
+            if hs_to_check is not None and torch.isnan(hs_to_check).any():
                 print(f"[DEBUG] NaN detected in hidden_states after self.model in DeepseekV2ForCausalLM.forward")
         aux_hidden_states = None
         if self.capture_aux_hidden_states:

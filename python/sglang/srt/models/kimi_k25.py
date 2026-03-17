@@ -782,8 +782,12 @@ class KimiK25ForConditionalGeneration(nn.Module):
             positions=positions,
             pp_proxy_tensors=pp_proxy_tensors,
         )
-        if torch.isnan(hidden_states).any():
-            print(f"[DEBUG] NaN detected in hidden_states after general_mm_embed_routine in KimiK25ForConditionalGeneration.forward")
+        if isinstance(hidden_states, torch.Tensor):
+            if torch.isnan(hidden_states).any():
+                print(f"[DEBUG] NaN detected in hidden_states after general_mm_embed_routine in KimiK25ForConditionalGeneration.forward")
+        elif hasattr(hidden_states, "next_token_logits"):
+            if hidden_states.next_token_logits is not None and torch.isnan(hidden_states.next_token_logits).any():
+                print(f"[DEBUG] NaN detected in LogitsProcessorOutput.next_token_logits after general_mm_embed_routine")
 
         return hidden_states
 
