@@ -97,8 +97,6 @@ def cutlass_w4a8_moe(
     - torch.Tensor: The fp8 output tensor after applying the MoE layer.
     """
     
-    print(f"[DEBUG] [cutlass_w4a8_moe] a dtype {a.dtype}, a shape {a.shape}")
-    
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert w1_q.dtype == torch.int8
     assert w2_q.dtype == torch.int8
@@ -134,7 +132,8 @@ def cutlass_w4a8_moe(
         device=device,
         dtype=torch.float8_e4m3fn,
     )
-    
+    # print(f"[DEBUG] [cutlass_w4a8_moe] a dtype {a.dtype}, a shape {a.shape}")
+    # [DEBUG] [cutlass_w4a8_moe] a dtype torch.bfloat16, a shape torch.Size([1, 7168])
     a_q = torch.empty(
         a.shape, dtype=torch.float8_e4m3fn, device=device
     )
@@ -190,7 +189,7 @@ def cutlass_w4a8_moe(
         b_strides1,
         c_strides1,
         s_strides13,
-        128,
+        32,
         topk,
     )
 
@@ -220,12 +219,13 @@ def cutlass_w4a8_moe(
         b_strides2,
         c_strides2,
         s_strides2,
-        128,
+        32,
         topk,
     )
 
     output = torch.empty_like(a)
-
+    # print(f"[DEBUG] [cutlass_w4a8_moe] c2 shape {c2.shape}, c2 dtype {c2.dtype}")
+    # [DEBUG] [cutlass_w4a8_moe] c2 shape torch.Size([8, 7168]), c2 dtype torch.bfloat16
     post_reorder_for_cutlass_moe(
         c2,
         output,

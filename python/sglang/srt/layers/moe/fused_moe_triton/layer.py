@@ -282,9 +282,9 @@ class FusedMoE(torch.nn.Module):
 
         self.quant_method.create_weights(
             layer=self,
-            num_experts=self.num_local_experts,
-            hidden_size=hidden_size,
-            intermediate_size_per_partition=self.intermediate_size_per_partition,
+            num_experts=self.num_local_experts, # 384
+            hidden_size=hidden_size,            # 7168
+            intermediate_size_per_partition=self.intermediate_size_per_partition,   # 256
             params_dtype=params_dtype,
             weight_loader=(
                 self.weight_loader
@@ -292,7 +292,7 @@ class FusedMoE(torch.nn.Module):
                 else self.weight_loader_fused
             ),
             with_bias=with_bias,
-            moe_intermediate_size=intermediate_size,
+            moe_intermediate_size=intermediate_size,   # 2048
         )
 
         self.quant_method.create_moe_runner(self, self.moe_runner_config)
