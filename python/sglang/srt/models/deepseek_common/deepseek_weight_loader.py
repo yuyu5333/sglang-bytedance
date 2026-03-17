@@ -564,6 +564,10 @@ class DeepseekV2WeightLoaderMixin:
                         torch.bfloat16
                     )
 
+            # print(f"[DEBUG] [post_load_weights] w dtype {w.dtype}, w shape {w.shape}")
+            # print(f"[DEBUG] [post_load_weights] self_attn.qk_nope_head_dim {self_attn.qk_nope_head_dim}, self_attn.v_head_dim {self_attn.v_head_dim}")
+            # [DEBUG] [post_load_weights] self_attn.qk_nope_head_dim 128, self_attn.v_head_dim 128
+            # [DEBUG] [post_load_weights] w dtype torch.bfloat16, w shape torch.Size([2048, 512])
             w_kc, w_vc = w.unflatten(
                 0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
             ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)

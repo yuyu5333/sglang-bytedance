@@ -650,8 +650,6 @@ class DeepseekV2MoE(nn.Module):
             hidden_states,
             topk_output,
         )
-        if torch.isnan(final_hidden_states).any():
-            print(f"[DEBUG] NaN detected in final_hidden_states after self.experts in DeepseekV2MoE.forward_normal")
         if (
             not _is_cuda
             and not _use_aiter
@@ -1656,14 +1654,17 @@ class DeepseekV2DecoderLayer(nn.Module):
             llama_4_scaling=llama_4_scaling,
             layer_scatter_modes=self.layer_scatter_modes,
         )
-        if torch.isnan(hidden_states).any():
-            print(f"[DEBUG] NaN detected in hidden_states after self.self_attn in DeepseekV2DecoderLayer.forward")
 
+        if torch.isnan(hidden_states).any() or (hidden_states == 0).all():
+            print(f"[DEBUG] [DeepseekV2DecodeLayer] forward NaN or all-zero 1111")
+
+        # 出现了NAN
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-        if torch.isnan(hidden_states).any():
-            print(f"[DEBUG] NaN detected in hidden_states after self.layer_communicator.prepare_mlp in DeepseekV2DecoderLayer.forward")
+        if torch.isnan(hidden_states).any() or (hidden_states == 0).all():
+            print(f"[DEBUG] [DeepseekV2DecodeLayer] forward NaN or all-zero 2222")
+
 
         should_allreduce_fusion = (
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
@@ -1686,8 +1687,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             use_reduce_scatter,
             gemm_output_zero_allocator,
         )
-        if torch.isnan(hidden_states).any():
-            print(f"[DEBUG] NaN detected in hidden_states after self.mlp in DeepseekV2DecoderLayer.forward")
 
         if not self.nsa_enable_prefill_cp and should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -1920,8 +1919,6 @@ class DeepseekV2Model(nn.Module):
             else:
                 hidden_states = input_embeds
             residual = None
-            if torch.isnan(hidden_states).any():
-                print(f"[DEBUG] NaN detected in hidden_states immediately after embed_tokens")
         else:
             assert pp_proxy_tensors is not None
             hidden_states = pp_proxy_tensors["hidden_states"]
@@ -2002,10 +1999,6 @@ class DeepseekV2Model(nn.Module):
                     gemm_output_zero_allocator,
                     llama_4_scaling,
                 )
-                if torch.isnan(hidden_states).any():
-                    print(f"[DEBUG] NaN detected in hidden_states after layer {i}")
-                if residual is not None and torch.isnan(residual).any():
-                    print(f"[DEBUG] NaN detected in residual after layer {i}")
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(
@@ -2197,8 +2190,6 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
             else:
                 hs_to_check = hidden_states
                 
-            if hs_to_check is not None and torch.isnan(hs_to_check).any():
-                print(f"[DEBUG] NaN detected in hidden_states after self.model in DeepseekV2ForCausalLM.forward")
         aux_hidden_states = None
         if self.capture_aux_hidden_states:
             hidden_states, aux_hidden_states = hidden_states
