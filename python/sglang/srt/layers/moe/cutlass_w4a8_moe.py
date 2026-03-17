@@ -96,6 +96,9 @@ def cutlass_w4a8_moe(
     Returns:
     - torch.Tensor: The fp8 output tensor after applying the MoE layer.
     """
+    
+    print(f"[DEBUG] [cutlass_w4a8_moe] a dtype {a.dtype}, a shape {a.shape}")
+    
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert w1_q.dtype == torch.int8
     assert w2_q.dtype == torch.int8
