@@ -139,11 +139,11 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
     def create_weights(
         self,
         layer: Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
+        num_experts: int,                       # 384
+        hidden_size: int,                       # 7168
+        intermediate_size_per_partition: int,   # 256
         params_dtype: torch.dtype,
-        **extra_weight_attrs,
+        **extra_weight_attrs,                   # intermediate_size 2048
     ):
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
 
@@ -162,6 +162,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         print(f"[DEBUG] [create_weights] w13_weight shape {w13_weight.shape}")
+        # [DEBUG] [create_weights] w13_weight shape torch.Size([384, 512, 3584])
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
             torch.empty(
@@ -173,7 +174,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         print(f"[DEBUG] [create_weights] w2_weight shape {w2_weight.shape}")
-        
+        # [DEBUG] [create_weights] w2_weight shape torch.Size([384, 7168, 128])
+
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
@@ -190,7 +192,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         print(f"[DEBUG] [create_weights] w13_weight_scale shape {w13_weight_scale.shape}")
-        
+        # [DEBUG] [create_weights] w13_weight_scale shape torch.Size([384, 512, 224])
         layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
@@ -204,7 +206,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         print(f"[DEBUG] [create_weights] w2_weight_scale shape {w2_weight_scale.shape}")
-        
+        # [DEBUG] [create_weights] w2_weight_scale shape torch.Size([384, 7168, 8])
+
         layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
@@ -214,7 +217,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         print(f"[DEBUG] [create_weights] w13_input_scale shape {w13_input_scale.shape}")
-        
+        # [DEBUG] [create_weights] w13_input_scale shape torch.Size([384, 2])
+
         layer.register_parameter("w13_input_scale", w13_input_scale)
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
@@ -223,6 +227,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         print(f"[DEBUG] [create_weights] w2_input_scale shape {w2_input_scale.shape}")
+        # [DEBUG] [create_weights] w2_input_scale shape torch.Size([384])
+
         layer.register_parameter("w2_input_scale", w2_input_scale)
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
@@ -314,6 +320,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
+        x_scale = dispatch_output.hidden_states_scale
         topk_output = dispatch_output.topk_output
         topk_weights, topk_ids, _ = topk_output
 
@@ -336,7 +343,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             self.expert_offsets,
             self.problem_sizes1,
             self.problem_sizes2,
-            layer.w13_input_scale,
+            # layer.w13_input_scale,
+            x_scale,
             layer.w2_input_scale,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )
