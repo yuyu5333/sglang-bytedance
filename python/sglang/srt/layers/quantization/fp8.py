@@ -344,7 +344,12 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_partition_sizes,
                 skip_block_quant_check,
             )
-        print(f"[DEBUG] [FP8 create_weights] self.is_checkpoint_fp8_serialized {self.is_checkpoint_fp8_serialized}, params_dtype {params_dtype}")
+        # print(f"[DEBUG] [FP8 create_weights] self.is_checkpoint_fp8_serialized {self.is_checkpoint_fp8_serialized}, params_dtype {params_dtype}")
+        # if Kimi self.is_checkpoint_fp8_serialized = False
+        _is_kimi = get_bool_env_var("IS_KIMI", False)
+        if _is_kimi:
+            self.is_checkpoint_fp8_serialized = False
+        
         # Create the weight
         weight_dtype = (
             torch.float8_e4m3fn if self.is_checkpoint_fp8_serialized else params_dtype
