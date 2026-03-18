@@ -1105,7 +1105,23 @@ class DeepseekV2AttentionMLA(
 
         # For tensor parallel attention
         if self.q_lora_rank is not None:
-            print(f"[DEBUG] [DeeoseekV2AttentionMLA] before ReplicatedLinear quant_config {quant_config}")
+            if self.layer_id == 0:
+                import pprint
+
+                quant_config_dump = (
+                    None
+                    if quant_config is None
+                    else {
+                        "class": quant_config.__class__.__name__,
+                        **vars(quant_config),
+                    }
+                )
+                log_info_on_rank0(
+                    logger,
+                    f"[DeepseekV2AttentionMLA] quant_config={pprint.pformat(quant_config_dump, width=200, sort_dicts=True)}",
+                )
+            # [DEBUG] [DeeoseekV2AttentionMLA] before ReplicatedLinear quant_config <sglang.srt.layers.quantization.w4afp8.W4AFp8Config object at 0x7f5042b26960>
+            # print(f"[DEBUG] [DeeoseekV2AttentionMLA] before ReplicatedLinear quant_config {quant_config}")
             self.fused_qkv_a_proj_with_mqa = ReplicatedLinear(
                 self.hidden_size,
                 self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
@@ -1114,7 +1130,23 @@ class DeepseekV2AttentionMLA(
                 prefix=add_prefix("fused_qkv_a_proj_with_mqa", prefix),
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            print(f"[DEBUG] [DeeoseekV2AttentionMLA] before ColumnParallelLinear quant_config {self._get_q_b_proj_quant_config(quant_config)}")
+            if self.layer_id == 0:
+                import pprint
+                quant_config = self._get_q_b_proj_quant_config(quant_config)
+                quant_config_dump = (
+                    None
+                    if quant_config is None
+                    else {
+                        "class": quant_config.__class__.__name__,
+                        **vars(quant_config),
+                    }
+                )
+                log_info_on_rank0(
+                    logger,
+                    f"[DeepseekV2AttentionMLA] quant_config={pprint.pformat(quant_config_dump, width=200, sort_dicts=True)}",
+                )
+            # [DEBUG] [DeeoseekV2AttentionMLA] before ColumnParallelLinear quant_config <sglang.srt.layers.quantization.w4afp8.W4AFp8Config object at 0x7f748c93f080>
+            # print(f"[DEBUG] [DeeoseekV2AttentionMLA] before ColumnParallelLinear quant_config {self._get_q_b_proj_quant_config(quant_config)}")
             self.q_b_proj = ColumnParallelLinear(
                 q_lora_rank,
                 self.num_heads * self.qk_head_dim,
