@@ -354,7 +354,7 @@ class DeepseekV2WeightLoaderMixin:
                                 # modelopt ckpt contains not needed weights for MTP module:
                                 # model.decoder.self_attn.attn_mqa.v_scale and
                                 # model.decoder.self_attn.attn_mqa.k_scale
-                                logger.warning(f"{name} not found in params_dict.")
+                                # logger.warning(f"{name} not found in params_dict.")
                                 continue
                             param = params_dict[name]
                             weight_loader = getattr(
