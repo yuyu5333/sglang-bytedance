@@ -243,7 +243,7 @@ class DeepseekV2WeightLoaderMixin:
                             # weight_scale -> weight_scale_inv
                             # if weight_scale in name replave with weight_scale_inv
                             if "weight_scale" in name:
-                                name = name.replace("weight_scale", "weight_scale_inv")
+                                name = name.replace("weight_scale2", "weight_scale_inv")
                         name = name.replace(weight_name, param_name)
                         if name not in params_dict:
                             continue
