@@ -53,18 +53,24 @@ def _unpack_repack_int32_to_cutlass_int8(
     pack_factor = 32 // num_bits
     mask = (1 << num_bits) - 1
     offset = 1 << (num_bits - 1)
+    pair_factor = pack_factor // 2
 
-    # Unpack: each int32 → pack_factor signed int4 values
-    unpacked = torch.stack(
-        [(weight_packed >> (num_bits * i)) & mask for i in range(pack_factor)],
-        dim=-1,
-    )  # [..., K_packed, pack_factor]
-    unpacked = unpacked.flatten(-2).to(torch.int8) - offset  # [..., K] signed int4
+    # Repack directly into CUTLASS int8 without materializing full unpacked int32.
+    # This reduces peak memory from O(pack_factor) large int32 buffers to O(1) temporaries.
+    out = torch.empty(
+        (*weight_packed.shape[:-1], weight_packed.shape[-1], pair_factor),
+        dtype=torch.int8,
+        device=weight_packed.device,
+    )
+    for pair_idx in range(pair_factor):
+        low_shift = num_bits * (2 * pair_idx)
+        high_shift = low_shift + num_bits
 
-    # Repack pairs into CUTLASS int8: low nibble = even, high nibble = odd
-    low_nibbles = unpacked[..., 0::2]
-    high_nibbles = unpacked[..., 1::2]
-    return ((high_nibbles << 4) | (low_nibbles & 0x0F)).to(torch.int8).contiguous()
+        low_nibbles = ((weight_packed >> low_shift) & mask) - offset
+        high_nibbles = ((weight_packed >> high_shift) & mask) - offset
+        out[..., pair_idx] = ((high_nibbles << 4) | (low_nibbles & 0x0F)).to(torch.int8)
+
+    return out.flatten(-2).contiguous()
 
 
 class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
