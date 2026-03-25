@@ -244,20 +244,31 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
+        # 注册 weight_scale2 为 per-tensor scale
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
 
-        # 注册一个统一的 weight_scale2，存储每个专家的 FP8 标量
-        # 假设 index 0 是 w13 的 scale，index 1 是 w2 的 scale
-        weight_scale2 = torch.nn.Parameter(
+        w13_weight_scale2 = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                1,  # 改为 1
+                2,  # index 0: gate_proj, index 1: up_proj
                 dtype=torch.float32,
             ),
             requires_grad=False,
         )
-        layer.register_parameter("weight_scale2", weight_scale2)
-        set_weight_attrs(weight_scale2, extra_weight_attrs)
+        layer.register_parameter("w13_weight_scale2", w13_weight_scale2)
+        set_weight_attrs(w13_weight_scale2, extra_weight_attrs)
 
+        w2_weight_scale2 = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale2", w2_weight_scale2)
+        set_weight_attrs(w2_weight_scale2, extra_weight_attrs)
 
         # Pre-populate the strides
         device = layer.w13_weight.device
@@ -332,6 +343,12 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         )
         layer.w2_input_scale = Parameter(new_w2_input_scale, requires_grad=False)
 
+        # Process weight_scale2
+        if hasattr(layer, "w13_weight_scale2") and layer.w13_weight_scale2 is not None:
+            layer.w13_weight_scale2 = Parameter(layer.w13_weight_scale2.to(dtype), requires_grad=False)
+        if hasattr(layer, "w2_weight_scale2") and layer.w2_weight_scale2 is not None:
+            layer.w2_weight_scale2 = Parameter(layer.w2_weight_scale2.to(dtype), requires_grad=False)
+
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
@@ -347,7 +364,6 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
-        x_scale = dispatch_output.hidden_states_scale
         topk_output = dispatch_output.topk_output
         topk_weights, topk_ids, _ = topk_output
 
@@ -370,9 +386,9 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             self.expert_offsets,
             self.problem_sizes1,
             self.problem_sizes2,
-            layer.weight_scale2,
-            # layer.w13_input_scale,
-            x_scale,
+            layer.w13_weight_scale2,
+            layer.w2_weight_scale2,
+            layer.w13_input_scale,
             layer.w2_input_scale,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )

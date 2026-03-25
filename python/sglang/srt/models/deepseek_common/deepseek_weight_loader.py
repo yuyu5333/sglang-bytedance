@@ -237,12 +237,10 @@ class DeepseekV2WeightLoaderMixin:
                         _is_kimi = get_bool_env_var("IS_KIMI", False)
                         if _is_kimi:
                             # weight_packed -> weight
-                            # if weight_packed in name replave with weight
                             if "weight_packed" in name:
                                 name = name.replace("weight_packed", "weight")
-                            # weight_scale -> weight_scale_inv
-                            # if weight_scale in name replave with weight_scale_inv
-                            if "weight_scale" in name:
+                            # weight_scale -> weight_scale_inv (but skip weight_scale2)
+                            if "weight_scale" in name and "weight_scale2" not in name:
                                 name = name.replace("weight_scale", "weight_scale_inv")
                         name = name.replace(weight_name, param_name)
                         if name not in params_dict:
