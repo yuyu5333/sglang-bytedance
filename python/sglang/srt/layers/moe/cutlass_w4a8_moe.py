@@ -31,7 +31,6 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
 
-
 def cutlass_w4a8_moe(
     a: torch.Tensor,
     w1_q: torch.Tensor,
@@ -51,8 +50,195 @@ def cutlass_w4a8_moe(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
-    w13_weight_scale2: Optional[torch.Tensor] = None,
-    w2_weight_scale2: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input: bool = False,
+    routed_scaling_factor: float = 1.0,
+) -> torch.Tensor:
+    """
+    This function computes a w4a8-quantized Mixture of Experts (MoE) layer
+    using two sets of quantized weights, w1_q and w2_q, and top-k gating
+    mechanism. The matrix multiplications are implemented with CUTLASS
+    grouped gemm.
+
+    Parameters:
+    - a (torch.Tensor): The input tensor to the MoE layer.
+        Shape: [M, K]
+    - w1_q (torch.Tensor): The first set of int4-quantized expert weights.
+        Shape: [num_experts, N * 2,  K // 2]
+        (the weights are passed transposed and int4-packed)
+    - w2_q (torch.Tensor): The second set of int4-quantized expert weights.
+        Shape: [num_experts, K, N // 2]
+        (the weights are passed transposed and int4-packed)
+    - w1_scale (torch.Tensor): The fp32 scale to dequantize w1_q.
+        Shape: [num_experts, K // 512, N * 8]
+    - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
+        Shape: [num_experts, N // 512, K * 4]
+    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
+    - topk_ids (torch.Tensor): The ids of each token->expert mapping.
+    - a_strides1 (torch.Tensor): The input strides of the first grouped gemm.
+    - b_strides1 (torch.Tensor): The weights strides of the first grouped gemm.
+    - c_strides1 (torch.Tensor): The output strides of the first grouped gemm.
+    - a_strides2 (torch.Tensor): The input strides of the second grouped gemm.
+    - b_strides2 (torch.Tensor): The weights strides of the second grouped gemm.
+    - c_strides2 (torch.Tensor): The output strides of the second grouped gemm.
+    - s_strides13 (torch.Tensor): The input and scale strides of the first grouped gemm.
+    - s_strides2 (torch.Tensor): The scale strides of the second grouped gemm.
+    - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
+        Shape: scalar or [1, K]
+    - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
+        quantize the intermediate result between the gemms.
+        Shape: scalar or [1, N]
+    - apply_router_weight_on_input (bool): When true, the topk weights are
+        applied directly on the inputs. This is only applicable when topk is 1.
+
+    Returns:
+    - torch.Tensor: The fp8 output tensor after applying the MoE layer.
+    """
+    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
+    assert w1_q.dtype == torch.int8
+    assert w2_q.dtype == torch.int8
+    assert a.shape[1] // 2 == w1_q.shape[2], "Hidden size mismatch w1"
+    assert w1_q.shape[2] * 2 == w2_q.shape[1], "Hidden size mismatch w2"
+    assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
+    assert w1_q.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
+    assert w1_q.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
+
+    assert a_strides1.shape[0] == w1_q.shape[0], "A Strides 1 expert number mismatch"
+    assert b_strides1.shape[0] == w1_q.shape[0], "B Strides 1 expert number mismatch"
+    assert a_strides2.shape[0] == w2_q.shape[0], "A Strides 2 expert number mismatch"
+    assert b_strides2.shape[0] == w2_q.shape[0], "B Strides 2 expert number mismatch"
+    num_local_experts = w1_q.size(0)
+    m = a.size(0)
+    k = w1_q.size(2) * 2  # w1_q is transposed and packed
+    n = w2_q.size(2) * 2  # w2_q is transposed and packed
+    topk = topk_ids.size(1)
+
+    if apply_router_weight_on_input:
+        assert topk == 1, "apply_router_weight_on_input is only implemented for topk=1"
+
+    device = a.device
+    if get_moe_expert_parallel_world_size() > 1:
+        topk_ids = torch.where(topk_ids == -1, num_local_experts, topk_ids)
+
+    src2dst = cutlass_w4_run_moe_ep_preproess(
+        topk_ids,
+    )
+
+    gateup_input = torch.empty(
+        (m * topk, k),
+        device=device,
+        dtype=torch.float8_e4m3fn,
+    )
+
+    pre_reorder_for_cutlass_moe(
+        a,
+        gateup_input,
+        src2dst,
+        topk_ids,
+        a1_scale,
+        num_local_experts,
+        topk,
+        m,
+        k,
+    )
+
+    # NOTE: a_map and c_map are not used in the get_cutlass_w4a8_moe_mm_data kernel,
+    # they are kept to allow for a quick switch of the permutation logic
+    # from the current triton kernel implementation to the cutlass-based one if needed.
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    get_cutlass_w4a8_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        a_map,
+        c_map,
+        num_local_experts,
+        n,
+        k,
+    )
+
+    c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
+    c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
+
+    cutlass_w4a8_moe_mm(
+        c1,
+        gateup_input,
+        w1_q,
+        a1_scale.float(),
+        w1_scale,
+        expert_offsets[:-1],
+        problem_sizes1,
+        a_strides1,
+        b_strides1,
+        c_strides1,
+        s_strides13,
+        128,
+        topk,
+    )
+
+    intermediate_q = torch.empty(
+        (m * topk, n), dtype=torch.float8_e4m3fn, device=device
+    )
+    silu_mul_static_tensorwise_quant_for_cutlass_moe(
+        c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
+    )
+
+    cutlass_w4a8_moe_mm(
+        c2,
+        intermediate_q,
+        w2_q,
+        a2_scale.float(),
+        w2_scale,
+        expert_offsets[:-1],
+        problem_sizes2,
+        a_strides2,
+        b_strides2,
+        c_strides2,
+        s_strides2,
+        128,
+        topk,
+    )
+
+    output = torch.empty_like(a)
+
+    post_reorder_for_cutlass_moe(
+        c2,
+        output,
+        src2dst,
+        topk_ids,
+        topk_weights,
+        num_local_experts,
+        topk,
+        m,
+        k,
+        routed_scaling_factor,
+    )
+    return output
+
+def cutlass_w4a8_moe_new(
+    a: torch.Tensor,
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    a_strides1: torch.Tensor,
+    b_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    a_strides2: torch.Tensor,
+    b_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
+    s_strides13: torch.Tensor,
+    s_strides2: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    # w13_weight_scale2: Optional[torch.Tensor] = None,
+    # w2_weight_scale2: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
