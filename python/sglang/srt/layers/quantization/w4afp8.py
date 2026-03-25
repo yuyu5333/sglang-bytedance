@@ -244,6 +244,21 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
+
+        # 注册一个统一的 weight_scale2，存储每个专家的 FP8 标量
+        # 假设 index 0 是 w13 的 scale，index 1 是 w2 的 scale
+        weight_scale2 = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                1,  # 改为 1
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("weight_scale2", weight_scale2)
+        set_weight_attrs(weight_scale2, extra_weight_attrs)
+
+
         # Pre-populate the strides
         device = layer.w13_weight.device
 
@@ -355,6 +370,7 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             self.expert_offsets,
             self.problem_sizes1,
             self.problem_sizes2,
+            layer.weight_scale2,
             # layer.w13_input_scale,
             x_scale,
             layer.w2_input_scale,

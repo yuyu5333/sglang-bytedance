@@ -51,6 +51,7 @@ def cutlass_w4a8_moe(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
+    weight_scale2: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
@@ -195,6 +196,14 @@ def cutlass_w4a8_moe(
         32,
         topk,
     )
+
+    # 使用weight_scale2与c1相乘
+    if weight_scale2 is not None:
+        counts = expert_offsets[1:] - expert_offsets[:-1]
+        # 直接使用这一列
+        full_scales = torch.repeat_interleave(weight_scale2.squeeze(-1), counts)
+        c1 *= full_scales.unsqueeze(-1)
+
 
     intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
     silu_and_mul(c1, intermediate)
