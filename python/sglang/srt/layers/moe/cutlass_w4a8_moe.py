@@ -162,7 +162,12 @@ def cutlass_w4a8_moe(
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
-
+    
+    if a1_scale is not None:
+        a1_scale = max(a1_scale)
+    else:
+        a1_scale = 1.0
+    
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -182,6 +187,10 @@ def cutlass_w4a8_moe(
     intermediate_q = torch.empty(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
+    
+    if a2_scale is None:
+        a2_scale = 1.0
+    
     silu_mul_static_tensorwise_quant_for_cutlass_moe(
         c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
     )
