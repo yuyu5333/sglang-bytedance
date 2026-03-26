@@ -164,7 +164,7 @@ def cutlass_w4a8_moe(
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
     
     if a1_scale is not None:
-        a1_scale = max(a1_scale)
+        a1_scale = a1_scale.max()
     else:
         a1_scale = 1.0
     
