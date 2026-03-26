@@ -437,7 +437,7 @@ def cutlass_w4a8_moe(
     # 使用w2_weight_scale2与c2相乘
     if a2_scale is not None:
         counts = expert_offsets[1:] - expert_offsets[:-1]
-        w2_full_scales = torch.repeat_interleave(a1_scale.squeeze(-1), counts)
+        w2_full_scales = torch.repeat_interleave(a2_scale, counts)
         c2 *= w2_full_scales.unsqueeze(-1).to(c2.dtype)
 
     output = torch.empty_like(a)
