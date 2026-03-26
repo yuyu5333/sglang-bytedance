@@ -343,7 +343,7 @@ def cutlass_w4a8_moe(
     # output_q: torch.Tensor,
     # output_s: torch.Tensor,
     # is_static: bool = False,
-    a1_scale_dynamic = torch.empty((1), dtype=torch.float32, device=device)
+    a1_scale_dynamic = torch.zeros((1), dtype=torch.float32, device=device)
     # print(f"[DEBUG] input a max: {a.abs().max().item()}, min: {a.abs().min().item()}, mean: {a.abs().mean().item()}")
     per_tensor_quant_fp8(a, a_q, a1_scale_dynamic, False)
     torch.cuda.synchronize()
@@ -418,7 +418,7 @@ def cutlass_w4a8_moe(
     # output_q: torch.Tensor,
     # output_s: torch.Tensor,
     # is_static: bool = False,
-    a2_scale_dynamic = torch.empty((1), dtype=torch.float32, device=device)
+    a2_scale_dynamic = torch.zeros((1), dtype=torch.float32, device=device)
     # print(f"[DEBUG] input intermediate max: {intermediate.abs().max().item()}, min: {intermediate.abs().min().item()}, mean: {intermediate.abs().mean().item()}")
     per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale_dynamic, False)
     torch.cuda.synchronize()
