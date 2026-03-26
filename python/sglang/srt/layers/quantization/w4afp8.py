@@ -388,8 +388,8 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
             self.problem_sizes2,
             layer.w13_weight_scale2,
             layer.w2_weight_scale2,
-            # layer.w13_input_scale,
-            # layer.w2_input_scale,
+            layer.w13_input_scale,
+            layer.w2_input_scale,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )
         return StandardCombineInput(hidden_states=output)

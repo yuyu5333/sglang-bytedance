@@ -246,6 +246,8 @@ def cutlass_w4a8_moe(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
+    w13_weight_scale2: Optional[torch.Tensor] = None,
+    w2_weight_scale2: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
@@ -280,6 +282,10 @@ def cutlass_w4a8_moe(
     - c_strides2 (torch.Tensor): The output strides of the second grouped gemm.
     - s_strides13 (torch.Tensor): The input and scale strides of the first grouped gemm.
     - s_strides2 (torch.Tensor): The scale strides of the second grouped gemm.
+    - w13_weight_scale2 (Optional[torch.Tensor]): The optional bf16 scale for w13.
+        Shape: [num_experts, 2]
+    - w2_weight_scale2 (Optional[torch.Tensor]): The optional bf16 scale for w2.
+        Shape: [num_experts]
     - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
         Shape: scalar or [1, K]
     - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
@@ -392,10 +398,10 @@ def cutlass_w4a8_moe(
     )
 
     # 使用w13_weight_scale2与c1相乘 (c1包含gate_proj和up_proj，因此w13_weight_scale2应有两个标量)
-    if a1_scale is not None:
+    if w13_weight_scale2 is not None:
         counts = expert_offsets[1:] - expert_offsets[:-1]
         # w13_weight_scale2 shape: [num_experts, 2]
-        full_scales = torch.repeat_interleave(a1_scale, counts, dim=0) # [m*topk, 2]
+        full_scales = torch.repeat_interleave(w13_weight_scale2, counts, dim=0) # [m*topk, 2]
         # c1 shape is [m*topk, n * 2], split it into gate and up
         c1 = c1.view(m * topk, 2, n)
         c1 *= full_scales.unsqueeze(-1).to(c1.dtype)
@@ -435,9 +441,9 @@ def cutlass_w4a8_moe(
     )
 
     # 使用w2_weight_scale2与c2相乘
-    if a2_scale is not None:
+    if w2_weight_scale2 is not None:
         counts = expert_offsets[1:] - expert_offsets[:-1]
-        w2_full_scales = torch.repeat_interleave(a2_scale, counts)
+        w2_full_scales = torch.repeat_interleave(w2_weight_scale2, counts)
         c2 *= w2_full_scales.unsqueeze(-1).to(c2.dtype)
 
     output = torch.empty_like(a)

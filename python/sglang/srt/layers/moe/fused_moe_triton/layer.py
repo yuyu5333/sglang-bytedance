@@ -1025,7 +1025,7 @@ class FusedMoE(torch.nn.Module):
         ckpt_up_proj_name: str,
         num_experts: int,
     ) -> List[Tuple[str, str, int, str]]:
-        return [
+        mapping = [
             # (param_name, weight_name, expert_id, shard_id)
             (
                 (
@@ -1044,6 +1044,27 @@ class FusedMoE(torch.nn.Module):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
+        
+        # Add mapping for weight_scale2
+        mapping += [
+            (
+                (
+                    "experts.w13_weight_scale2"
+                    if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
+                    else "experts.w2_weight_scale2"
+                ),
+                f"experts.{expert_id}.{weight_name}.weight_scale2",
+                expert_id,
+                shard_id,
+            )
+            for expert_id in range(num_experts)
+            for shard_id, weight_name in [
+                ("w1", ckpt_gate_proj_name),
+                ("w2", ckpt_down_proj_name),
+                ("w3", ckpt_up_proj_name),
+            ]
+        ]
+        return mapping
 
     @classmethod
     def make_expert_params_mapping_fused(
