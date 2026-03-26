@@ -31,7 +31,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
 
-def cutlass_w4a8_moe(
+def cutlass_w4a8_moe_origin(
     a: torch.Tensor,
     w1_q: torch.Tensor,
     w2_q: torch.Tensor,
@@ -227,7 +227,7 @@ def cutlass_w4a8_moe(
     )
     return output
 
-def cutlass_w4a8_moe_new(
+def cutlass_w4a8_moe(
     a: torch.Tensor,
     w1_q: torch.Tensor,
     w2_q: torch.Tensor,
@@ -246,8 +246,6 @@ def cutlass_w4a8_moe_new(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
-    # w13_weight_scale2: Optional[torch.Tensor] = None,
-    # w2_weight_scale2: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
@@ -394,10 +392,10 @@ def cutlass_w4a8_moe_new(
     )
 
     # 使用w13_weight_scale2与c1相乘 (c1包含gate_proj和up_proj，因此w13_weight_scale2应有两个标量)
-    if w13_weight_scale2 is not None:
+    if a1_scale is not None:
         counts = expert_offsets[1:] - expert_offsets[:-1]
         # w13_weight_scale2 shape: [num_experts, 2]
-        full_scales = torch.repeat_interleave(w13_weight_scale2, counts, dim=0) # [m*topk, 2]
+        full_scales = torch.repeat_interleave(a1_scale, counts, dim=0) # [m*topk, 2]
         # c1 shape is [m*topk, n * 2], split it into gate and up
         c1 = c1.view(m * topk, 2, n)
         c1 *= full_scales.unsqueeze(-1).to(c1.dtype)
@@ -437,9 +435,9 @@ def cutlass_w4a8_moe_new(
     )
 
     # 使用w2_weight_scale2与c2相乘
-    if w2_weight_scale2 is not None:
+    if a2_scale is not None:
         counts = expert_offsets[1:] - expert_offsets[:-1]
-        w2_full_scales = torch.repeat_interleave(w2_weight_scale2.squeeze(-1), counts)
+        w2_full_scales = torch.repeat_interleave(a1_scale.squeeze(-1), counts)
         c2 *= w2_full_scales.unsqueeze(-1).to(c2.dtype)
 
     output = torch.empty_like(a)
