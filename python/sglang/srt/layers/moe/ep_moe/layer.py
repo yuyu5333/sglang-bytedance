@@ -34,6 +34,7 @@ from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import
 )
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     NPUCompressedTensorsW4A16Int4DynamicMoE,
+    CompressedTensorsW4AFP8MoE
 )
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
@@ -223,7 +224,7 @@ class DeepEPMoE(FusedMoE):
             )
 
         from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
-
+        
         if _use_aiter:
             assert DispatchOutputChecker.format_is_deepep(dispatch_output)
             # in forward_aiter, we skip token permutation and unpermutation, which have been fused inside aiter kernel
@@ -242,7 +243,7 @@ class DeepEPMoE(FusedMoE):
                 and self.quant_config.get_name() == "modelopt_fp4"
             ):
                 output = self.forward_flashinfer_cutedsl(dispatch_output)
-            elif self.use_w4afp8:
+            elif True or self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
             else:
                 assert False, "forward_deepgemm_masked is deprecated"
@@ -341,7 +342,7 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPLLDispatchOutput,
     ):
         assert self.moe_runner_config.activation == "silu"
-        assert isinstance(self.quant_method, W4AFp8MoEMethod)
+        assert isinstance(self.quant_method, (W4AFp8MoEMethod, CompressedTensorsW4AFP8MoE))
         assert (
             envs.SGLANG_DEEPEP_BF16_DISPATCH.get()
         ), "W4AFP8 does not support FP8 dispatch; please set SGLANG_DEEPEP_BF16_DISPATCH=1."
