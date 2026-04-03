@@ -170,6 +170,20 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         layer.register_parameter("w2_weight_scale", w2_scale)
         set_weight_attrs(w2_scale, extra_weight_attrs)
 
+        w13_input_scale = torch.nn.Parameter(
+            torch.ones((num_experts, 2), dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_input_scale", w13_input_scale)
+        set_weight_attrs(w13_input_scale, extra_weight_attrs)
+
+        w2_input_scale = torch.nn.Parameter(
+            torch.ones(num_experts, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_input_scale", w2_input_scale)
+        set_weight_attrs(w2_input_scale, extra_weight_attrs)
+
         # Placeholder params to accept checkpoint tensors that we don't use.
         # Without these, the weight loader warns "not found in params_dict".
         for name, shape in [
@@ -226,6 +240,18 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         w2_weight_scale = layer.w2_weight_scale.to(dtype)
         w2_weight_scale = interleave_scales(w2_weight_scale)
         layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale, requires_grad=False)
+
+        w13_input_scale_max = layer.w13_input_scale.max().to(torch.float32).item()
+        layer.w13_input_scale = torch.nn.Parameter(
+            torch.tensor([w13_input_scale_max], dtype=torch.float32, device=device),
+            requires_grad=False,
+        )
+
+        w2_input_scale_max = layer.w2_input_scale.max().to(torch.float32).item()
+        layer.w2_input_scale = torch.nn.Parameter(
+            torch.tensor([w2_input_scale_max], dtype=torch.float32, device=device),
+            requires_grad=False,
+        )
 
         layer.is_w4afp8_converted = True
 
@@ -313,3 +339,68 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )
         return StandardCombineInput(hidden_states=output)
+
+    def apply_deepep_normal(
+        self, layer: torch.nn.Module, dispatch_output
+    ) -> torch.Tensor:
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe_deepep_normal
+
+        hidden_states = dispatch_output.hidden_states
+        topk_ids = dispatch_output.topk_ids
+        topk_weights = dispatch_output.topk_weights
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        assert dispatch_output.hidden_states_scale is None
+
+        return cutlass_w4a8_moe_deepep_normal(
+            hidden_states,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_weights,
+            topk_ids,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            layer.w13_input_scale,
+            layer.w2_input_scale,
+        )
+
+    def apply_deepep_ll(self, layer: torch.nn.Module, dispatch_output) -> torch.Tensor:
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe_deepep_ll
+
+        hidden_states, hidden_states_scale, topk_ids, _, masked_m, _ = dispatch_output
+        assert hidden_states_scale is None
+
+        return cutlass_w4a8_moe_deepep_ll(
+            hidden_states,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_ids,
+            masked_m,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            layer.w13_input_scale,
+            layer.w2_input_scale,
+        )

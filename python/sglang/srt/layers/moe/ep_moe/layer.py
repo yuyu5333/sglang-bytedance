@@ -228,6 +228,13 @@ class DeepEPMoE(FusedMoE):
             )
 
         from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
+
+        if (not self.use_w4afp8) and isinstance(
+            self.quant_method, CompressedTensorsFusedMoEMethod
+        ):
+            scheme = getattr(self, "scheme", None)
+            if isinstance(scheme, CompressedTensorsW4AFP8MoE):
+                self.use_w4afp8 = True
         
         if _use_aiter:
             assert DispatchOutputChecker.format_is_deepep(dispatch_output)
@@ -335,8 +342,22 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPNormalDispatchOutput,
     ):
         assert self.moe_runner_config.activation == "silu"
-        assert isinstance(self.quant_method, W4AFp8MoEMethod)
-        return self.quant_method.apply_deepep_normal(
+
+        if isinstance(self.quant_method, W4AFp8MoEMethod):
+            scheme = self.quant_method
+        elif isinstance(self.quant_method, CompressedTensorsFusedMoEMethod):
+            scheme = getattr(self, "scheme", None)
+            if scheme is None:
+                raise ValueError(
+                    "A scheme must be defined for CompressedTensorsFusedMoEMethod"
+                )
+        else:
+            raise AssertionError(
+                f"Unsupported quant_method type: {type(self.quant_method)}"
+            )
+
+        assert isinstance(scheme, (W4AFp8MoEMethod, CompressedTensorsW4AFP8MoE))
+        return scheme.apply_deepep_normal(
             layer=self,
             dispatch_output=dispatch_output,
         )
@@ -346,8 +367,7 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPLLDispatchOutput,
     ):
         assert self.moe_runner_config.activation == "silu"
-        
-        # Determine the underlying scheme to call
+
         if isinstance(self.quant_method, W4AFp8MoEMethod):
             scheme = self.quant_method
         elif isinstance(self.quant_method, CompressedTensorsFusedMoEMethod):
