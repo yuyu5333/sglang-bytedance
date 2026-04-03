@@ -122,7 +122,11 @@ class DeepEPMoE(FusedMoE):
             self.use_fp8_w8a8 = True
             self.fp8_dtype = torch.float8_e4m3fn
             self.use_w4afp8 = False
-        elif isinstance(quant_config, W4AFp8Config):
+        elif isinstance(quant_config, W4AFp8Config) or (
+            isinstance(self.quant_method, CompressedTensorsFusedMoEMethod)
+            and getattr(self, "scheme", None) is not None
+            and isinstance(self.scheme, CompressedTensorsW4AFP8MoE)
+        ):
             self.use_w4afp8 = True
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
@@ -243,7 +247,7 @@ class DeepEPMoE(FusedMoE):
                 and self.quant_config.get_name() == "modelopt_fp4"
             ):
                 output = self.forward_flashinfer_cutedsl(dispatch_output)
-            elif True or self.use_w4afp8:
+            elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
             else:
                 assert False, "forward_deepgemm_masked is deprecated"
@@ -342,11 +346,23 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPLLDispatchOutput,
     ):
         assert self.moe_runner_config.activation == "silu"
-        assert isinstance(self.quant_method, (W4AFp8MoEMethod, CompressedTensorsW4AFP8MoE))
+        
+        # Determine the underlying scheme to call
+        if isinstance(self.quant_method, W4AFp8MoEMethod):
+            scheme = self.quant_method
+        elif isinstance(self.quant_method, CompressedTensorsFusedMoEMethod):
+            scheme = getattr(self, "scheme", None)
+            if scheme is None:
+                raise ValueError("A scheme must be defined for CompressedTensorsFusedMoEMethod")
+        else:
+            raise AssertionError(f"Unsupported quant_method type: {type(self.quant_method)}")
+            
+        assert isinstance(scheme, (W4AFp8MoEMethod, CompressedTensorsW4AFP8MoE))
+        
         assert (
             envs.SGLANG_DEEPEP_BF16_DISPATCH.get()
         ), "W4AFP8 does not support FP8 dispatch; please set SGLANG_DEEPEP_BF16_DISPATCH=1."
-        return self.quant_method.apply_deepep_ll(
+        return scheme.apply_deepep_ll(
             layer=self,
             dispatch_output=dispatch_output,
         )
