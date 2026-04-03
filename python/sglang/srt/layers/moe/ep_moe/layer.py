@@ -229,11 +229,37 @@ class DeepEPMoE(FusedMoE):
 
         from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
 
+        if not type(self)._has_printed:
+            quant_config_name = None
+            if self.quant_config is not None:
+                try:
+                    quant_config_name = self.quant_config.get_name()
+                except Exception:
+                    quant_config_name = type(self.quant_config).__name__
+            logger.warning(
+                "DeepEPMoE debug init: quant_config=%s quant_method=%s scheme=%s "
+                "use_w4afp8=%s use_fp8_w8a8=%s use_block_quant=%s deepep_mode=%s",
+                quant_config_name,
+                type(self.quant_method).__name__,
+                type(getattr(self, "scheme", None)).__name__,
+                getattr(self, "use_w4afp8", None),
+                getattr(self, "use_fp8_w8a8", None),
+                getattr(self, "use_block_quant", None),
+                getattr(self, "deepep_mode", None),
+            )
+            type(self)._has_printed = True
+
         if (not self.use_w4afp8) and isinstance(
             self.quant_method, CompressedTensorsFusedMoEMethod
         ):
             scheme = getattr(self, "scheme", None)
             if isinstance(scheme, CompressedTensorsW4AFP8MoE):
+                logger.warning(
+                    "DeepEPMoE debug: detected compressed-tensors w4afp8 scheme; enabling use_w4afp8. "
+                    "quant_method=%s scheme=%s",
+                    type(self.quant_method).__name__,
+                    type(scheme).__name__,
+                )
                 self.use_w4afp8 = True
         
         if _use_aiter:
@@ -257,6 +283,17 @@ class DeepEPMoE(FusedMoE):
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
             else:
+                if not getattr(self, "_has_printed_deepep_ll_fallback", False):
+                    scheme = getattr(self, "scheme", None)
+                    logger.error(
+                        "DeepEPMoE debug: deepep_ll fallback hit (will raise). "
+                        "use_w4afp8=%s quant_method=%s scheme=%s quant_config=%s",
+                        self.use_w4afp8,
+                        type(self.quant_method).__name__,
+                        type(scheme).__name__,
+                        getattr(self.quant_config, "get_name", lambda: None)(),
+                    )
+                    self._has_printed_deepep_ll_fallback = True
                 assert False, "forward_deepgemm_masked is deprecated"
 
         combine_input_wrapper = (
