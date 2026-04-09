@@ -3,7 +3,7 @@ import logging
 import torch
 import triton
 
-from sglang.srt.utils import ceil_div, is_cuda
+from sglang.srt.utils import ceil_div, get_bool_env_var, is_cuda
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +197,19 @@ def compute_seg_indptr_triton_kernel(reorder_topk_ids, seg_indptr, num_toks):
 
 
 def cutlass_w4_run_moe_ep_preproess(topk_ids: torch.Tensor):
+    # Optional pure-PyTorch path for quick benchmarking / debugging.
+    #
+    # Notes:
+    # - Setting stable=False is often faster on CUDA but changes the within-expert order.
+    # - The MoE pipeline only requires tokens for the same expert to be contiguous; order
+    #   within an expert group typically does not matter as long as pre/post reorder use
+    #   the same mapping.
+    if get_bool_env_var("SGLANG_MOE_EP_PREPROCESS_USE_TORCH", "false"):
+        return cutlass_w4_run_moe_ep_preproess_torch(
+            topk_ids,
+            stable=get_bool_env_var("SGLANG_MOE_EP_PREPROCESS_STABLE", "false"),
+        )
+
     _, reorder_ids = torch.sort(topk_ids.view(-1), stable=True)
 
     BLOCK_SIZE = 512
@@ -206,6 +219,30 @@ def cutlass_w4_run_moe_ep_preproess(topk_ids: torch.Tensor):
         reorder_ids, src2dst, topk_ids.numel(), BLOCK_SIZE
     )
 
+    return src2dst
+
+
+def cutlass_w4_run_moe_ep_preproess_torch(
+    topk_ids: torch.Tensor, *, stable: bool = False
+) -> torch.Tensor:
+    """Compute src2dst mapping using only PyTorch ops (argsort + scatter).
+
+    src2dst is defined on flattened indices:
+        src = token_idx * topk + k_idx
+    and returns the destination index after grouping by expert id.
+    """
+    ids = topk_ids.reshape(-1)
+    try:
+        reorder_ids = torch.argsort(ids, stable=stable)
+    except TypeError:
+        # Older PyTorch builds may not accept the `stable` kwarg for argsort.
+        reorder_ids = torch.argsort(ids)
+
+    # Reverse permutation: src2dst[src] = dst
+    numel = ids.numel()
+    src2dst = torch.empty(numel, device=ids.device, dtype=torch.int32)
+    dst = torch.arange(numel, device=ids.device, dtype=torch.int32)
+    src2dst.scatter_(0, reorder_ids, dst)
     return src2dst
 
 
