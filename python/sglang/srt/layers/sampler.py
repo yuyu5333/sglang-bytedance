@@ -35,6 +35,8 @@ SYNC_TOKEN_IDS_ACROSS_TP = get_bool_env_var("SYNC_TOKEN_IDS_ACROSS_TP")
 SGLANG_RETURN_ORIGINAL_LOGPROB = get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB")
 _CUSTOM_SAMPLER_FACTORIES: Dict[str, Callable[[], "Sampler"]] = {}
 _BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch", "ascend"}
+_SANITIZE_PROBS = get_bool_env_var("SGLANG_SAMPLER_SANITIZE_PROBS")
+_SANITIZE_PROBS_LOGGED = False
 
 
 class Sampler(nn.Module):
@@ -595,6 +597,28 @@ def sampling_from_probs_torch(
 
     Note: For deterministic sampling from logprobs, use Sampler._sample_from_logprobs instead.
     """
+    # Optional probability sanitization to avoid torch.multinomial device-side assert
+    if _SANITIZE_PROBS:
+        global _SANITIZE_PROBS_LOGGED
+        # Replace NaN/Inf with 0, clamp negatives, renormalize per row.
+        probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+        probs.clamp_(min=0.0)
+        row_sums = probs.sum(dim=-1, keepdim=True)
+        # If any row sums to 0, fall back to uniform over vocab for that row.
+        zero_mask = row_sums == 0
+        if zero_mask.any():
+            vocab = probs.size(-1)
+            probs = torch.where(
+                zero_mask,
+                torch.full_like(probs, 1.0 / float(vocab)),
+                probs,
+            )
+            row_sums = probs.sum(dim=-1, keepdim=True)
+        probs.div_(row_sums)
+        if not _SANITIZE_PROBS_LOGGED:
+            logger.warning("SGLANG_SAMPLER_SANITIZE_PROBS=1: enabled multinomial prob sanitization")
+            _SANITIZE_PROBS_LOGGED = True
+
     if sampling_seed is None:
         sampled_index = torch.multinomial(probs, num_samples=1)
     else:
