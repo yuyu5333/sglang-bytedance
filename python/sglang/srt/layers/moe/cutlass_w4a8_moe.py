@@ -364,6 +364,10 @@ def cutlass_w4a8_moe_deepep_normal(
     gateup_input = torch.empty(
         gateup_input_pre_reorder.shape, dtype=torch.float8_e4m3fn, device=device
     )
+    # When is_static=False, kernel computes scale into output_s.
+    # Ensure a1_scale is a 1-element float tensor to receive the scale.
+    if a1_scale is None:
+        a1_scale = torch.empty(1, device=device, dtype=torch.float32)
     per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale.float(), False)
     del gateup_input_pre_reorder
     local_topk_ids = topk_ids_
@@ -410,6 +414,9 @@ def cutlass_w4a8_moe_deepep_normal(
     intermediate_q = torch.empty(
         intermediate.shape, dtype=torch.float8_e4m3fn, device=device
     )
+    # Ensure a2_scale is a 1-element float tensor to receive the scale when is_static=False.
+    if a2_scale is None:
+        a2_scale = torch.empty(1, device=device, dtype=torch.float32)
     per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), False)
 
     cutlass_w4a8_moe_mm(
