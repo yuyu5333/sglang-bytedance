@@ -500,6 +500,8 @@ def cutlass_w4a8_moe_deepep_ll(
     problem_sizes2: torch.Tensor,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    *,
+    is_static: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -571,10 +573,21 @@ def cutlass_w4a8_moe_deepep_ll(
     )
 
     gateup_input = torch.empty(a.shape, dtype=torch.float8_e4m3fn, device=device)
-    if get_bool_env_var("SGLANG_DEEPEP_BF16_DISPATCH"):
-        per_tensor_quant_fp8(a, gateup_input, a1_scale.float(), True)
-    else:
-        gateup_input = a
+    # LL path: support dynamic calibration and static inference like normal path.
+    # If a1_scale is None:
+    #   - static: compute host-side absmax/FP8_MAX
+    #   - dynamic: allocate 1-element tensor for kernel write-back
+    if a1_scale is None:
+        if is_static:
+            a1_scale = (
+                torch.max(torch.abs(a))
+                .to(torch.float32)
+                .div_(torch.finfo(torch.float8_e4m3fn).max)
+                .view(1)
+            )
+        else:
+            a1_scale = torch.full((1,), 1e-8, device=device, dtype=torch.float32)
+    per_tensor_quant_fp8(a, gateup_input, a1_scale.float(), is_static)
     c1 = torch.empty((num_experts, m, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((num_experts, m, k), device=device, dtype=torch.bfloat16)
 
@@ -598,9 +611,32 @@ def cutlass_w4a8_moe_deepep_ll(
     intermediate_q = torch.empty(
         (num_experts, m, n), device=a.device, dtype=torch.float8_e4m3fn
     )
-    silu_and_mul_masked_post_per_tensor_quant_fwd(
-        c1, intermediate_q, masked_m, a2_scale
-    )
+    # a2 scale: LL fused kernel expects a provided scale; it will NOT compute it.
+    # For calibration, compute a conservative scale from c1 absmax and (optionally) accumulate
+    # into the provided 1-element scale tensor.
+    eps = 1e-8
+    max_val = 1.0
+    if a2_scale is None:
+        a2_scale = torch.full((1,), eps, device=device, dtype=torch.float32)
+
+    # Use c1 as a conservative proxy for intermediate (SiLU*mul shrinks magnitude).
+    absmax = torch.max(torch.abs(c1))
+    a2_tmp = absmax.to(torch.float32).div_(torch.finfo(torch.float8_e4m3fn).max)
+    if not torch.isfinite(a2_tmp) or a2_tmp <= eps:
+        a2_tmp = torch.tensor(eps, device=device, dtype=torch.float32)
+    elif a2_tmp > max_val:
+        a2_tmp = torch.tensor(max_val, device=device, dtype=torch.float32)
+
+    if is_static:
+        # Use provided scale as-is in static mode (caller is responsible for calibration).
+        pass
+    else:
+        # Dynamic calibration: accumulate running max into a2_scale buffer.
+        if a2_scale.numel() == 1:
+            a2_scale.copy_(torch.maximum(a2_scale.view(()), a2_tmp).view(1))
+        else:
+            a2_scale = torch.maximum(a2_scale, a2_tmp.view(1))
+    silu_and_mul_masked_post_per_tensor_quant_fwd(c1, intermediate_q, masked_m, a2_scale)
     del c1, gateup_input
     cutlass_w4a8_moe_mm(
         c2,

@@ -459,3 +459,78 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         )
         self._maybe_advance_deepep_scale_calibration(layer, calib_steps=calib_steps)
         return output
+
+    def apply_deepep_ll(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+    ) -> torch.Tensor:
+        """DeepEP low-latency path for MoE (matches DeepEPLLDispatchOutput interface).
+
+        Expected tuple fields on dispatch_output:
+        - hidden_states
+        - hidden_states_scale (ignored for now)
+        - topk_ids
+        - topk_weights (ignored; LL combine applies routing weights)
+        - masked_m
+        - (extra)
+        """
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe_deepep_ll
+
+        assert (
+            self.moe_runner_config.activation == "silu"
+        ), "Only SiLU activation is supported."
+
+        (
+            hidden_states,
+            _hidden_states_scale,
+            topk_ids,
+            _topk_weights,
+            masked_m,
+            _,
+        ) = dispatch_output
+
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+        if hidden_states.shape[0] == 0:
+            return hidden_states
+
+        a13_scale, a2_scale, is_static, calib_steps = self._get_deepep_static_scale_state(
+            layer, device=hidden_states.device
+        )
+        if not getattr(layer, "_sglang_logged_ct_w4afp8_deepep_ll", False):
+            current_step = int(
+                getattr(layer, "_sglang_ct_w4a8_deepep_scale_calib_step", 0)
+            )
+            logger.warning(
+                "CompressedTensorsW4AFP8MoE: running deepep_ll forward (DeepEPMoE path). "
+                f"x_shape={tuple(hidden_states.shape)} topk={int(topk_ids.shape[1])} "
+                f"is_static={is_static} calib_steps={calib_steps} current_step={current_step}"
+            )
+            setattr(layer, "_sglang_logged_ct_w4afp8_deepep_ll", True)
+
+        output = cutlass_w4a8_moe_deepep_ll(
+            hidden_states,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_ids,
+            masked_m,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            a13_scale,
+            a2_scale,
+            is_static=is_static,
+        )
+        self._maybe_advance_deepep_scale_calibration(layer, calib_steps=calib_steps)
+        return output

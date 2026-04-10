@@ -261,7 +261,19 @@ class DeepEPMoE(FusedMoE):
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
             else:
-                assert False, "forward_deepgemm_masked is deprecated"
+                # If quantization is compressed-tensors and scheme is W4AFP8 MoE,
+                # call scheme's deepep_ll implementation to avoid deprecated path.
+                if (
+                    self.quant_config is not None
+                    and self.quant_config.get_name() == "compressed_tensors"
+                    and getattr(self, "scheme", None) is not None
+                    and hasattr(self.scheme, "apply_deepep_ll")
+                ):
+                    output = self.scheme.apply_deepep_ll(
+                        layer=self, dispatch_output=dispatch_output
+                    )
+                else:
+                    assert False, "forward_deepgemm_masked is deprecated"
 
         combine_input_wrapper = (
             DeepEPNormalCombineInput
