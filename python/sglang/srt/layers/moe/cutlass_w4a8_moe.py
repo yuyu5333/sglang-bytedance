@@ -620,9 +620,13 @@ def cutlass_w4a8_moe_deepep_ll(
         a2_scale = torch.full((1,), eps, device=device, dtype=torch.float32)
 
     # Use c1 as a conservative proxy for intermediate (SiLU*mul shrinks magnitude).
-    # IMPORTANT: this function can run under CUDA graph capture, so avoid
-    # any host-side branching on CUDA tensors (e.g. `if tensor:` / `.item()`).
-    absmax = torch.max(torch.abs(c1))
+    # IMPORTANT:
+    # 1) This function can run under CUDA graph capture, so avoid host-side branching on CUDA tensors.
+    # 2) Avoid creating large temporaries like `torch.abs(c1)` which doubles memory and can OOM.
+    #    Compute absmax via amax/amin scalars instead.
+    pos_max = torch.amax(c1)
+    neg_min = torch.amin(c1)
+    absmax = torch.maximum(pos_max, -neg_min)
     a2_tmp = absmax.to(torch.float32).div_(torch.finfo(torch.float8_e4m3fn).max)
     # Sanitize non-finite / out-of-range values in a capture-safe way.
     a2_tmp = torch.nan_to_num(a2_tmp, nan=eps, posinf=max_val, neginf=eps).clamp(
