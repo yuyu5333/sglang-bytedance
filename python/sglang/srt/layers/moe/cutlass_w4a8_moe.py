@@ -276,6 +276,8 @@ def cutlass_w4a8_moe_deepep_normal(
     problem_sizes2: torch.Tensor,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    *,
+    is_static: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -364,12 +366,24 @@ def cutlass_w4a8_moe_deepep_normal(
     gateup_input = torch.empty(
         gateup_input_pre_reorder.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    # When is_static=False, kernel computes scale into output_s.
-    # Ensure a1_scale is a 1-element float tensor to receive the scale.
     if a1_scale is None:
-        # Initialize with tiny epsilon to avoid 1/0 in downstream kernels when input absmax==0.
-        a1_scale = torch.full((1,), 1e-8, device=device, dtype=torch.float32)
-    per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale.float(), False)
+        if is_static:
+            # Compute a per-tensor FP8 scale in Python when caller requests static scaling
+            # but provides no scale tensor.
+            a1_scale = (
+                torch.max(torch.abs(gateup_input_pre_reorder))
+                .to(torch.float32)
+                .div_(torch.finfo(torch.float8_e4m3fn).max)
+                .view(1)
+            )
+        else:
+            # When is_static=False, kernel computes scale into output_s.
+            # Ensure a1_scale is a 1-element float tensor to receive the scale.
+            # Initialize with tiny epsilon to avoid 1/0 in downstream kernels when input absmax==0.
+            a1_scale = torch.full((1,), 1e-8, device=device, dtype=torch.float32)
+    per_tensor_quant_fp8(
+        gateup_input_pre_reorder, gateup_input, a1_scale.float(), is_static
+    )
     del gateup_input_pre_reorder
     local_topk_ids = topk_ids_
     local_topk_ids = (
@@ -415,11 +429,19 @@ def cutlass_w4a8_moe_deepep_normal(
     intermediate_q = torch.empty(
         intermediate.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    # Ensure a2_scale is a 1-element float tensor to receive the scale when is_static=False.
     if a2_scale is None:
-        # Initialize with tiny epsilon to avoid 1/0 in downstream kernels when input absmax==0.
-        a2_scale = torch.full((1,), 1e-8, device=device, dtype=torch.float32)
-    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), False)
+        if is_static:
+            a2_scale = (
+                torch.max(torch.abs(intermediate))
+                .to(torch.float32)
+                .div_(torch.finfo(torch.float8_e4m3fn).max)
+                .view(1)
+            )
+        else:
+            # Ensure a2_scale is a 1-element float tensor to receive the scale when is_static=False.
+            # Initialize with tiny epsilon to avoid 1/0 in downstream kernels when input absmax==0.
+            a2_scale = torch.full((1,), 1e-8, device=device, dtype=torch.float32)
+    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), is_static)
 
     cutlass_w4a8_moe_mm(
         c2,

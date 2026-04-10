@@ -18,7 +18,12 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsMoEScheme,
 )
 from sglang.srt.layers.quantization.w4afp8 import interleave_scales
-from sglang.srt.utils import get_bool_env_var, set_weight_attrs
+from sglang.srt.utils import (
+    get_bool_env_var,
+    get_float_env_var,
+    get_int_env_var,
+    set_weight_attrs,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -201,7 +206,6 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             return
 
         dtype = torch.bfloat16
-        device = layer.w2_weight_packed.device
 
         # TODO: currently only support per tensor quant.
         layer.a13_scale = None
@@ -272,6 +276,75 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             (num_experts, 3), dtype=torch.int32, device=device
         )
 
+    def _get_deepep_static_scale_state(
+        self, layer: torch.nn.Module, device: torch.device
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, bool, int]:
+        """Return (a13_scale, a2_scale, is_static, calib_steps) for deepep_normal.
+
+        If `SGLANG_W4A8_MOE_STATIC_SCALE_CALIBRATION_STEPS` > 0, we:
+        - allocate 1-element fp32 scale buffers on the layer (if not present)
+        - run dynamic quant (is_static=False) for N forwards, letting the kernel
+          update the buffers (atomicMax behavior)
+        - freeze (is_static=True) after N steps, reusing the calibrated scales.
+
+        This is intentionally scoped to deepep_normal path; the default cutlass
+        path computes scales internally when passed None.
+        """
+
+        calib_steps = get_int_env_var(
+            "SGLANG_W4A8_MOE_STATIC_SCALE_CALIBRATION_STEPS", default=0
+        )
+        if calib_steps <= 0:
+            return layer.a13_scale, layer.a2_scale, False, 0
+
+        eps = get_float_env_var("SGLANG_W4A8_MOE_STATIC_SCALE_EPS", default=1e-8)
+
+        if not hasattr(layer, "_sglang_ct_w4a8_deepep_a13_scale"):
+            layer._sglang_ct_w4a8_deepep_a13_scale = torch.nn.Parameter(
+                torch.full((1,), eps, device=device, dtype=torch.float32),
+                requires_grad=False,
+            )
+        if not hasattr(layer, "_sglang_ct_w4a8_deepep_a2_scale"):
+            layer._sglang_ct_w4a8_deepep_a2_scale = torch.nn.Parameter(
+                torch.full((1,), eps, device=device, dtype=torch.float32),
+                requires_grad=False,
+            )
+
+        if not hasattr(layer, "_sglang_ct_w4a8_deepep_scale_calib_step"):
+            layer._sglang_ct_w4a8_deepep_scale_calib_step = 0
+            layer._sglang_ct_w4a8_deepep_scales_frozen = False
+
+        is_static = bool(getattr(layer, "_sglang_ct_w4a8_deepep_scales_frozen", False))
+        return (
+            layer._sglang_ct_w4a8_deepep_a13_scale,
+            layer._sglang_ct_w4a8_deepep_a2_scale,
+            is_static,
+            calib_steps,
+        )
+
+    def _maybe_advance_deepep_scale_calibration(
+        self, layer: torch.nn.Module, *, calib_steps: int
+    ) -> None:
+        if calib_steps <= 0:
+            return
+        if getattr(layer, "_sglang_ct_w4a8_deepep_scales_frozen", False):
+            return
+
+        step = int(getattr(layer, "_sglang_ct_w4a8_deepep_scale_calib_step", 0)) + 1
+        layer._sglang_ct_w4a8_deepep_scale_calib_step = step
+        if step >= calib_steps:
+            layer._sglang_ct_w4a8_deepep_scales_frozen = True
+            if not getattr(layer, "_sglang_ct_w4a8_deepep_scales_frozen_logged", False):
+                a13 = getattr(layer, "_sglang_ct_w4a8_deepep_a13_scale", None)
+                a2 = getattr(layer, "_sglang_ct_w4a8_deepep_a2_scale", None)
+                logger.warning(
+                    "CompressedTensorsW4AFP8MoE: froze deepep_normal static scales "
+                    f"after {calib_steps} steps: "
+                    f"a13_scale={float(a13.item()) if a13 is not None else None} "
+                    f"a2_scale={float(a2.item()) if a2 is not None else None}"
+                )
+                layer._sglang_ct_w4a8_deepep_scales_frozen_logged = True
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -297,13 +370,17 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             "SGLANG_W4A8_MOE_USE_DEEPEP_NORMAL", default="false"
         )
         if use_deepep_normal:
+            a13_scale, a2_scale, is_static, calib_steps = (
+                self._get_deepep_static_scale_state(layer, device=x.device)
+            )
             if not getattr(layer, "_sglang_logged_w4a8_deepep_normal", False):
                 logger.warning(
                     "CompressedTensorsW4AFP8MoE: using deepep_normal kernel path "
                     "(env SGLANG_W4A8_MOE_USE_DEEPEP_NORMAL=1). "
                     f"activation={self.moe_runner_config.activation} "
                     f"routed_scaling_factor={routed_scaling_factor} "
-                    f"x_shape={tuple(x.shape)} topk={int(topk_ids.shape[1])}"
+                    f"x_shape={tuple(x.shape)} topk={int(topk_ids.shape[1])} "
+                    f"is_static={is_static} calib_steps={calib_steps}"
                 )
                 setattr(layer, "_sglang_logged_w4a8_deepep_normal", True)
 
@@ -326,9 +403,11 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
                 self.expert_offsets,
                 self.problem_sizes1,
                 self.problem_sizes2,
-                layer.a13_scale,
-                layer.a2_scale,
+                a13_scale,
+                a2_scale,
+                is_static=is_static,
             )
+            self._maybe_advance_deepep_scale_calibration(layer, calib_steps=calib_steps)
         else:
             if not getattr(layer, "_sglang_logged_w4a8_cutlass_default", False):
                 logger.warning(
@@ -400,7 +479,10 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             )
             setattr(layer, "_sglang_logged_ct_w4afp8_deepep_normal", True)
 
-        return cutlass_w4a8_moe_deepep_normal(
+        a13_scale, a2_scale, is_static, calib_steps = self._get_deepep_static_scale_state(
+            layer, device=hidden_states.device
+        )
+        output = cutlass_w4a8_moe_deepep_normal(
             hidden_states,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
@@ -419,6 +501,9 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             self.expert_offsets,
             self.problem_sizes1,
             self.problem_sizes2,
-            layer.a13_scale,
-            layer.a2_scale,
+            a13_scale,
+            a2_scale,
+            is_static=is_static,
         )
+        self._maybe_advance_deepep_scale_calibration(layer, calib_steps=calib_steps)
+        return output
