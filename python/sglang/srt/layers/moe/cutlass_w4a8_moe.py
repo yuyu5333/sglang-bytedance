@@ -620,22 +620,26 @@ def cutlass_w4a8_moe_deepep_ll(
         a2_scale = torch.full((1,), eps, device=device, dtype=torch.float32)
 
     # Use c1 as a conservative proxy for intermediate (SiLU*mul shrinks magnitude).
+    # IMPORTANT: this function can run under CUDA graph capture, so avoid
+    # any host-side branching on CUDA tensors (e.g. `if tensor:` / `.item()`).
     absmax = torch.max(torch.abs(c1))
     a2_tmp = absmax.to(torch.float32).div_(torch.finfo(torch.float8_e4m3fn).max)
-    if not torch.isfinite(a2_tmp) or a2_tmp <= eps:
-        a2_tmp = torch.tensor(eps, device=device, dtype=torch.float32)
-    elif a2_tmp > max_val:
-        a2_tmp = torch.tensor(max_val, device=device, dtype=torch.float32)
+    # Sanitize non-finite / out-of-range values in a capture-safe way.
+    a2_tmp = torch.nan_to_num(a2_tmp, nan=eps, posinf=max_val, neginf=eps).clamp(
+        min=eps, max=max_val
+    )
+    a2_tmp = a2_tmp.view(1)
 
     if is_static:
         # Use provided scale as-is in static mode (caller is responsible for calibration).
         pass
     else:
         # Dynamic calibration: accumulate running max into a2_scale buffer.
+        # Prefer in-place update to keep the same storage for subsequent calls.
         if a2_scale.numel() == 1:
-            a2_scale.copy_(torch.maximum(a2_scale.view(()), a2_tmp).view(1))
+            a2_scale.copy_(torch.maximum(a2_scale.view(1), a2_tmp))
         else:
-            a2_scale = torch.maximum(a2_scale, a2_tmp.view(1))
+            a2_scale = torch.maximum(a2_scale, a2_tmp)
     silu_and_mul_masked_post_per_tensor_quant_fwd(c1, intermediate_q, masked_m, a2_scale)
     del c1, gateup_input
     cutlass_w4a8_moe_mm(
