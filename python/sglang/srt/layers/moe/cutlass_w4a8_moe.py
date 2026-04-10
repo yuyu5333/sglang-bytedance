@@ -366,16 +366,22 @@ def cutlass_w4a8_moe_deepep_normal(
     gateup_input = torch.empty(
         gateup_input_pre_reorder.shape, dtype=torch.float8_e4m3fn, device=device
     )
+    # Keep scales finite to avoid poisoning calibration (and potential downstream NaNs).
+    # Use a generous upper bound: in practice FP8 per-tensor scales should be O(1e-3..1e1),
+    # but we only need to guarantee "finite and non-zero" here.
+    eps = 1e-8
+    max_scale = 1e4
     if a1_scale is None:
         if is_static:
             # Compute a per-tensor FP8 scale in Python when caller requests static scaling
             # but provides no scale tensor.
-            a1_scale = (
-                torch.max(torch.abs(gateup_input_pre_reorder))
-                .to(torch.float32)
-                .div_(torch.finfo(torch.float8_e4m3fn).max)
-                .view(1)
-            )
+            pos_max = torch.amax(gateup_input_pre_reorder)
+            neg_min = torch.amin(gateup_input_pre_reorder)
+            absmax = torch.maximum(pos_max, -neg_min)
+            a1_scale = absmax.to(torch.float32).div_(torch.finfo(torch.float8_e4m3fn).max)
+            a1_scale = torch.nan_to_num(
+                a1_scale, nan=eps, posinf=max_scale, neginf=eps
+            ).clamp(min=eps, max=max_scale).view(1)
         else:
             # When is_static=False, kernel computes scale into output_s.
             # Ensure a1_scale is a 1-element float tensor to receive the scale.
@@ -384,6 +390,13 @@ def cutlass_w4a8_moe_deepep_normal(
     per_tensor_quant_fp8(
         gateup_input_pre_reorder, gateup_input, a1_scale.float(), is_static
     )
+    if not is_static and a1_scale.numel() == 1:
+        # Capture-safe sanitize for the dynamically written-back scale.
+        a1_scale.copy_(
+            torch.nan_to_num(a1_scale, nan=eps, posinf=max_scale, neginf=eps).clamp(
+                min=eps, max=max_scale
+            )
+        )
     del gateup_input_pre_reorder
     local_topk_ids = topk_ids_
     local_topk_ids = (
@@ -431,17 +444,25 @@ def cutlass_w4a8_moe_deepep_normal(
     )
     if a2_scale is None:
         if is_static:
-            a2_scale = (
-                torch.max(torch.abs(intermediate))
-                .to(torch.float32)
-                .div_(torch.finfo(torch.float8_e4m3fn).max)
-                .view(1)
-            )
+            pos_max = torch.amax(intermediate)
+            neg_min = torch.amin(intermediate)
+            absmax = torch.maximum(pos_max, -neg_min)
+            a2_scale = absmax.to(torch.float32).div_(torch.finfo(torch.float8_e4m3fn).max)
+            a2_scale = torch.nan_to_num(
+                a2_scale, nan=eps, posinf=max_scale, neginf=eps
+            ).clamp(min=eps, max=max_scale).view(1)
         else:
             # Ensure a2_scale is a 1-element float tensor to receive the scale when is_static=False.
             # Initialize with tiny epsilon to avoid 1/0 in downstream kernels when input absmax==0.
             a2_scale = torch.full((1,), 1e-8, device=device, dtype=torch.float32)
     per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), is_static)
+    if not is_static and a2_scale.numel() == 1:
+        # Capture-safe sanitize for the dynamically written-back scale.
+        a2_scale.copy_(
+            torch.nan_to_num(a2_scale, nan=eps, posinf=max_scale, neginf=eps).clamp(
+                min=eps, max=max_scale
+            )
+        )
 
     cutlass_w4a8_moe_mm(
         c2,
