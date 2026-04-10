@@ -18,7 +18,7 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsMoEScheme,
 )
 from sglang.srt.layers.quantization.w4afp8 import interleave_scales
-from sglang.srt.utils import set_weight_attrs
+from sglang.srt.utils import get_bool_env_var, set_weight_attrs
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -277,7 +277,10 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
     ) -> CombineInput:
-        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import (
+            cutlass_w4a8_moe,
+            cutlass_w4a8_moe_deepep_normal,
+        )
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         assert (
@@ -289,27 +292,75 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         topk_weights, topk_ids, _ = topk_output
 
         # TODO: currently, group_size is hardcoded to 128 in the cutlass_w4a8_moe kernel.
-        output = cutlass_w4a8_moe(
-            x,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
-            topk_weights,
-            topk_ids,
-            self.a_strides1,
-            self.b_strides1,
-            self.c_strides1,
-            self.a_strides2,
-            self.b_strides2,
-            self.c_strides2,
-            self.s_strides13,
-            self.s_strides2,
-            self.expert_offsets,
-            self.problem_sizes1,
-            self.problem_sizes2,
-            layer.a13_scale,
-            layer.a2_scale,
-            routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
+        routed_scaling_factor = self.moe_runner_config.routed_scaling_factor or 1.0
+        use_deepep_normal = get_bool_env_var(
+            "SGLANG_W4A8_MOE_USE_DEEPEP_NORMAL", default="false"
         )
+        if use_deepep_normal:
+            if not getattr(layer, "_sglang_logged_w4a8_deepep_normal", False):
+                logger.warning(
+                    "CompressedTensorsW4AFP8MoE: using deepep_normal kernel path "
+                    "(env SGLANG_W4A8_MOE_USE_DEEPEP_NORMAL=1). "
+                    f"activation={self.moe_runner_config.activation} "
+                    f"routed_scaling_factor={routed_scaling_factor} "
+                    f"x_shape={tuple(x.shape)} topk={int(topk_ids.shape[1])}"
+                )
+                setattr(layer, "_sglang_logged_w4a8_deepep_normal", True)
+
+            output = cutlass_w4a8_moe_deepep_normal(
+                x,
+                layer.w13_weight_packed,
+                layer.w2_weight_packed,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                topk_weights,
+                topk_ids,
+                self.a_strides1,
+                self.b_strides1,
+                self.c_strides1,
+                self.a_strides2,
+                self.b_strides2,
+                self.c_strides2,
+                self.s_strides13,
+                self.s_strides2,
+                self.expert_offsets,
+                self.problem_sizes1,
+                self.problem_sizes2,
+                layer.a13_scale,
+                layer.a2_scale,
+            )
+        else:
+            if not getattr(layer, "_sglang_logged_w4a8_cutlass_default", False):
+                logger.warning(
+                    "CompressedTensorsW4AFP8MoE: using default cutlass_w4a8_moe path "
+                    "(env SGLANG_W4A8_MOE_USE_DEEPEP_NORMAL=0). "
+                    f"activation={self.moe_runner_config.activation} "
+                    f"routed_scaling_factor={routed_scaling_factor} "
+                    f"x_shape={tuple(x.shape)} topk={int(topk_ids.shape[1])}"
+                )
+                setattr(layer, "_sglang_logged_w4a8_cutlass_default", True)
+
+            output = cutlass_w4a8_moe(
+                x,
+                layer.w13_weight_packed,
+                layer.w2_weight_packed,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                topk_weights,
+                topk_ids,
+                self.a_strides1,
+                self.b_strides1,
+                self.c_strides1,
+                self.a_strides2,
+                self.b_strides2,
+                self.c_strides2,
+                self.s_strides13,
+                self.s_strides2,
+                self.expert_offsets,
+                self.problem_sizes1,
+                self.problem_sizes2,
+                layer.a13_scale,
+                layer.a2_scale,
+                routed_scaling_factor=routed_scaling_factor,
+            )
         return StandardCombineInput(hidden_states=output)
