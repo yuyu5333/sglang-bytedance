@@ -247,16 +247,27 @@ def cutlass_w4a8_moe(
     # - 可选（动态融合）：先用 silu_and_mul 得到 bf16 中间值，再用 per_tensor_quant_fp8 同时产出 fp8 和 scale
     use_a2_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT_A2")
     if use_a2_prequant:
-        # 1) 先计算 SiLU*mul（bf16）
+        # CUDA Graph 友好：不读取 host 标量，完全 device-side
+        # 1) 计算全量 SiLU*mul 到中间缓冲
         intermediate_bf16 = torch.empty(
             (m * topk, n), dtype=torch.bfloat16, device=device
         )
         silu_and_mul(c1, intermediate_bf16)
-        # 2) 动态 per-tensor 量化，输出 fp8 和 scale（GPU 上完成，便于 CUDA graph）
+        # 2) 构造设备侧有效行掩码 rows < expert_offsets[-1]
+        vt = expert_offsets[-1:].to(torch.int32)  # shape [1], device
+        rows = torch.arange(m * topk, device=device, dtype=torch.int32)
+        mask_valid = rows < vt  # shape [m*topk]
+        # 将无效行清零，避免参与 absmax 污染 scale
+        intermediate_bf16.masked_fill_(~mask_valid.view(-1, 1), 0)
+        # 3) 动态 per-tensor 量化（全量，但无效行为 0 不影响 absmax）
         a2_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
         per_tensor_quant_fp8(
             intermediate_bf16, intermediate_q, a2_scale_tensor, is_static=False
         )
+        # 基本数值健壮性检查（全量检查；无效行已清零）
+        assert torch.isfinite(a2_scale_tensor).all(), "a2_scale has inf/nan in A2 prequant path"
+        assert torch.isfinite(intermediate_bf16).all(), "intermediate_bf16 has inf/nan in A2 prequant path"
+        assert torch.isfinite(intermediate_q).all(), "intermediate_q has inf/nan in A2 prequant path"
         a2_scale = a2_scale_tensor
     else:
         if a2_scale is None:
