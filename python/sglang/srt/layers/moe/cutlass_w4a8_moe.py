@@ -21,6 +21,7 @@ from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 from sglang.srt.distributed import get_moe_expert_parallel_world_size
 from sglang.srt.layers.moe.ep_moe.kernels import (
     cutlass_w4_run_moe_ep_preproess,
+    cutlass_w4_run_moe_ep_preproess_fast,
     deepep_ll_get_cutlass_w4a8_moe_mm_data,
     deepep_permute_triton_kernel,
     deepep_post_reorder_triton_kernel,
@@ -32,6 +33,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
 from sglang.srt.utils import get_bool_env_var
+from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 
 
 def cutlass_w4a8_moe(
@@ -124,9 +126,16 @@ def cutlass_w4a8_moe(
     if get_moe_expert_parallel_world_size() > 1:
         topk_ids = torch.where(topk_ids == -1, num_local_experts, topk_ids)
 
-    src2dst = cutlass_w4_run_moe_ep_preproess(
-        topk_ids,
-    )
+    # 预处理：可选 fast 路径（无排序），避免 torch.sort 带来的 O(n log n) 开销
+    use_fast_preproc = get_bool_env_var("SGLANG_CUTLASS_MOE_USE_FAST_PREPROC")
+    if use_fast_preproc:
+        src2dst, _seg_indptr = cutlass_w4_run_moe_ep_preproess_fast(
+            topk_ids, num_local_experts
+        )
+    else:
+        src2dst = cutlass_w4_run_moe_ep_preproess(
+            topk_ids,
+        )
 
     gateup_input = torch.empty(
         (m * topk, k),
@@ -134,25 +143,47 @@ def cutlass_w4a8_moe(
         dtype=torch.float8_e4m3fn,
     )
 
-    if a1_scale is None:
-        a1_scale = (
-            torch.max(torch.abs(a))
-            .to(torch.float32)
-            .div_(torch.finfo(torch.float8_e4m3fn).max)
-            .view(1)
-        )
+    # 量化与重排：可选“预量化 + 重排按字节拷贝”路径，避免 Python 侧 a1_scale 计算与内核中逐元素缩放
+    use_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT")
+    if use_prequant:
+        # 先在 GPU 上动态求 scale 并量化到临时缓冲，再重排时跳过缩放（a1_scales=None）
+        a1_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
+        gateup_input_pre_reorder = torch.empty_like(a, dtype=torch.float8_e4m3fn)
+        # is_static=False: 同时计算 absmax 和量化输出；输出 scale 存入 a1_scale_tensor
+        per_tensor_quant_fp8(a, gateup_input_pre_reorder, a1_scale_tensor, is_static=False)
 
-    pre_reorder_for_cutlass_moe(
-        a,
-        gateup_input,
-        src2dst,
-        topk_ids,
-        a1_scale,
-        num_local_experts,
-        topk,
-        m,
-        k,
-    )
+        pre_reorder_for_cutlass_moe(
+            gateup_input_pre_reorder,  # 已是 fp8
+            gateup_input,
+            src2dst,
+            topk_ids,
+            None,  # a1_scales -> None，内核中跳过缩放，直接拷贝
+            num_local_experts,
+            topk,
+            m,
+            k,
+        )
+    else:
+        # 兼容原路径：计算 a1_scale（GPU 上的归约），重排时乘缩放后写入 fp8
+        if a1_scale is None:
+            a1_scale = (
+                torch.amax(a.abs())
+                .to(torch.float32)
+                .div_(torch.finfo(torch.float8_e4m3fn).max)
+                .view(1)
+            )
+
+        pre_reorder_for_cutlass_moe(
+            a,
+            gateup_input,
+            src2dst,
+            topk_ids,
+            a1_scale,
+            num_local_experts,
+            topk,
+            m,
+            k,
+        )
 
     # NOTE: a_map and c_map are not used in the get_cutlass_w4a8_moe_mm_data kernel,
     # they are kept to allow for a quick switch of the permutation logic
