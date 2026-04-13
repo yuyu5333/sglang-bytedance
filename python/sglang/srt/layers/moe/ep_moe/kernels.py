@@ -267,8 +267,11 @@ def cutlass_w4_run_moe_ep_preproess_fast(topk_ids: torch.Tensor, num_local_exper
     _count_ids_kernel[grid](ids, counts, numel, num_local_experts, BLOCK_SIZE=BLOCK_SIZE)
 
     # 2) 前缀和 -> seg_indptr
+    # CUDA graph capture 期间不允许用 Python 标量写 CUDA tensor（会触发隐式 H2D memcpy）：
+    #   seg_indptr[0] = 0  -> cudaErrorStreamCaptureUnsupported
+    # 用纯 device-side 的 zero_()/zeros 初始化即可。
     seg_indptr = torch.empty(num_local_experts + 1, device=device, dtype=torch.int32)
-    seg_indptr[0] = 0
+    seg_indptr.zero_()
     seg_indptr[1:].copy_(torch.cumsum(counts, dim=0))
 
     # 3) 构造 src2dst
