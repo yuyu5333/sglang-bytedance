@@ -151,6 +151,8 @@ def cutlass_w4a8_moe(
         gateup_input_pre_reorder = torch.empty_like(a, dtype=torch.float8_e4m3fn)
         # is_static=False: 同时计算 absmax 和量化输出；输出 scale 存入 a1_scale_tensor
         per_tensor_quant_fp8(a, gateup_input_pre_reorder, a1_scale_tensor, is_static=False)
+        # 后续 GEMM 需要该 scale，用于从 FP8 反量化
+        a1_scale = a1_scale_tensor
 
         pre_reorder_for_cutlass_moe(
             gateup_input_pre_reorder,  # 已是 fp8
