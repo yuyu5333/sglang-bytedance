@@ -21,6 +21,7 @@ from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 from sglang.srt.distributed import get_moe_expert_parallel_world_size
 from sglang.srt.layers.moe.ep_moe.kernels import (
     cutlass_w4_run_moe_ep_preproess,
+    cutlass_w4_run_moe_ep_preproess_fast,
     deepep_ll_get_cutlass_w4a8_moe_mm_data,
     deepep_permute_triton_kernel,
     deepep_post_reorder_triton_kernel,
@@ -32,6 +33,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
 from sglang.srt.utils import get_bool_env_var
+from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 
 
 def cutlass_w4a8_moe(
@@ -124,8 +126,8 @@ def cutlass_w4a8_moe(
     if get_moe_expert_parallel_world_size() > 1:
         topk_ids = torch.where(topk_ids == -1, num_local_experts, topk_ids)
 
-    src2dst = cutlass_w4_run_moe_ep_preproess(
-        topk_ids,
+    src2dst, _seg_indptr = cutlass_w4_run_moe_ep_preproess_fast(
+        topk_ids, num_local_experts
     )
 
     gateup_input = torch.empty(
@@ -134,20 +136,17 @@ def cutlass_w4a8_moe(
         dtype=torch.float8_e4m3fn,
     )
 
-    if a1_scale is None:
-        a1_scale = (
-            torch.max(torch.abs(a))
-            .to(torch.float32)
-            .div_(torch.finfo(torch.float8_e4m3fn).max)
-            .view(1)
-        )
+    a1_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
+    gateup_input_pre_reorder = torch.empty_like(a, dtype=torch.float8_e4m3fn)
+    per_tensor_quant_fp8(a, gateup_input_pre_reorder, a1_scale_tensor, is_static=False)
+    a1_scale = a1_scale_tensor
 
     pre_reorder_for_cutlass_moe(
-        a,
+        gateup_input_pre_reorder,  # fp8
         gateup_input,
         src2dst,
         topk_ids,
-        a1_scale,
+        None,
         num_local_experts,
         topk,
         m,
@@ -209,17 +208,19 @@ def cutlass_w4a8_moe(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
 
-    if a2_scale is None:
-        a2_scale = (
-            torch.max(torch.abs(c1))
-            .to(torch.float32)
-            .div_(torch.finfo(torch.float8_e4m3fn).max)
-            .view(1)
-        )
-
-    silu_mul_static_tensorwise_quant_for_cutlass_moe(
-        c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
+    intermediate_bf16 = torch.empty(
+        (m * topk, n), dtype=torch.bfloat16, device=device
     )
+    silu_and_mul(c1, intermediate_bf16)
+    vt = expert_offsets[-1:].to(torch.int32)  # shape [1], device
+    rows = torch.arange(m * topk, device=device, dtype=torch.int32)
+    mask_valid = rows < vt  # shape [m*topk]
+    intermediate_bf16.masked_fill_(~mask_valid.view(-1, 1), 0)
+    a2_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
+    per_tensor_quant_fp8(
+        intermediate_bf16, intermediate_q, a2_scale_tensor, is_static=False
+    )
+    a2_scale = a2_scale_tensor
 
     cutlass_w4a8_moe_mm(
         c2,

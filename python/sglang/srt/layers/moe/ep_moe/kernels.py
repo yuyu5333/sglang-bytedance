@@ -208,6 +208,58 @@ def cutlass_w4_run_moe_ep_preproess(topk_ids: torch.Tensor):
 
     return src2dst
 
+@triton.jit
+def _count_ids_kernel(ids_ptr, counts_ptr, numel, num_experts: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    eid = tl.load(ids_ptr + offs, mask=mask, other=0)
+
+    valid = (eid >= 0) & (eid < num_experts)
+    tl.atomic_add(counts_ptr + eid, 1, mask=mask & valid)
+
+
+@triton.jit
+def _build_src2dst_from_seg_kernel(
+    ids_ptr,
+    cursors_ptr,
+    src2dst_ptr,
+    numel,
+    num_experts: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    eid = tl.load(ids_ptr + offs, mask=mask, other=0)
+    valid = eid < num_experts
+
+    pos = tl.atomic_add(cursors_ptr + eid, 1, mask=mask & valid)
+    tl.store(src2dst_ptr + offs, pos, mask=mask & valid)
+
+
+def cutlass_w4_run_moe_ep_preproess_fast(topk_ids: torch.Tensor, num_local_experts: int):
+    ids = topk_ids.view(-1)
+    device = ids.device
+    numel = ids.numel()
+    if ids.dtype != torch.int32:
+        ids = ids.to(torch.int32)
+
+    counts = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+    BLOCK_SIZE = 512
+    grid = (triton.cdiv(numel, BLOCK_SIZE),)
+    _count_ids_kernel[grid](ids, counts, numel, num_local_experts, BLOCK_SIZE=BLOCK_SIZE)
+
+    seg_indptr = torch.empty(num_local_experts + 1, device=device, dtype=torch.int32)
+    seg_indptr.zero_()
+    seg_indptr[1:].copy_(torch.cumsum(counts, dim=0))
+
+    src2dst = torch.empty(numel, device=device, dtype=torch.int32)
+    cursors = seg_indptr[:-1].clone()
+    _build_src2dst_from_seg_kernel[grid](
+        ids, cursors, src2dst, numel, num_local_experts, BLOCK_SIZE=BLOCK_SIZE
+    )
+    return src2dst, seg_indptr
 
 @triton.jit
 def pre_reorder_triton_kernel_for_cutlass_moe(
