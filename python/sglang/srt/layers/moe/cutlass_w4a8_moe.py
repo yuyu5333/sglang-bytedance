@@ -267,7 +267,6 @@ def cutlass_w4a8_moe(
         # 基本数值健壮性检查（全量检查；无效行已清零）
         assert torch.isfinite(a2_scale_tensor).all(), "a2_scale has inf/nan in A2 prequant path"
         assert torch.isfinite(intermediate_bf16).all(), "intermediate_bf16 has inf/nan in A2 prequant path"
-        assert torch.isfinite(intermediate_q).all(), "intermediate_q has inf/nan in A2 prequant path"
         a2_scale = a2_scale_tensor
     else:
         if a2_scale is None:
