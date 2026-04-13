@@ -242,17 +242,33 @@ def cutlass_w4a8_moe(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
 
-    if a2_scale is None:
-        a2_scale = (
-            torch.max(torch.abs(c1))
-            .to(torch.float32)
-            .div_(torch.finfo(torch.float8_e4m3fn).max)
-            .view(1)
+    # A2 量化路径：
+    # - 默认（静态 scale）：沿用当前 fused kernel，a2_scale=amax(c1)/fp8_max
+    # - 可选（动态融合）：先用 silu_and_mul 得到 bf16 中间值，再用 per_tensor_quant_fp8 同时产出 fp8 和 scale
+    use_a2_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT_A2")
+    if use_a2_prequant:
+        # 1) 先计算 SiLU*mul（bf16）
+        intermediate_bf16 = torch.empty(
+            (m * topk, n), dtype=torch.bfloat16, device=device
         )
-
-    silu_mul_static_tensorwise_quant_for_cutlass_moe(
-        c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
-    )
+        silu_and_mul(c1, intermediate_bf16)
+        # 2) 动态 per-tensor 量化，输出 fp8 和 scale（GPU 上完成，便于 CUDA graph）
+        a2_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
+        per_tensor_quant_fp8(
+            intermediate_bf16, intermediate_q, a2_scale_tensor, is_static=False
+        )
+        a2_scale = a2_scale_tensor
+    else:
+        if a2_scale is None:
+            a2_scale = (
+                torch.amax(c1.abs())
+                .to(torch.float32)
+                .div_(torch.finfo(torch.float8_e4m3fn).max)
+                .view(1)
+            )
+        silu_mul_static_tensorwise_quant_for_cutlass_moe(
+            c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
+        )
 
     cutlass_w4a8_moe_mm(
         c2,
