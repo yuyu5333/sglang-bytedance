@@ -275,9 +275,7 @@ def cutlass_w4a8_moe_deepep_normal(
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
     a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    *,
-    is_static: bool = False,
+    a2_scale: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -424,11 +422,27 @@ def cutlass_w4a8_moe_deepep_normal(
     )
     use_a2_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT_A2")
     if use_a2_prequant:
-        valid_tokens_dev = expert_offsets[-1:]  # device-side
-        a2_scale = compute_a2_scale_token_major(c1, valid_tokens_dev, n)
-        silu_mul_static_tensorwise_quant_for_cutlass_moe(
-            c1, intermediate_q, a2_scale.float(), valid_tokens_dev, m * topk, n
+        # CUDA Graph 友好：不读取 host 标量，完全 device-side
+        # 1) 计算全量 SiLU*mul 到中间缓冲
+        intermediate_bf16 = torch.empty(
+            (m * topk, n), dtype=torch.bfloat16, device=device
         )
+        silu_and_mul(c1, intermediate_bf16)
+        # 2) 构造设备侧有效行掩码 rows < expert_offsets[-1]
+        vt = expert_offsets[-1:].to(torch.int32)  # shape [1], device
+        rows = torch.arange(m * topk, device=device, dtype=torch.int32)
+        mask_valid = rows < vt  # shape [m*topk]
+        # 将无效行清零，避免参与 absmax 污染 scale
+        intermediate_bf16.masked_fill_(~mask_valid.view(-1, 1), 0)
+        # 3) 动态 per-tensor 量化（全量，但无效行为 0 不影响 absmax）
+        a2_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
+        per_tensor_quant_fp8(
+            intermediate_bf16, intermediate_q, a2_scale_tensor, is_static=False
+        )
+        # 基本数值健壮性检查（全量检查；无效行已清零）
+        assert torch.isfinite(a2_scale_tensor).all(), "a2_scale has inf/nan in A2 prequant path"
+        assert torch.isfinite(intermediate_bf16).all(), "intermediate_bf16 has inf/nan in A2 prequant path"
+        a2_scale = a2_scale_tensor
     else:
         silu_and_mul(c1, intermediate)
         per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
