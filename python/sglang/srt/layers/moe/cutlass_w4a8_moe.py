@@ -31,6 +31,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     pre_reorder_for_cutlass_moe,
     silu_and_mul_masked_post_per_tensor_quant_fwd,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
+    compute_a2_scale_token_major,
 )
 from sglang.srt.utils import get_bool_env_var
 from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
@@ -244,27 +245,16 @@ def cutlass_w4a8_moe(
 
     # A2 量化路径：
     # - 默认（静态 scale）：沿用当前 fused kernel，a2_scale=amax(c1)/fp8_max
-    # - 可选（动态融合）：先用 silu_and_mul 得到 bf16 中间值，再用 per_tensor_quant_fp8 同时产出 fp8 和 scale
+    # - 可选（动态融合，Graph 友好，两核）：核A 计算有效区间 absmax 得到 a2_scale；核B 用该 scale 一次性 SiLU*mul + 量化写入 fp8
     use_a2_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT_A2")
     if use_a2_prequant:
-        # CUDA Graph 友好：不读取 host 标量，完全 device-side
-        # 1) 计算全量 SiLU*mul 到中间缓冲
-        intermediate_bf16 = torch.empty(
-            (m * topk, n), dtype=torch.bfloat16, device=device
+        valid_tokens_dev = expert_offsets[-1:]  # device-side
+        # 核A：计算 per-tensor 动态 a2_scale（只统计有效行 SiLU*mul 的 absmax）
+        a2_scale = compute_a2_scale_token_major(c1, valid_tokens_dev, n)
+        # 核B：用 a2_scale 执行 SiLU*mul + 量化（token-major），仅写入有效区间
+        silu_mul_static_tensorwise_quant_for_cutlass_moe(
+            c1, intermediate_q, a2_scale.float(), valid_tokens_dev, m * topk, n
         )
-        silu_and_mul(c1, intermediate_bf16)
-        # 2) 构造设备侧有效行掩码 rows < expert_offsets[-1]
-        vt = expert_offsets[-1:].to(torch.int32)  # shape [1], device
-        rows = torch.arange(m * topk, device=device, dtype=torch.int32)
-        mask_valid = rows < vt  # shape [m*topk]
-        # 将无效行清零，避免参与 absmax 污染 scale
-        intermediate_bf16.masked_fill_(~mask_valid.view(-1, 1), 0)
-        # 3) 动态 per-tensor 量化（全量，但无效行为 0 不影响 absmax）
-        a2_scale_tensor = torch.empty(1, device=device, dtype=torch.float32)
-        per_tensor_quant_fp8(
-            intermediate_bf16, intermediate_q, a2_scale_tensor, is_static=False
-        )
-        a2_scale = a2_scale_tensor
     else:
         if a2_scale is None:
             a2_scale = (
@@ -420,13 +410,21 @@ def cutlass_w4a8_moe_deepep_normal(
     gateup_input = torch.empty(
         gateup_input_pre_reorder.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale.float(), True)
+    # If the dispatch input is already FP8, do not quantize again.
+    # Reuse the original scale that matches this FP8 tensor.
+    if gateup_input_pre_reorder.dtype == torch.float8_e4m3fn:
+        if a1_scale is None:
+            raise ValueError(
+                "FP8 dispatch input requires a valid a1_scale for CUTLASS GEMM."
+            )
+        gateup_input = gateup_input_pre_reorder
+
     del gateup_input_pre_reorder
     local_topk_ids = topk_ids_
     local_topk_ids = (
         torch.where(local_topk_ids == -1, num_experts, topk_ids_).to(torch.int32)
     ).contiguous()
-    expected_m_per_group = int(m / num_experts)
+    expected_m_per_group = int(m / num_experts * topk)
 
     a_map = torch.empty((local_topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((local_topk_ids.numel()), dtype=torch.int32, device=device)
@@ -461,12 +459,19 @@ def cutlass_w4a8_moe_deepep_normal(
         expected_m_per_group,
     )
     intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
-    silu_and_mul(c1, intermediate)
-
     intermediate_q = torch.empty(
         intermediate.shape, dtype=torch.float8_e4m3fn, device=device
     )
-    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
+    use_a2_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT_A2")
+    if use_a2_prequant:
+        valid_tokens_dev = expert_offsets[-1:]  # device-side
+        a2_scale = compute_a2_scale_token_major(c1, valid_tokens_dev, n)
+        silu_mul_static_tensorwise_quant_for_cutlass_moe(
+            c1, intermediate_q, a2_scale.float(), valid_tokens_dev, m * topk, n
+        )
+    else:
+        silu_and_mul(c1, intermediate)
+        per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
 
     cutlass_w4a8_moe_mm(
         c2,

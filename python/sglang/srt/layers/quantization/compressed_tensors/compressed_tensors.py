@@ -194,14 +194,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
         targeting 'Linear' needs to also match
-        FusedMoE modules.
+        MoE modules.
         """
-        if (
-            "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
-        ):
+        if "Linear" not in self.target_scheme_map:
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+
+        # Some models wrap expert linears inside MoE containers (e.g. DeepEPMoE).
+        # `find_matched_target()` can match on `module.__class__.__name__` when the
+        # target string is contained in that name, so adding these keys lets a config
+        # with only `targets: ["Linear"]` also cover MoE modules.
+        for moe_target in ("FusedMoE", "DeepEPMoE"):
+            if moe_target not in self.target_scheme_map:
+                self.target_scheme_map[moe_target] = self.target_scheme_map["Linear"]
 
     @property
     def weight_block_size(self) -> Optional[List[int]]:

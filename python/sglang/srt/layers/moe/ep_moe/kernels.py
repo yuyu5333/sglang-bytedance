@@ -560,6 +560,79 @@ def silu_mul_static_tensorwise_quant_for_cutlass_moe(
 
 
 @triton.jit
+def _a2_absmax_silu_mul_token_major_kernel(
+    input_ptr,
+    valid_tokens_ptr,
+    inner_dim,
+    partial_max_ptr,
+    BLOCK_N: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
+    """
+    Compute per-program absmax over SiLU(gate)*up for token-major c1 without materializing outputs.
+    Only rows [0, valid_tokens) participate; others are ignored.
+    - input_ptr: [M*topk, 2*inner_dim] bf16, layout token-major
+    - valid_tokens_ptr: [1] int32 on device
+    - inner_dim: N
+    - partial_max_ptr: [grid] float32, each program writes its local max
+    """
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+
+    vt = tl.load(valid_tokens_ptr).to(tl.int32)
+    two_n = inner_dim * 2
+
+    # use a scalar accumulator; avoid vector-of-1 and indexing in tl.store
+    local_max = tl.zeros((), dtype=tl.float32)
+
+    for row in tl.range(pid, vt, num_programs, num_stages=NUM_STAGES):
+        base_ptr = input_ptr + row * two_n
+        gate_ptr = base_ptr
+        up_ptr = base_ptr + inner_dim
+
+        for start in tl.range(0, inner_dim, BLOCK_N, num_stages=NUM_STAGES):
+            offs = start + tl.arange(0, BLOCK_N)
+            mask = offs < inner_dim
+            gate = tl.load(gate_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+            up = tl.load(up_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+            gate = gate / (1 + tl.exp(-gate))  # SiLU
+            out = gate * up
+            tile_abs_max = tl.max(tl.abs(out))  # scalar
+            local_max = tl.maximum(local_max, tile_abs_max)  # scalar
+
+    tl.store(partial_max_ptr + pid, local_max)
+
+
+def compute_a2_scale_token_major(c1: torch.Tensor, valid_tokens_dev: torch.Tensor, n: int) -> torch.Tensor:
+    """
+    Device-only computation of per-tensor A2 scale for token-major layout.
+    - c1: [M*topk, 2*n] bf16
+    - valid_tokens_dev: [1] int32 device tensor, equals expert_offsets[-1:]
+    - n: inner dim
+    Returns:
+    - a2_scale: [1] float32 device tensor
+    """
+    assert c1.dtype == torch.bfloat16 and c1.is_contiguous()
+    device = c1.device
+    total_rows = c1.shape[0]
+    grid = min(total_rows, 8192)
+    partial_max = torch.zeros(grid, device=device, dtype=torch.float32)
+
+    _a2_absmax_silu_mul_token_major_kernel[(grid,)](
+        c1,
+        valid_tokens_dev.to(torch.int32),
+        n,
+        partial_max,
+        BLOCK_N=256,
+        NUM_STAGES=3,
+    )
+    absmax = torch.amax(partial_max)  # device-side reduction
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    a2_scale = (absmax / fp8_max).clamp_min_(1e-10).view(1)
+    return a2_scale
+
+
+@triton.jit
 def post_reorder_triton_kernel_for_cutlass_moe(
     down_output_ptr,
     output_ptr,
