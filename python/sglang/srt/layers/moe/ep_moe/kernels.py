@@ -209,6 +209,80 @@ def cutlass_w4_run_moe_ep_preproess(topk_ids: torch.Tensor):
     return src2dst
 
 
+# ------------------------------ Fast preprocess (no sort) ------------------------------
+# 思路：仿照 fused_marlin_moe 的 moe_align 计数/前缀和方式，避免全量排序。
+# 步骤：
+# 1) 统计每个 expert 的出现次数 counts[E]。
+# 2) 前缀和得到 seg_indptr[E+1]，表示每个 expert 的区间起止。
+# 3) 复制一份 seg_indptr -> cursors，遍历所有 src 槽位，针对其 expert 原子加游标写入 dst，形成 src2dst。
+
+@triton.jit
+def _count_ids_kernel(ids_ptr, counts_ptr, numel, num_experts: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    eid = tl.load(ids_ptr + offs, mask=mask, other=0)
+    # 过滤非法 expert（如 EP 路径的哨兵 expert = num_local_experts）
+    valid = (eid >= 0) & (eid < num_experts)
+    tl.atomic_add(counts_ptr + eid, 1, mask=mask & valid)
+
+
+@triton.jit
+def _build_src2dst_from_seg_kernel(
+    ids_ptr,
+    cursors_ptr,
+    src2dst_ptr,
+    numel,
+    num_experts: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < numel
+    eid = tl.load(ids_ptr + offs, mask=mask, other=0)
+    valid = eid < num_experts
+    # cursors 初始为每个 expert 的起始 offset，atomic_add 返回的就是绝对 dst 索引
+    pos = tl.atomic_add(cursors_ptr + eid, 1, mask=mask & valid)
+    tl.store(src2dst_ptr + offs, pos, mask=mask & valid)
+
+
+def cutlass_w4_run_moe_ep_preproess_fast(topk_ids: torch.Tensor, num_local_experts: int):
+    """
+    生成 src2dst 的 fast 版本：O(n) 计数+前缀和+原子写，避免 torch.sort。
+    - topk_ids: [M, topk], dtype int32
+    - num_local_experts: 本 rank 的本地 expert 数（EP 哨兵会被忽略）
+    返回:
+    - src2dst: [M*topk]，src 槽位 -> expert 分组后 dst 槽位（连续区间内的全局位置）
+    """
+    ids = topk_ids.view(-1)
+    device = ids.device
+    numel = ids.numel()
+    if ids.dtype != torch.int32:
+        ids = ids.to(torch.int32)
+
+    # 1) 计数
+    counts = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+    BLOCK_SIZE = 512
+    grid = (triton.cdiv(numel, BLOCK_SIZE),)
+    _count_ids_kernel[grid](ids, counts, numel, num_local_experts, BLOCK_SIZE=BLOCK_SIZE)
+
+    # 2) 前缀和 -> seg_indptr
+    # CUDA graph capture 期间不允许用 Python 标量写 CUDA tensor（会触发隐式 H2D memcpy）：
+    #   seg_indptr[0] = 0  -> cudaErrorStreamCaptureUnsupported
+    # 用纯 device-side 的 zero_()/zeros 初始化即可。
+    seg_indptr = torch.empty(num_local_experts + 1, device=device, dtype=torch.int32)
+    seg_indptr.zero_()
+    seg_indptr[1:].copy_(torch.cumsum(counts, dim=0))
+
+    # 3) 构造 src2dst
+    src2dst = torch.empty(numel, device=device, dtype=torch.int32)
+    cursors = seg_indptr[:-1].clone()  # 可变游标，初始为每个 expert 的起始位置
+    _build_src2dst_from_seg_kernel[grid](
+        ids, cursors, src2dst, numel, num_local_experts, BLOCK_SIZE=BLOCK_SIZE
+    )
+    return src2dst, seg_indptr
+
+
 @triton.jit
 def pre_reorder_triton_kernel_for_cutlass_moe(
     input_ptr,
