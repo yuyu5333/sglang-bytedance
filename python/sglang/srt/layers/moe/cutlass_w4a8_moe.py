@@ -31,6 +31,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     pre_reorder_for_cutlass_moe,
     silu_and_mul_masked_post_per_tensor_quant_fwd,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
+    compute_a2_scale_expert_major_masked,
     compute_a2_scale_token_major,
 )
 from sglang.srt.utils import get_bool_env_var
@@ -628,8 +629,11 @@ def cutlass_w4a8_moe_deepep_ll(
     intermediate_q = torch.empty(
         (num_experts, m, n), device=a.device, dtype=torch.float8_e4m3fn
     )
+    use_a2_prequant = get_bool_env_var("SGLANG_CUTLASS_MOE_PREQUANT_A2")
+    if use_a2_prequant or a2_scale is None:
+        a2_scale = compute_a2_scale_expert_major_masked(c1, masked_m, n)
     silu_and_mul_masked_post_per_tensor_quant_fwd(
-        c1, intermediate_q, masked_m, a2_scale
+        c1, intermediate_q, masked_m, a2_scale.float()
     )
     del c1, gateup_input
     cutlass_w4a8_moe_mm(

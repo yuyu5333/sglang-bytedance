@@ -258,6 +258,15 @@ class DeepEPMoE(FusedMoE):
                 and self.quant_config.get_name() == "modelopt_fp4"
             ):
                 output = self.forward_flashinfer_cutedsl(dispatch_output)
+            elif (
+                self.quant_config is not None
+                and self.quant_config.get_name() == "compressed_tensors"
+                and getattr(self, "scheme", None) is not None
+                and hasattr(self.scheme, "apply_deepep_ll")
+            ):
+                output = self.scheme.apply_deepep_ll(
+                    layer=self, dispatch_output=dispatch_output
+                )
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
             else:

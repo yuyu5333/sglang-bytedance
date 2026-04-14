@@ -396,3 +396,60 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             layer.a2_scale
         )
         return output
+
+    def apply_deepep_ll(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+    ) -> torch.Tensor:
+        """DeepEP low-latency path for MoE (matches DeepEPLLDispatchOutput interface)."""
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe_deepep_ll
+
+        hidden_states = dispatch_output.hidden_states
+        hidden_states_scale = dispatch_output.hidden_states_scale
+        topk_ids = dispatch_output.topk_ids
+        masked_m = dispatch_output.masked_m
+
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        if (
+            hidden_states.dtype == torch.float8_e4m3fn
+            and hidden_states_scale is not None
+        ):
+            # Pseudo-support: collapse per-token-group scales to one tensor-wise scale.
+            a1_scale = hidden_states_scale.to(torch.float32).amax().view(1)
+        else:
+            a1_scale = layer.w13_input_scale
+
+        if not getattr(layer, "_sglang_logged_ct_w4afp8_deepep_ll", False):
+            logger.warning(
+                "CompressedTensorsW4AFP8MoE: running deepep_ll forward (DeepEPMoE path). "
+                f"x_shape={tuple(hidden_states.shape)} topk={int(topk_ids.shape[1])}, "
+                f"hidden_states_scale is None: {hidden_states_scale is None}"
+            )
+            setattr(layer, "_sglang_logged_ct_w4afp8_deepep_ll", True)
+
+        output = cutlass_w4a8_moe_deepep_ll(
+            hidden_states,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_ids,
+            masked_m,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            a1_scale,
+            layer.a2_scale,
+        )
+        return output

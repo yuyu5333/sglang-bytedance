@@ -633,6 +633,88 @@ def compute_a2_scale_token_major(c1: torch.Tensor, valid_tokens_dev: torch.Tenso
 
 
 @triton.jit
+def _a2_absmax_silu_mul_expert_major_masked_kernel(
+    input_ptr,
+    stride_input_expert,
+    stride_input_token,
+    stride_input_dim,
+    masked_m_ptr,
+    inner_dim,
+    partial_max_ptr,
+    BLOCK_N: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
+    block_id_dim = tl.program_id(0)
+    block_id_token = tl.program_id(1)
+    expert_id = tl.program_id(2)
+
+    num_dim_blocks = tl.num_programs(0)
+    num_token_blocks = tl.num_programs(1)
+    token_num_cur_expert = tl.load(masked_m_ptr + expert_id).to(tl.int32)
+
+    stride_input_expert = tl.cast(stride_input_expert, tl.int32)
+    stride_input_token = tl.cast(stride_input_token, tl.int32)
+
+    offset_d = block_id_dim * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_d = offset_d < inner_dim
+
+    input_base_offs = input_ptr + expert_id * stride_input_expert + offset_d
+    local_max = tl.zeros((), dtype=tl.float32)
+
+    for token_idx in tl.range(
+        block_id_token, token_num_cur_expert, num_token_blocks, num_stages=NUM_STAGES
+    ):
+        gate_ptr = input_base_offs + token_idx * stride_input_token
+        up_ptr = gate_ptr + inner_dim
+        gate = tl.load(gate_ptr, mask=mask_d, other=0.0).to(tl.float32)
+        up = tl.load(up_ptr, mask=mask_d, other=0.0).to(tl.float32)
+        gate = gate / (1 + tl.exp(-gate))
+        out = gate * up
+        tile_abs_max = tl.max(tl.abs(out))
+        local_max = tl.maximum(local_max, tile_abs_max)
+
+    partial_idx = (expert_id * num_token_blocks + block_id_token) * num_dim_blocks + block_id_dim
+    tl.store(partial_max_ptr + partial_idx, local_max)
+
+
+def compute_a2_scale_expert_major_masked(
+    c1: torch.Tensor, masked_m: torch.Tensor, n: int
+) -> torch.Tensor:
+    """
+    Device-only computation of per-tensor A2 scale for expert-major masked layout.
+    - c1: [E, T_padded, 2*n] bf16
+    - masked_m: [E] int32 device tensor, actual token count for each expert
+    Returns:
+    - a2_scale: [1] float32 device tensor
+    """
+    assert c1.dtype == torch.bfloat16 and c1.is_contiguous()
+    assert c1.ndim == 3
+    assert masked_m.ndim == 1 and masked_m.shape[0] == c1.shape[0]
+
+    device = c1.device
+    num_experts, token_capacity, _ = c1.shape
+    grid_dim = triton.cdiv(n, 256)
+    grid_token = max(1, min(token_capacity, 64))
+    partial_max = torch.zeros(
+        (num_experts, grid_token, grid_dim), device=device, dtype=torch.float32
+    )
+
+    _a2_absmax_silu_mul_expert_major_masked_kernel[(grid_dim, grid_token, num_experts)](
+        c1,
+        *c1.stride(),
+        masked_m.to(torch.int32),
+        n,
+        partial_max,
+        BLOCK_N=256,
+        NUM_STAGES=3,
+    )
+    absmax = torch.amax(partial_max)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    a2_scale = (absmax / fp8_max).clamp_min_(1e-10).view(1)
+    return a2_scale
+
+
+@triton.jit
 def post_reorder_triton_kernel_for_cutlass_moe(
     down_output_ptr,
     output_ptr,
