@@ -12,6 +12,12 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
     def setUp(self):
         self.req_to_token_pool = MagicMock()
         self.token_to_kv_pool_allocator = MagicMock()
+        
+        # Mock KV cache type
+        from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool
+        mock_kv_cache = MagicMock(spec=MHATokenToKVPool)
+        self.token_to_kv_pool_allocator.get_kvcache.return_value = mock_kv_cache
+
         self.tp_group = MagicMock()
         self.tree_cache = MagicMock()
         self.server_args = MagicMock()
@@ -29,15 +35,17 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
             # Mock memory pools
             with patch("sglang.srt.disaggregation.decode_kvcache_offload_manager.MHATokenToKVPoolHost") as MockPoolHost:
                 with patch("sglang.srt.disaggregation.decode_kvcache_offload_manager.HiCacheController") as MockController:
-                    self.manager = DecodeKVCacheOffloadManager(
-                        self.req_to_token_pool,
-                        self.token_to_kv_pool_allocator,
-                        self.tp_group,
-                        self.tree_cache,
-                        self.server_args
-                    )
-                    self.mock_controller = self.manager.cache_controller
-                    self.mock_host_pool = self.manager.decode_host_mem_pool
+                    # Fix isinstance check for mocks
+                    with patch("sglang.srt.disaggregation.decode_kvcache_offload_manager.isinstance", side_effect=lambda obj, cls: True if (obj == mock_kv_cache and cls == MHATokenToKVPool) else isinstance(obj, cls)):
+                        self.manager = DecodeKVCacheOffloadManager(
+                            self.req_to_token_pool,
+                            self.token_to_kv_pool_allocator,
+                            self.tp_group,
+                            self.tree_cache,
+                            self.server_args
+                        )
+                        self.mock_controller = self.manager.cache_controller
+                        self.mock_host_pool = self.manager.decode_host_mem_pool
 
     def test_abort_request_cleanup(self):
         """测试请求中断后的资源清理逻辑"""
