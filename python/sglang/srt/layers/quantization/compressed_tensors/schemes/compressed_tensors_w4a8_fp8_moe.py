@@ -293,7 +293,7 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             logger.warning(
                 "CompressedTensorsW4AFP8MoE: using default cutlass_w4a8_moe path "
                 f"activation={self.moe_runner_config.activation} "
-                f"routed_scaling_factor={routed_scaling_factor} "
+                f"routed_scaling_factor={self.moe_runner_config.routed_scaling_factor} "
                 f"x_shape={tuple(x.shape)} topk={int(topk_ids.shape[1])}"
             )
             setattr(layer, "_sglang_logged_w4a8_cutlass_default", True)
