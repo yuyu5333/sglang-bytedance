@@ -8,6 +8,7 @@ with dynamic FP8 activation quantization.
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import TYPE_CHECKING
 
 import torch
@@ -32,6 +33,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = ["CompressedTensorsW4AFP8MoE"]
+
+
+def _format_debug_stack(limit: int = 12) -> str:
+    frames = traceback.extract_stack(limit=limit)[:-1]
+    filtered_frames = [
+        frame
+        for frame in frames
+        if "/sglang/" in frame.filename or "sglang/" in frame.filename
+    ]
+    selected_frames = filtered_frames[-6:] if filtered_frames else frames[-6:]
+    if not selected_frames:
+        return "<empty stack>"
+    return " <- ".join(
+        f"{frame.filename.rsplit('/', 1)[-1]}:{frame.lineno}:{frame.name}"
+        for frame in selected_frames
+    )
 
 
 def _unpack_repack_int32_to_cutlass_int8(
@@ -99,6 +116,21 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
     @classmethod
     def get_min_capability(cls) -> int:
         return 90
+
+    @staticmethod
+    def _make_alias_debug_loader(alias_name: str):
+        def _alias_debug_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+            logger.warning(
+                "CompressedTensorsW4AFP8MoE debug alias hit: alias=%s "
+                "loaded_shape=%s loaded_dtype=%s placeholder_shape=%s stack=%s",
+                alias_name,
+                tuple(loaded_weight.shape),
+                loaded_weight.dtype,
+                tuple(param.shape),
+                _format_debug_stack(),
+            )
+
+        return _alias_debug_loader
 
     def create_weights(
         self,
@@ -182,6 +214,24 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             layer.register_parameter(name, p)
             set_weight_attrs(p, extra_weight_attrs)
 
+        # Temporary debug aliases to identify who is trying to load fused
+        # expert names that this scheme does not consume directly.
+        for name in ("w13_weight", "w2_weight"):
+            p = torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False)
+            layer.register_parameter(name, p)
+            set_weight_attrs(
+                p,
+                {
+                    "weight_loader": self._make_alias_debug_loader(name),
+                    "debug_alias_only": True,
+                },
+            )
+
+        logger.warning(
+            "CompressedTensorsW4AFP8MoE create_weights: registered_params=%s",
+            sorted(name for name, _ in layer.named_parameters()),
+        )
+
         self._init_cutlass_buffers(
             num_experts,
             hidden_size,
@@ -199,6 +249,14 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         """
         if getattr(layer, "is_w4afp8_converted", False):
             return
+
+        for name in ("w13_weight", "w2_weight"):
+            if hasattr(layer, name):
+                logger.warning(
+                    "CompressedTensorsW4AFP8MoE removing debug alias param %s before inference",
+                    name,
+                )
+                delattr(layer, name)
 
         dtype = torch.bfloat16
         device = layer.w2_weight_packed.device
