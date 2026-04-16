@@ -119,14 +119,22 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
 
     @staticmethod
     def _make_alias_debug_loader(alias_name: str):
-        def _alias_debug_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+        def _alias_debug_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            *args,
+            **kwargs,
+        ):
             logger.warning(
                 "CompressedTensorsW4AFP8MoE debug alias hit: alias=%s "
-                "loaded_shape=%s loaded_dtype=%s placeholder_shape=%s stack=%s",
+                "loaded_shape=%s loaded_dtype=%s placeholder_shape=%s "
+                "extra_args=%s extra_kwargs=%s stack=%s",
                 alias_name,
                 tuple(loaded_weight.shape),
                 loaded_weight.dtype,
                 tuple(param.shape),
+                args,
+                kwargs,
                 _format_debug_stack(),
             )
 
