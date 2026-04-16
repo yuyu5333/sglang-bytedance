@@ -60,11 +60,11 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
         req.prefix_indices = []
         
         # Mock req_to_token_pool with __getitem__ support for slice indexing
-        tokens = torch.arange(100)
+        tokens = torch.arange(100).reshape(1, 100) # 2D tensor to simulate [num_reqs, max_len]
         def mock_getitem(index):
             if isinstance(index, tuple):
                 idx, slc = index
-                return tokens[slc]
+                return tokens[idx, slc]
             return tokens[index]
         self.req_to_token_pool.req_to_token.__getitem__.side_effect = mock_getitem
         
@@ -73,7 +73,8 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
         self.mock_controller.write.return_value = host_indices
         
         # 1. 触发一次卸载
-        self.manager.offload_kv_cache(req)
+        success = self.manager.offload_kv_cache(req)
+        self.assertTrue(success)
         self.assertEqual(len(self.manager.ongoing_offload), 1)
         ack_id = self.manager.request_counter
         self.assertIn(ack_id, self.manager.req_to_ongoing_tasks[req.rid])
