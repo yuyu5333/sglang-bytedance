@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import torch
@@ -104,7 +105,14 @@ class DecodeKVCacheOffloadManager:
         self.ongoing_offload = {}
         self.ongoing_backup = {}
         self.offloaded_state = {}
+        self.aborted_requests = set()
+        self.req_to_ongoing_tasks = defaultdict(set)
         logger.info("Enable offload kv cache for decode side")
+
+    def abort_request(self, req: Req):
+        """Abort a request and clean up its resources."""
+        self.aborted_requests.add(req.rid)
+        self.finalize_release_on_finish(req)
 
     def offload_kv_cache(self, req) -> bool:
         """Offload incremental KV cache for decode side."""
@@ -112,7 +120,7 @@ class DecodeKVCacheOffloadManager:
         if self.cache_controller is None or self.decode_host_mem_pool is None:
             return False
 
-        if req.req_pool_idx == -1 or len(req.output_ids) == 0:
+        if req.req_pool_idx is None or len(req.output_ids) == 0:
             return False
 
         token_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx]
@@ -176,6 +184,7 @@ class DecodeKVCacheOffloadManager:
             start,
             end,
         )
+        self.req_to_ongoing_tasks[req.rid].add(ack_id)
         state.inc_len += incremental_aligned_len
         return True
 
@@ -213,6 +222,13 @@ class DecodeKVCacheOffloadManager:
                     start,
                     end,
                 ) = self.ongoing_offload.pop(ack_id)
+                self.req_to_ongoing_tasks[req.rid].remove(ack_id)
+
+                if req.rid in self.aborted_requests:
+                    self._release_finished_req(req, start)
+                    self.decode_host_mem_pool.free(host_indices)
+                    self._maybe_remove_request(req.rid)
+                    continue
 
                 if req.finished():
                     self._release_finished_req(req, start)
@@ -235,6 +251,9 @@ class DecodeKVCacheOffloadManager:
             finish_count -= 1
 
     def _release_finished_req(self, req: Req, start_offset: int):
+        if req.req_pool_idx is None:
+            return
+
         kv_committed_len = req.pop_committed_kv_cache()
         start = start_offset
         end = kv_committed_len
@@ -257,6 +276,14 @@ class DecodeKVCacheOffloadManager:
         self.tree_cache.protected_size_ -= len(req.prefix_indices)
         if req.rid in self.offloaded_state:
             del self.offloaded_state[req.rid]
+        self._maybe_remove_request(req.rid)
+
+    def _maybe_remove_request(self, rid: str):
+        if not self.req_to_ongoing_tasks[rid] and rid not in self.offloaded_state:
+            if rid in self.aborted_requests:
+                self.aborted_requests.remove(rid)
+            if rid in self.req_to_ongoing_tasks:
+                del self.req_to_ongoing_tasks[rid]
 
     def _check_backup_progress(self, finish_count):
         """Check the progress of backup from host to storage."""
@@ -264,13 +291,15 @@ class DecodeKVCacheOffloadManager:
             storage_operation = self.cache_controller.ack_backup_queue.get()
             ack_id = storage_operation.id
             req_id, host_indices, start_time = self.ongoing_backup.pop(ack_id)
+            self.req_to_ongoing_tasks[req_id].remove(ack_id)
 
             # Release host memory
             self.decode_host_mem_pool.free(host_indices)
 
-            logger.debug(
+            logger.info(
                 f"Finished backup request {req_id}, free host memory, len:{len(host_indices)}, cost time:{time.time() - start_time:.2f} seconds."
             )
+            self._maybe_remove_request(req_id)
 
     def _trigger_backup(
         self, req, host_indices, incremental_tokens, start_time, prior_hash
@@ -283,6 +312,7 @@ class DecodeKVCacheOffloadManager:
             hash_value=page_hashes,
         )
         self.ongoing_backup[ack_id] = (req.rid, host_indices, start_time)
+        self.req_to_ongoing_tasks[req.rid].add(ack_id)
         return page_hashes[-1] if len(page_hashes) > 0 else prior_hash
 
     def _compute_prefix_hash(self, tokens, prior_hash=""):
@@ -296,7 +326,7 @@ class DecodeKVCacheOffloadManager:
 
     def finalize_release_on_finish(self, req: Req):
         """Free any remaining tail KV that was not offloaded due to non-aligned length."""
-        if req.req_pool_idx == -1:
+        if req.req_pool_idx is None:
             return
         state = self.offloaded_state.get(req.rid)
         if state is None:

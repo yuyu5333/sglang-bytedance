@@ -3333,6 +3333,8 @@ class Scheduler(
                 if recv_req.abort_all or decode_req.req.rid.startswith(recv_req.rid):
                     logger.debug(f"Abort transfer queue request. {decode_req.req.rid=}")
                     decode_req.kv_receiver.abort()
+                    if self.decode_offload_manager:
+                        self.decode_offload_manager.abort_request(decode_req.req)
 
             # Abort requests already retracted to CPU cache
             if self.disagg_decode_prealloc_queue.retracted_queue:
@@ -3344,6 +3346,8 @@ class Scheduler(
                         self.send_to_tokenizer.send_output(
                             AbortReq(rid=decode_req.rid), decode_req
                         )
+                        if self.decode_offload_manager:
+                            self.decode_offload_manager.abort_request(decode_req)
                     else:
                         remaining_retracted.append(decode_req)
                 self.disagg_decode_prealloc_queue.retracted_queue = remaining_retracted
@@ -3363,6 +3367,8 @@ class Scheduler(
                 # Then we reuse all existing code to clean up the KV cache allocation.
                 logger.debug(f"Abort running request. {req.rid=}")
                 req.to_finish = FINISH_ABORT()
+                if self.decode_offload_manager:
+                    self.decode_offload_manager.abort_request(req)
 
     def _pause_engine(self) -> Tuple[List[Req], int]:
         raise NotImplementedError()
