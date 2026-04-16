@@ -55,9 +55,18 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
         req.output_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] # > 16 (page_size)
         req.origin_input_ids = [101, 102]
         req.finished.return_value = False
+        req.pop_committed_kv_cache.return_value = 20
+        req.pop_overallocated_kv_cache.return_value = (20, 20)
+        req.prefix_indices = []
         
-        # Mock req_to_token_pool
-        self.req_to_token_pool.req_to_token = {0: torch.arange(100)}
+        # Mock req_to_token_pool with __getitem__ support for slice indexing
+        tokens = torch.arange(100)
+        def mock_getitem(index):
+            if isinstance(index, tuple):
+                idx, slc = index
+                return tokens[slc]
+            return tokens[index]
+        self.req_to_token_pool.req_to_token.__getitem__.side_effect = mock_getitem
         
         # Mock cache_controller.write to return some host_indices
         host_indices = torch.tensor([10, 11])
