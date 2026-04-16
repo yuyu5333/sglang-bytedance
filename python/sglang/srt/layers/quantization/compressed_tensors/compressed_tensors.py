@@ -160,6 +160,20 @@ class CompressedTensorsConfig(QuantizationConfig):
             and input_quant.dynamic
         )
 
+    def is_w4a16_config(self) -> bool:
+        linear_scheme = self.target_scheme_map.get("Linear", {})
+        weight_quant = linear_scheme.get("weights")
+        input_quant = linear_scheme.get("input_activations")
+        if weight_quant is None or input_quant is not None:
+            return False
+
+        weight_type = getattr(weight_quant.type, "value", weight_quant.type)
+        return (
+            self.quant_format == CompressionFormat.pack_quantized.value
+            and weight_quant.num_bits == 4
+            and weight_type == "int"
+        )
+
     def get_scaled_act_names(self) -> List[str]:
         return []
 
