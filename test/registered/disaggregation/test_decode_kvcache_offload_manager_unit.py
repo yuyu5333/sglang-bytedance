@@ -46,6 +46,9 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
                         )
                         self.mock_controller = self.manager.cache_controller
                         self.mock_host_pool = self.manager.decode_host_mem_pool
+                        
+                        # Set default return value for qsize
+                        self.mock_controller.ack_backup_queue.qsize.return_value = 0
 
     def test_abort_request_cleanup(self):
         """测试请求中断后的资源清理逻辑"""
@@ -83,10 +86,10 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
         self.manager.abort_request(req)
         self.assertIn(req.rid, self.manager.aborted_requests)
 
-        # 3. 模拟卸载完成
-        # 构造 ack_write_queue 的元素: (start_event, finish_event, ack_list)
+        # 模拟卸载完成，此时 n_backup 应该仍为 0，因为中断跳过了备份
         mock_finish_event = MagicMock()
         self.mock_controller.ack_write_queue = [ (MagicMock(), mock_finish_event, [ack_id]) ]
+        self.mock_controller.ack_backup_queue.qsize.return_value = 0
         
         # 模拟分布式同步
         with patch("torch.distributed.all_reduce"):
@@ -116,6 +119,117 @@ class TestDecodeKVCacheOffloadManager(unittest.TestCase):
         # 不应抛出异常，且不应调用 free
         self.manager._release_finished_req(req, 0)
         self.req_to_token_pool.free.assert_not_called()
+
+    def test_normal_request_backup(self):
+        """测试正常请求完成时的卸载和备份逻辑"""
+        req = MagicMock(spec=Req)
+        req.rid = "req_normal"
+        req.req_pool_idx = 1
+        req.output_ids = [1] * 17
+        req.origin_input_ids = [101]
+        req.finished.return_value = False
+        req.pop_committed_kv_cache.return_value = 20
+        req.pop_overallocated_kv_cache.return_value = (20, 20)
+        req.prefix_indices = []
+
+        # Mock req_to_token_pool
+        tokens = torch.arange(100).reshape(2, 50)
+        def mock_getitem(index):
+            if isinstance(index, tuple):
+                idx, slc = index
+                return tokens[idx, slc]
+            return tokens[index]
+        self.req_to_token_pool.req_to_token.__getitem__.side_effect = mock_getitem
+
+        # 1. 触发一次卸载
+        host_indices = torch.tensor([20, 21])
+        self.mock_controller.write.return_value = host_indices
+        self.manager.offload_kv_cache(req)
+        ack_id = self.manager.request_counter
+
+        # 2. 模拟卸载完成并触发备份
+        mock_finish_event = MagicMock()
+        self.mock_controller.ack_write_queue = [ (MagicMock(), mock_finish_event, [ack_id]) ]
+        self.mock_controller.ack_backup_queue.qsize.return_value = 0
+        backup_ack_id = 999
+        self.mock_controller.write_storage.return_value = backup_ack_id
+        
+        with patch("torch.distributed.all_reduce"):
+            self.manager.check_offload_progress()
+
+        # 验证备份被触发
+        self.mock_controller.write_storage.assert_called()
+        self.assertIn(backup_ack_id, self.manager.ongoing_backup)
+
+        # 3. 模拟备份完成
+        mock_storage_op = MagicMock()
+        mock_storage_op.id = backup_ack_id
+        self.mock_controller.ack_backup_queue.get.return_value = mock_storage_op
+        self.mock_controller.ack_backup_queue.qsize.return_value = 1
+        
+        with patch("torch.distributed.all_reduce"):
+            self.manager.check_offload_progress()
+
+        # 验证 host 内存最终被释放
+        self.mock_host_pool.free.assert_called_with(host_indices)
+        self.assertEqual(len(self.manager.ongoing_backup), 0)
+
+    def test_abort_during_backup(self):
+        """测试备份正在进行时请求被中断的情况"""
+        req = MagicMock(spec=Req)
+        req.rid = "req_abort_late"
+        req.req_pool_idx = 1
+        req.output_ids = [1] * 17
+        req.origin_input_ids = [101]
+        req.finished.return_value = False
+        req.pop_committed_kv_cache.return_value = 20
+        req.pop_overallocated_kv_cache.return_value = (20, 20)
+        req.prefix_indices = []
+
+        # Mock req_to_token_pool
+        tokens = torch.arange(100).reshape(2, 50)
+        def mock_getitem(index):
+            if isinstance(index, tuple):
+                idx, slc = index
+                return tokens[idx, slc]
+            return tokens[index]
+        self.req_to_token_pool.req_to_token.__getitem__.side_effect = mock_getitem
+
+        # 1. 触发卸载并触发备份
+        host_indices = torch.tensor([20, 21])
+        self.mock_controller.write.return_value = host_indices
+        self.manager.offload_kv_cache(req)
+        ack_id = self.manager.request_counter
+        backup_ack_id = 1001
+        self.mock_controller.write_storage.return_value = backup_ack_id
+        
+        mock_finish_event = MagicMock()
+        self.mock_controller.ack_write_queue = [ (MagicMock(), mock_finish_event, [ack_id]) ]
+        self.mock_controller.ack_backup_queue.qsize.return_value = 0
+        
+        with patch("torch.distributed.all_reduce"):
+            self.manager.check_offload_progress()
+            
+        self.assertIn(backup_ack_id, self.manager.ongoing_backup)
+
+        # 2. 此时请求被中断
+        self.manager.abort_request(req)
+        self.assertIn(req.rid, self.manager.aborted_requests)
+
+        # 3. 模拟备份最终完成
+        mock_storage_op = MagicMock()
+        mock_storage_op.id = backup_ack_id
+        self.mock_controller.ack_backup_queue.get.return_value = mock_storage_op
+        self.mock_controller.ack_backup_queue.qsize.return_value = 1
+        
+        with patch("torch.distributed.all_reduce"):
+            self.manager.check_offload_progress()
+
+        # 验证资源最终清理
+        self.mock_host_pool.free.assert_called_with(host_indices)
+        self.assertEqual(len(self.manager.ongoing_backup), 0)
+        self.assertEqual(len(self.manager.aborted_requests), 0)
+        self.assertNotIn(req.rid, self.manager.req_to_ongoing_tasks)
 
 if __name__ == "__main__":
     unittest.main()
