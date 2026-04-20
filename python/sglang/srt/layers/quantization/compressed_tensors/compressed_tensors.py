@@ -43,6 +43,7 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsMxInt4MoE,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Nvfp4MoE,
+    CompressedTensorsW4AFP8,
     CompressedTensorsW4AFP8MoE,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Fp8MoE,
@@ -640,6 +641,13 @@ class CompressedTensorsConfig(QuantizationConfig):
                         strategy=weight_quant.strategy,
                         is_static_input_scheme=not input_quant.dynamic,
                     )
+
+            if self._is_w4afp8(weight_quant, input_quant):
+                return CompressedTensorsW4AFP8(
+                    quant_config=self,
+                    weight_quant=weight_quant,
+                    input_quant=input_quant,
+                )
 
             # note: input_quant can be None
             if self._is_fp8_w8a16(weight_quant, input_quant):
