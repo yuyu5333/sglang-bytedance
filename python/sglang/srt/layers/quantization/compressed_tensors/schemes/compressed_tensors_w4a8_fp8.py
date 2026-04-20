@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
@@ -15,6 +14,7 @@ from sglang.srt.layers.parameter import (
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsLinearScheme,
 )
+from sglang.srt.layers.quantization.w4afp8_linear import cutlass_w4a8_fp8_linear
 
 if TYPE_CHECKING:
     from compressed_tensors.quantization import QuantizationArgs
@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
-
-logger = logging.getLogger(__name__)
 
 __all__ = ["CompressedTensorsW4AFP8"]
 
@@ -54,51 +52,13 @@ def _unpack_repack_int32_to_cutlass_int8(
 
     return out.flatten(-2).contiguous()
 
-
-def _unpack_int4_from_int8_packed(weight_packed_int8: torch.Tensor) -> torch.Tensor:
-    """Expand int8-packed signed int4 values into one int8 per element."""
-    packed = weight_packed_int8.to(torch.int16)
-
-    low = packed & 0x0F
-    high = (packed >> 4) & 0x0F
-
-    low = torch.where(low >= 8, low - 16, low)
-    high = torch.where(high >= 8, high - 16, high)
-
-    unpacked = torch.stack((low, high), dim=-1)
-    return unpacked.reshape(*weight_packed_int8.shape[:-1], -1).to(torch.int8)
-
-
-def _dequantize_w4_groupwise(
-    weight_packed_int8: torch.Tensor,
-    weight_scale: torch.Tensor,
-    group_size: int,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Reference-only dequantization path used until the dense kernel lands."""
-    weight_int4 = _unpack_int4_from_int8_packed(weight_packed_int8).to(torch.float32)
-    num_rows, input_size = weight_int4.shape
-    num_groups = input_size // group_size
-
-    assert (
-        weight_scale.shape[0] == num_rows
-    ), "weight_scale rows must match the weight rows"
-    assert (
-        weight_scale.shape[1] == num_groups
-    ), "weight_scale columns must match the number of groups"
-
-    dequant = weight_int4.reshape(num_rows, num_groups, group_size)
-    dequant = dequant * weight_scale.to(torch.float32).unsqueeze(-1)
-    return dequant.reshape(num_rows, input_size).to(output_dtype)
-
-
 class CompressedTensorsW4AFP8(CompressedTensorsLinearScheme):
     """Dense W4AFP8 linear scheme for compressed-tensors checkpoints.
 
     This implementation follows the compressed-tensors parameter registration
     contract so it can participate in the existing weight-loading flow.
-    `apply_weights()` currently uses a reference dequantize-then-matmul path
-    until the dedicated dense W4A8-FP8 kernel is added.
+    `apply_weights()` dispatches through `w4afp8_linear.py`, so the future dense
+    kernel can replace the temporary implementation without changing the scheme.
     """
 
     def __init__(
@@ -221,27 +181,17 @@ class CompressedTensorsW4AFP8(CompressedTensorsLinearScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        input_2d = x.reshape(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], layer.output_size_per_partition]
-
         weight_packed = layer.weight_packed
         if weight_packed.dtype == torch.int32:
-            logger.warning_once(
-                "CompressedTensorsW4AFP8 is using the reference dense path "
-                "(on-the-fly repack + dequantize + matmul)."
-            )
             weight_packed = _unpack_repack_int32_to_cutlass_int8(
                 weight_packed, self.num_bits
             )
 
-        weight = _dequantize_w4_groupwise(
-            weight_packed_int8=weight_packed,
+        return cutlass_w4a8_fp8_linear(
+            input=x,
+            weight_packed=weight_packed,
             weight_scale=layer.weight_scale,
             group_size=self.group_size,
-            output_dtype=input_2d.dtype,
+            bias=bias,
+            output_dtype=x.dtype,
         )
-
-        output = input_2d @ weight.t()
-        if bias is not None:
-            output = output + bias
-        return output.reshape(*output_shape)
