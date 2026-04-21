@@ -44,16 +44,18 @@ As of the current prototype:
 - `CompressedTensorsW4AFP8` has been added and wired into dense `CompressedTensors` scheme dispatch.
 - `create_weights()` and `process_weights_after_loading()` are implemented, including checkpoint `int32` -> runtime `int8` repacking.
 - `apply_weights()` has been split to call `python/sglang/srt/layers/quantization/w4afp8_linear.py`.
-- `python/sglang/srt/layers/quantization/w4afp8_kernel.py` exists and now lazily imports the JIT entry instead of hard-importing it at module import time.
+- `python/sglang/srt/layers/quantization/w4afp8_linear.py` now quantizes activations to FP8 and dispatches to `w4a8_fp8_scaled_mm(...)` when the runtime support probe passes; a temporary reference fallback is still kept for unsupported runtimes.
+- `python/sglang/srt/layers/quantization/w4afp8_kernel.py` exists, validates inputs, and lazily imports the JIT entry instead of hard-importing it at module import time.
 - `python/sglang/jit_kernel/w4a8_fp8_scaled_mm.py` exists as the JIT wrapper entry.
-- `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh` now exists as a shape-checked kernel skeleton.
+- `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh` no longer just contains a placeholder skeleton; it now has a first runnable correctness-first naive CUDA kernel path with shape checks, contiguous checks, signed-int4 unpack, optional bias support, and `group_size == 128` enforcement.
+- `test/registered/quant/test_w4a8_fp8_scaled_mm.py` has been added to cover JIT smoke testing plus numerical parity against a PyTorch reference.
 
 The main remaining gaps are:
 
-- `w4afp8_linear.py` still uses a temporary reference path (`dequantize + matmul`) instead of `FP8 quant + kernel dispatch`.
-- `w4a8_fp8_scaled_mm.cuh` is only a skeleton and intentionally raises "not implemented yet" at runtime.
+- The naive kernel has been written and the high-level wrapper now dispatches to it, but it has not yet been treated as a fully validated production path; end-to-end compile-and-run verification still depends on a real CUDA + Torch runtime.
 - `is_w4a8_fp8_linear_supported()` is more robust than before, but it still does not prove that the JIT kernel can successfully compile and execute end-to-end.
-- Dense utility tests and integration tests are still missing.
+- `w4afp8_linear.py` still keeps a temporary reference fallback, and static `input_scale` support is intentionally narrow today (scalar-only).
+- Dense utility tests, dense scheme tests, wrapper-specific tests, and higher-level integration tests are still missing.
 
 ## Runtime Tensor Contract
 
@@ -67,7 +69,7 @@ This matches compressed-tensors `pack_to_int32` serialization for 4-bit weights.
 ### Runtime Kernel Layout
 
 - `q_input`: `[M, K]`, `float8_e4m3fn`
-- `x_scale`: `[M, 1]`, `float32`
+- `x_scale`: `[M, 1]`, `float32` (the current wrapper/kernel also accept `[M]` as a convenience form)
 - `weight_packed`: `[N, K // 2]`, `int8`
 - `weight_scale`: `[N, K // group_size]`, `float32`
 - `output`: `[M, N]`, `bf16`
@@ -80,7 +82,7 @@ Each `int8` weight byte stores two signed `int4` values.
 
 - File: `python/sglang/srt/layers/quantization/w4afp8_linear.py`
 - Purpose: provide the Python entry point for dense `W4A8-FP8` linear inference and hide input quantization plus kernel invocation details.
-- Status: partially complete. The file exists, but it still routes through a temporary reference implementation.
+- Status: partially complete. The file now performs FP8 input quantization and dispatches to the dense kernel wrapper, while still keeping a temporary reference fallback for unsupported runtimes.
 
 #### Functions to Add
 
@@ -135,7 +137,8 @@ def quantize_input_to_fp8(
 #### Notes
 
 - Reuse existing helpers from `fp8_kernel.py`, preferably `scaled_fp8_quant()` or `sglang_per_token_quant_fp8()`.
-- The current prototype still contains a debug/reference fallback in this file. Replacing it with `FP8 quant + kernel dispatch` is now the highest-priority Python-side task.
+- The current prototype already routes through `FP8 quant + kernel dispatch` on supported runtimes.
+- The remaining work in this file is to validate the dispatch path thoroughly, add wrapper-focused tests, and decide when the temporary reference fallback can be removed.
 
 ### 2. Add CompressedTensors Dense Linear Scheme
 
@@ -388,7 +391,7 @@ def unpack_int4_int8_packed(
 
 - File: `python/sglang/srt/layers/quantization/w4afp8_kernel.py`
 - Purpose: thin Python wrapper around the new `jit_kernel` dense operator entry.
-- Status: partially complete. The wrapper exists, validates inputs, and lazily imports the JIT entry.
+- Status: partially complete. The wrapper exists, validates inputs, lazily imports the JIT entry, and already routes to the JIT custom op when support probing passes.
 
 #### Functions to Add
 
@@ -444,7 +447,7 @@ def _w4a8_fp8_scaled_mm_abstract(
   - `python/sglang/jit_kernel/w4a8_fp8_scaled_mm.py`
   - `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh`
 - Purpose: implement the actual dense `W4A8-FP8` GEMM kernel behind the JIT wrapper.
-- Status: partially complete. The Python wrapper and `.cuh` skeleton exist, but the launcher/kernel body is not implemented yet.
+- Status: partially complete. The Python wrapper exists and `.cuh` now contains a first runnable naive kernel implementation. The remaining work is validation, dispatch integration, and later optimization rather than filling in a blank kernel body.
 
 #### JIT Export Signature
 
@@ -472,7 +475,7 @@ void launch_w4a8_fp8_scaled_mm(const W4A8FP8ScaledMMParams& params, DLDevice dev
 
 - `q_input`: `[M, K]`, `float8_e4m3fn`
 - `weight_packed`: `[N, K / 2]`, `int8`
-- `x_scale`: `[M, 1]`, `float`
+- `x_scale`: `[M, 1]`, `float` (current implementation also accepts rank-1 `[M]`)
 - `weight_scale`: `[N, K / group_size]`, `float`
 - `output`: `[M, N]`, `bf16`
 
@@ -497,7 +500,7 @@ And the higher-level wrapper should route through:
 from sglang.srt.layers.quantization.w4afp8_kernel import w4a8_fp8_scaled_mm
 ```
 
-The next improvement here is to make runtime support probing more conservative so that a placeholder `.cuh` file is not treated as "fully supported".
+The next improvement here is to make runtime support probing more conservative so that "wrapper and source file exist" is not treated as "fully supported and runnable".
 
 ### 9. Refactor MoE Path to Reuse Shared Utility
 
@@ -515,6 +518,7 @@ This is not mandatory for the first dense prototype, but it should be part of th
 
 - File: `tests/python/quantization/test_w4afp8_utils.py`
 - Purpose: verify repack and reference dequant logic.
+- Status: not started.
 
 #### Tests to Add
 
@@ -537,6 +541,7 @@ def test_dequantize_w4_groupwise_matches_manual_formula() -> None:
 
 - File: `tests/python/quantization/test_compressed_tensors_w4a8_fp8_linear.py`
 - Purpose: verify dense compressed-tensors scheme behavior.
+- Status: not started.
 
 #### Tests to Add
 
@@ -564,6 +569,7 @@ def test_compressed_tensors_config_selects_w4afp8_linear_scheme() -> None:
 
 - File: `tests/python/models/test_w4afp8_linear_integration.py`
 - Purpose: verify the new path on real linear module variants.
+- Status: not started.
 
 #### Tests to Add
 
@@ -584,56 +590,78 @@ def test_merged_column_parallel_linear_w4afp8_forward() -> None:
 
 `MergedColumnParallelLinear` must be covered because fused MLP paths such as `gate_up_proj` are one of the highest-risk integration points.
 
+### 13. Add Kernel Path Tests
+
+- File: `test/registered/quant/test_w4a8_fp8_scaled_mm.py`
+- Purpose: verify the low-level JIT path before wiring the high-level dense wrapper to it.
+- Status: prototype complete.
+
+#### Covered Tests
+
+```python
+def test_smoke_compile_and_cache() -> None:
+    ...
+```
+
+```python
+def test_numerical_parity_without_bias() -> None:
+    ...
+```
+
+```python
+def test_numerical_parity_with_bias_and_signed_int4_edges() -> None:
+    ...
+```
+
+#### Notes
+
+- This file is intentionally focused on the kernel contract, not on `CompressedTensors` integration.
+- It uses a pure PyTorch reference that matches the current kernel contract:
+  - dequantized activation = `q_input.float() * x_scale`
+  - dequantized weight = `unpack_int4(weight_packed) * weight_scale`
+- The test is expected to `skip` cleanly when CUDA / FP8 / SM90+ runtime support is unavailable.
+
 ## Remaining Implementation Order
 
 ### Step 1
 
-- Replace the temporary reference path in `w4afp8_linear.py`
-- Add `quantize_input_to_fp8_per_token()`
-- Add `quantize_input_to_fp8()`
-- Route `cutlass_w4a8_fp8_linear()` to `w4a8_fp8_scaled_mm(...)`
+- Run real JIT compile-and-execute validation on the naive kernel through `cutlass_w4a8_fp8_linear()`
+- Tighten `is_w4a8_fp8_linear_supported()` so the probe reflects "can really execute" rather than just "wrapper exists"
+- Add focused wrapper tests for FP8 quantization, dispatch, and fallback behavior
 
 ### Step 2
-
-- Make `is_w4a8_fp8_linear_supported()` more conservative
-- Ensure the probe reflects "can really execute" rather than just "wrapper exists"
-
-### Step 3
-
-- Fill in `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh`
-- Start with a minimal correct kernel path before tuning
-- Keep `group_size = 128` and `bf16` output fixed for MVP
-
-### Step 4
 
 - Add dense utility tests and dense scheme tests
 - Validate checkpoint repack, shape contracts, and reference numerical parity
 
-### Step 5
+### Step 3
 
 - Add integration tests for standard and merged linear modules
 - Validate tensor-parallel partition handling
 
-### Step 6
+### Step 4
 
 - Refactor MoE path to reuse shared repack utilities
 - Clean up any temporary debug-only code
+
+### Step 5
+
+- Optimize the naive kernel into a real performance-oriented dense kernel path
+- Revisit scale layout, epilogue choices, and any CUTLASS-specific layout tuning only after correctness is stable
 
 ## Suggested Remaining Commit Split
 
 ### Commit 1
 
-- `w4afp8_linear.py`
-- `w4afp8_kernel.py`
+- real runtime validation of the new `w4afp8_linear.py` dispatch path
 - support-probe hardening
-- focused unit tests for wrapper behavior
+- focused wrapper tests
 
 ### Commit 2
 
-- `jit_kernel/w4a8_fp8_scaled_mm.py`
-- `jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh`
-- first runnable dense kernel path
-- kernel path tests
+- any JIT wrapper fixes found during compile/run verification
+- dense scheme tests
+- utility tests
 
 ### Commit 3
 
@@ -642,13 +670,18 @@ def test_merged_column_parallel_linear_w4afp8_forward() -> None:
 - shared utility refactor for MoE
 - cleanup
 
+### Commit 4
+
+- kernel optimization work beyond the naive correctness-first implementation
+- performance validation
+
 ## Interface Freeze Checklist
 
 Before implementation begins, freeze the following interfaces to avoid churn:
 
 - runtime `weight_packed` shape is `[N, K // 2]`
 - `weight_scale` shape is `[N, K // group_size]`
-- `x_scale` shape is `[M, 1]` for MVP
+- canonical `x_scale` shape is `[M, 1]` for MVP, though the current wrapper/kernel also accept `[M]`
 - kernel output dtype is `bf16`
 - activation quantization is dynamic per-token FP8 for MVP
 
