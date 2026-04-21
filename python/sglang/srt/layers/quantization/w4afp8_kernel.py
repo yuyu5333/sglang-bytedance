@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -13,29 +13,20 @@ logger = logging.getLogger(__name__)
 __all__ = ["is_w4a8_fp8_linear_supported", "w4a8_fp8_scaled_mm"]
 
 _is_cuda = is_cuda()
-_w4a8_fp8_scaled_mm_op = None
 
-if _is_cuda:
+
+@lru_cache(maxsize=1)
+def _get_w4a8_fp8_jit_kernel_api() -> tuple[Optional[Callable], Optional[Callable]]:
     try:
-        from sgl_kernel import w4a8_fp8_scaled_mm as _w4a8_fp8_scaled_mm_op
+        from sglang.jit_kernel.w4a8_fp8_scaled_mm import (
+            has_w4a8_fp8_scaled_mm_jit_kernel,
+            w4a8_fp8_scaled_mm,
+        )
+    except (ImportError, RuntimeError) as exc:
+        logger.debug("Failed to import W4A8-FP8 JIT kernel entry: %s", exc)
+        return None, None
 
-        @torch.library.register_fake("sgl_kernel::w4a8_fp8_scaled_mm")
-        def _w4a8_fp8_scaled_mm_abstract(
-            q_input,
-            weight_packed,
-            x_scale,
-            weight_scale,
-            group_size,
-            out_dtype,
-            bias=None,
-        ):
-            del x_scale, weight_scale, group_size, bias
-            m = q_input.shape[0]
-            n = weight_packed.shape[0]
-            return q_input.new_empty((m, n), dtype=out_dtype)
-
-    except ImportError:
-        _w4a8_fp8_scaled_mm_op = None
+    return has_w4a8_fp8_scaled_mm_jit_kernel, w4a8_fp8_scaled_mm
 
 
 @lru_cache(maxsize=1)
@@ -48,7 +39,15 @@ def is_w4a8_fp8_linear_supported() -> bool:
     if major < 9:
         return False
 
-    return _w4a8_fp8_scaled_mm_op is not None
+    has_jit_kernel, jit_op = _get_w4a8_fp8_jit_kernel_api()
+    if has_jit_kernel is None or jit_op is None:
+        return False
+
+    try:
+        return bool(has_jit_kernel()) and callable(jit_op)
+    except RuntimeError as exc:
+        logger.debug("Failed to probe W4A8-FP8 JIT kernel availability: %s", exc)
+        return False
 
 
 def _validate_w4a8_fp8_inputs(
@@ -176,14 +175,14 @@ def w4a8_fp8_scaled_mm(
         bias=bias,
     )
 
-    if not is_w4a8_fp8_linear_supported():
+    _, jit_op = _get_w4a8_fp8_jit_kernel_api()
+    if not is_w4a8_fp8_linear_supported() or jit_op is None:
         raise NotImplementedError(
             "W4A8-FP8 dense kernel is not available in the current runtime. "
-            "Expected CUDA SM90+ with `sgl_kernel.w4a8_fp8_scaled_mm` built and importable."
+            "Expected CUDA SM90+ and a JIT kernel source under `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh`."
         )
 
-    assert _w4a8_fp8_scaled_mm_op is not None
-    return _w4a8_fp8_scaled_mm_op(
+    return jit_op(
         q_input,
         weight_packed,
         x_scale,
