@@ -31,6 +31,11 @@ SGL_DEVICE float to_float<fp16_t>(fp16_t value) {
   return __half2float(value);
 }
 
+template <>
+SGL_DEVICE float to_float<fp8_e4m3_t>(fp8_e4m3_t value) {
+  return __half2float(__nv_cvt_fp8_to_fp16(value, __NV_E4M3));
+}
+
 template <typename T>
 SGL_DEVICE T from_float(float value) {
   return static_cast<T>(value);
@@ -108,6 +113,8 @@ void launch_w4a8_fp8_scaled_mm(const W4A8FP8ScaledMMParams& params, DLDevice dev
   dim3 grid_dim(div_ceil(params.n, int64_t(block_dim.x)), div_ceil(params.m, int64_t(block_dim.y)));
   LaunchKernel(grid_dim, block_dim, device)(w4a8_fp8_scaled_mm_naive_kernel<OutDType>, params);
 }
+
+}  // namespace
 
 template <typename OutDType>
 void w4a8_fp8_scaled_mm(
@@ -213,5 +220,3 @@ void w4a8_fp8_scaled_mm(
 
   launch_w4a8_fp8_scaled_mm<OutDType>(params, device.unwrap());
 }
-
-}  // namespace
