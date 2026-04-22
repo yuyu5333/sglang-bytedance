@@ -49,13 +49,14 @@ As of the current prototype:
 - `python/sglang/jit_kernel/w4a8_fp8_scaled_mm.py` exists as the JIT wrapper entry.
 - `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh` no longer just contains a placeholder skeleton; it now has a first runnable correctness-first naive CUDA kernel path with shape checks, contiguous checks, signed-int4 unpack, optional bias support, and `group_size == 128` enforcement.
 - `test/registered/quant/test_w4a8_fp8_scaled_mm.py` has been added to cover JIT smoke testing plus numerical parity against a PyTorch reference.
+- `test/registered/quant/test_w4afp8_linear_wrapper.py` has been added to cover the high-level wrapper control flow, including dispatch, fallback, and FP8 quantization helper selection.
 
 The main remaining gaps are:
 
 - The naive kernel has been written and the high-level wrapper now dispatches to it, but it has not yet been treated as a fully validated production path; end-to-end compile-and-run verification still depends on a real CUDA + Torch runtime.
 - `is_w4a8_fp8_linear_supported()` is more robust than before, but it still does not prove that the JIT kernel can successfully compile and execute end-to-end.
 - `w4afp8_linear.py` still keeps a temporary reference fallback, and static `input_scale` support is intentionally narrow today (scalar-only).
-- Dense utility tests, dense scheme tests, wrapper-specific tests, and higher-level integration tests are still missing.
+- Dense utility tests, dense scheme tests, and higher-level integration tests are still missing. The wrapper layer now has an initial focused unit test, but runtime-backed validation is still needed.
 
 ## Runtime Tensor Contract
 
@@ -621,13 +622,54 @@ def test_numerical_parity_with_bias_and_signed_int4_edges() -> None:
   - dequantized weight = `unpack_int4(weight_packed) * weight_scale`
 - The test is expected to `skip` cleanly when CUDA / FP8 / SM90+ runtime support is unavailable.
 
+### 14. Add Wrapper Dispatch Tests
+
+- File: `test/registered/quant/test_w4afp8_linear_wrapper.py`
+- Purpose: verify the high-level `w4afp8_linear.py` control flow independently of the real CUDA kernel runtime.
+- Status: prototype complete.
+
+#### Covered Tests
+
+```python
+def test_dispatch_path_uses_quant_and_kernel() -> None:
+    ...
+```
+
+```python
+def test_fallback_path_uses_reference_matmul() -> None:
+    ...
+```
+
+```python
+def test_quantize_input_to_fp8_uses_per_token_when_dynamic() -> None:
+    ...
+```
+
+```python
+def test_quantize_input_to_fp8_with_scalar_scale_expands_to_per_token_shape() -> None:
+    ...
+```
+
+```python
+def test_quantize_input_to_fp8_rejects_non_scalar_static_scale() -> None:
+    ...
+```
+
+#### Notes
+
+- This file is intentionally a wrapper/control-flow unit test rather than a runtime kernel test.
+- It uses `mock.patch(...)` to verify that:
+  - supported runtimes dispatch to `quantize_input_to_fp8(...)` and `w4a8_fp8_scaled_mm(...)`
+  - unsupported runtimes fall back to the reference `dequantize + matmul` path
+  - dynamic and scalar-static activation quantization select the expected helper path
+
 ## Remaining Implementation Order
 
 ### Step 1
 
 - Run real JIT compile-and-execute validation on the naive kernel through `cutlass_w4a8_fp8_linear()`
 - Tighten `is_w4a8_fp8_linear_supported()` so the probe reflects "can really execute" rather than just "wrapper exists"
-- Add focused wrapper tests for FP8 quantization, dispatch, and fallback behavior
+- Run and extend the focused wrapper tests for FP8 quantization, dispatch, and fallback behavior
 
 ### Step 2
 
