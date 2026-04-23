@@ -47,13 +47,14 @@ As of the current prototype:
 - `python/sglang/srt/layers/quantization/w4afp8_linear.py` now quantizes activations to FP8 and dispatches to `w4a8_fp8_scaled_mm(...)` when the runtime support probe passes; a temporary reference fallback is still kept for unsupported runtimes.
 - `python/sglang/srt/layers/quantization/w4afp8_kernel.py` exists, validates inputs, and lazily imports the JIT entry instead of hard-importing it at module import time.
 - `python/sglang/jit_kernel/w4a8_fp8_scaled_mm.py` exists as the JIT wrapper entry.
-- `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh` no longer just contains a placeholder skeleton; it now has a first runnable correctness-first naive CUDA kernel path with shape checks, contiguous checks, signed-int4 unpack, optional bias support, and `group_size == 128` enforcement.
+- `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh` no longer just contains a placeholder skeleton; it now has a first runnable correctness-first naive CUDA kernel path with shape checks, contiguous checks, signed-int4 unpack, optional bias support, and `group_size == 128` enforcement. Two critical bugs have been fixed: (1) `fp8_e4m3_t` → `float` conversion now uses `__nv_cvt_fp8_to_fp16` + `__half2float` via an explicit `to_float` specialization instead of the invalid `static_cast<float>`; (2) `w4a8_fp8_scaled_mm<OutDType>` has been moved out of the anonymous namespace so that the TVM FFI export wrapper can link to it.
 - `test/registered/quant/test_w4a8_fp8_scaled_mm.py` has been added to cover JIT smoke testing plus numerical parity against a PyTorch reference.
 - `test/registered/quant/test_w4afp8_linear_wrapper.py` has been added to cover the high-level wrapper control flow, including dispatch, fallback, and FP8 quantization helper selection.
+- `test/registered/quant/test_compressed_tensors_w4a8_fp8_linear.py` has been added to cover the `CompressedTensorsW4AFP8` scheme: parameter registration, int32→int8 repack, `apply_weights` dispatch, `_unpack_repack_int32_to_cutlass_int8` roundtrip, and `_is_w4afp8` dispatch detection.
 
 The main remaining gaps are:
 
-- The naive kernel has been written and the high-level wrapper now dispatches to it, but it has not yet been treated as a fully validated production path; end-to-end compile-and-run verification still depends on a real CUDA + Torch runtime.
+- The naive kernel has been written and the high-level wrapper now dispatches to it, but it has not yet been treated as a fully validated production path; end-to-end compile-and-run verification still depends on a real CUDA + Torch runtime. Two critical compilation/linking bugs (`fp8_e4m3_t` conversion and anonymous namespace visibility) have been fixed, so the kernel should now compile and link correctly once a real CUDA runtime is available.
 - `is_w4a8_fp8_linear_supported()` is more robust than before, but it still does not prove that the JIT kernel can successfully compile and execute end-to-end.
 - `w4afp8_linear.py` still keeps a temporary reference fallback, and static `input_scale` support is intentionally narrow today (scalar-only).
 - Dense utility tests, dense scheme tests, and higher-level integration tests are still missing. The wrapper layer now has an initial focused unit test, but runtime-backed validation is still needed.
@@ -448,7 +449,7 @@ def _w4a8_fp8_scaled_mm_abstract(
   - `python/sglang/jit_kernel/w4a8_fp8_scaled_mm.py`
   - `python/sglang/jit_kernel/csrc/gemm/w4a8_fp8_scaled_mm.cuh`
 - Purpose: implement the actual dense `W4A8-FP8` GEMM kernel behind the JIT wrapper.
-- Status: partially complete. The Python wrapper exists and `.cuh` now contains a first runnable naive kernel implementation. The remaining work is validation, dispatch integration, and later optimization rather than filling in a blank kernel body.
+- Status: partially complete. The Python wrapper exists and `.cuh` now contains a first runnable naive kernel implementation with two critical bugs fixed (`fp8_e4m3_t` conversion and anonymous namespace visibility). The remaining work is real CUDA runtime validation and later optimization rather than filling in a blank kernel body or fixing compilation errors.
 
 #### JIT Export Signature
 
@@ -517,7 +518,7 @@ This is not mandatory for the first dense prototype, but it should be part of th
 
 ### 10. Add Utility Unit Tests
 
-- File: `tests/python/quantization/test_w4afp8_utils.py`
+- File: `test/registered/quant/test_w4afp8_utils.py`
 - Purpose: verify repack and reference dequant logic.
 - Status: not started.
 
@@ -540,9 +541,9 @@ def test_dequantize_w4_groupwise_matches_manual_formula() -> None:
 
 ### 11. Add Dense Scheme Unit Tests
 
-- File: `tests/python/quantization/test_compressed_tensors_w4a8_fp8_linear.py`
+- File: `test/registered/quant/test_compressed_tensors_w4a8_fp8_linear.py`
 - Purpose: verify dense compressed-tensors scheme behavior.
-- Status: not started.
+- Status: prototype complete.
 
 #### Tests to Add
 
@@ -568,7 +569,7 @@ def test_compressed_tensors_config_selects_w4afp8_linear_scheme() -> None:
 
 ### 12. Add Integration Tests
 
-- File: `tests/python/models/test_w4afp8_linear_integration.py`
+- File: `test/registered/quant/test_w4afp8_linear_integration.py`
 - Purpose: verify the new path on real linear module variants.
 - Status: not started.
 
