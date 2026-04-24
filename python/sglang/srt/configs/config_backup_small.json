@@ -33,14 +33,55 @@
   "q_lora_rank": 1024,
   "qk_rope_head_dim": 64,
   "quantization_config": {
-    "activation_scheme": "dynamic",
-    "fmt": "e4m3",
-    "quant_method": "fp8",
-    "scale_fmt": "ue8m0",
-    "weight_block_size": [
-      128,
-      128
-    ]
+    "config_groups": {
+      "W4A16": {
+        "format": "pack-quantized",
+        "input_activations": null,
+        "output_activations": null,
+        "targets": [
+          "Linear"
+        ],
+        "weights": {
+          "actorder": null,
+          "block_structure": null,
+          "dynamic": false,
+          "group_size": 128,
+          "num_bits": 4,
+          "observer": "memoryless_minmax",
+          "observer_kwargs": {},
+          "scale_dtype": null,
+          "strategy": "group",
+          "symmetric": true,
+          "type": "int",
+          "zp_dtype": null
+        }
+      }
+    },
+    "format": "pack-quantized",
+    "global_compression_ratio": null,
+    "ignore": [
+      "re:^[^.]+$",
+      "re:.*lm_head.*",
+      "re:.*embed_tokens.*",
+      "re:.*embed\\b.*",
+      "re:.*\\.attn\\..*",
+      "re:.*attn_norm.*",
+      "re:.*ffn_norm.*",
+      "re:.*ffn\\.gate$",
+      "re:.*shared_experts.*",
+      "re:.*\\.hc_.*",
+      "re:^mtp\\..*",
+      "re:.*vision_tower.*",
+      "re:.*mm_projector.*",
+      "re:.*self_attn.*",
+      "re:.*mlp\\.(gate|up|gate_up|down)_proj.*"
+    ],
+    "kv_cache_scheme": null,
+    "quant_method": "compressed-tensors",
+    "quantization_status": "compressed",
+    "sparsity_config": {},
+    "transform_config": {},
+    "version": "0.1.dev450+gd4ef1cf"
   },
   "rms_norm_eps": 1e-06,
   "rope_scaling": {
