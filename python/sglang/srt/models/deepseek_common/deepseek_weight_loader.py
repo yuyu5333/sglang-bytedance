@@ -127,7 +127,10 @@ class DeepseekV2WeightLoaderMixin:
         # Params for special naming rules in mixed-precision models, for example:
         # model.layers.xx.mlp.experts.xx.w1.input_scale. For details,
         # see https://huggingface.co/Barrrrry/DeepSeek-R1-W4AFP8/blob/main.
-        if self.quant_config and self.quant_config.get_name() == "w4afp8":
+        if self.quant_config and (
+            self.quant_config.get_name() == "w4afp8"
+            or getattr(self.quant_config, "is_w4afp8_config", lambda: False)()
+        ):
             expert_params_mapping += FusedMoE.make_expert_input_scale_params_mapping(
                 num_experts=self.config.n_routed_experts
             )
