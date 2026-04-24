@@ -1620,7 +1620,15 @@ class DeepseekV4ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
-        if self.quant_config and getattr(self.quant_config, "is_w4a16_config", lambda: False)():
+        # Debug log for routed MoE params. NextN/MTP wrapper model does not expose
+        # `model.layers`, so only run this in the standard (non-nextn) path.
+        if (
+            (not is_nextn)
+            and self.quant_config
+            and getattr(self.quant_config, "is_w4a16_config", lambda: False)()
+            and hasattr(self.model, "layers")
+            and hasattr(self.model, "start_layer")
+        ):
             first_layer = self.model.layers[self.model.start_layer]
             if isinstance(first_layer.mlp, deepseek_v2.DeepseekV2MoE):
                 moe = first_layer.mlp.experts
