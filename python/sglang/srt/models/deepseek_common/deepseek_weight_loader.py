@@ -151,22 +151,10 @@ class DeepseekV2WeightLoaderMixin:
             weight_names = []
 
             moe_param_aliases = {
-                "w13_weight_packed": [
-                    "w13_weight_packed",
-                    "w13_qweight",
-                    "w13_weight",
-                ],
-                "w2_weight_packed": ["w2_weight_packed", "w2_qweight", "w2_weight"],
-                "w13_weight_scale": [
-                    "w13_weight_scale",
-                    "w13_scales",
-                    "w13_weight_scale_inv",
-                ],
-                "w2_weight_scale": [
-                    "w2_weight_scale",
-                    "w2_scales",
-                    "w2_weight_scale_inv",
-                ],
+                "w13_weight_packed": ["w13_weight_packed"],
+                "w2_weight_packed": ["w2_weight_packed"],
+                "w13_weight_scale": ["w13_weight_scale"],
+                "w2_weight_scale": ["w2_weight_scale"],
                 # Some runtimes do not materialize compressed-tensors shape metadata.
                 "w13_weight_shape": ["w13_weight_shape"],
                 "w2_weight_shape": ["w2_weight_shape"],
@@ -272,6 +260,7 @@ class DeepseekV2WeightLoaderMixin:
                     )
                     break
                 else:
+                    skip_unmaterialized_expert_param = False
                     for mapping in expert_params_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in name:
@@ -282,6 +271,7 @@ class DeepseekV2WeightLoaderMixin:
                             name.replace(weight_name, param_name)
                         )
                         if resolved_name is None:
+                            skip_unmaterialized_expert_param = True
                             continue
                         param = params_dict[resolved_name]
                         weight_loader = param.weight_loader
@@ -302,6 +292,8 @@ class DeepseekV2WeightLoaderMixin:
                         )
                         break
                     else:
+                        if skip_unmaterialized_expert_param:
+                            continue
                         # Skip loading extra bias for GPTQ models.
                         if name.endswith(".bias") and name not in params_dict:
                             continue

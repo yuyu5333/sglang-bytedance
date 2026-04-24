@@ -1620,15 +1620,24 @@ class DeepseekV4ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
+        if self.quant_config and getattr(self.quant_config, "is_w4a16_config", lambda: False)():
+            first_layer = self.model.layers[self.model.start_layer]
+            if isinstance(first_layer.mlp, deepseek_v2.DeepseekV2MoE):
+                moe = first_layer.mlp.experts
+                sample_moe_params = list(moe._parameters.keys())[:8]
+                log_info_on_rank0(
+                    logger,
+                    "DeepseekV4 W4A16 debug: "
+                    f"quant_config={type(self.quant_config).__name__}({self.quant_config.get_name()}), "
+                    f"moe_quant_method={type(moe.quant_method).__name__}, "
+                    f"sample_moe_params={sample_moe_params}",
+                )
+
         moe_param_aliases = {
-            "w13_weight_packed": ["w13_weight_packed", "w13_qweight", "w13_weight"],
-            "w2_weight_packed": ["w2_weight_packed", "w2_qweight", "w2_weight"],
-            "w13_weight_scale": [
-                "w13_weight_scale",
-                "w13_scales",
-                "w13_weight_scale_inv",
-            ],
-            "w2_weight_scale": ["w2_weight_scale", "w2_scales", "w2_weight_scale_inv"],
+            "w13_weight_packed": ["w13_weight_packed"],
+            "w2_weight_packed": ["w2_weight_packed"],
+            "w13_weight_scale": ["w13_weight_scale"],
+            "w2_weight_scale": ["w2_weight_scale"],
             # compressed-tensors checkpoints may include shape metadata even when
             # the selected runtime MoE quant method does not materialize them.
             "w13_weight_shape": ["w13_weight_shape"],
@@ -1815,6 +1824,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                         loaded_params.add(name)
                         break
                     else:
+                        skip_unmaterialized_expert_param = False
                         for mapping in expert_params_mapping:
                             if MOE_BIT_WISE_EQUAL_MODE:
                                 continue
@@ -1827,6 +1837,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 name.replace(weight_name, param_name)
                             )
                             if resolved_name is None:
+                                skip_unmaterialized_expert_param = True
                                 continue
                             param = params_dict[resolved_name]
                             weight_loader = param.weight_loader
@@ -1848,6 +1859,8 @@ class DeepseekV4ForCausalLM(nn.Module):
                             loaded_params.add(resolved_name)
                             break
                         else:
+                            if skip_unmaterialized_expert_param:
+                                continue
                             if name.endswith(".bias") and name not in params_dict:
                                 continue
                             if (
