@@ -1609,6 +1609,41 @@ class DeepseekV4ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
+        moe_param_aliases = {
+            "w13_weight_packed": ["w13_weight_packed", "w13_qweight", "w13_weight"],
+            "w2_weight_packed": ["w2_weight_packed", "w2_qweight", "w2_weight"],
+            "w13_weight_scale": [
+                "w13_weight_scale",
+                "w13_scales",
+                "w13_weight_scale_inv",
+            ],
+            "w2_weight_scale": ["w2_weight_scale", "w2_scales", "w2_weight_scale_inv"],
+            # compressed-tensors checkpoints may include shape metadata even when
+            # the selected runtime MoE quant method does not materialize them.
+            "w13_weight_shape": ["w13_weight_shape"],
+            "w2_weight_shape": ["w2_weight_shape"],
+        }
+
+        def resolve_moe_param_name(name: str) -> Optional[str]:
+            if name in params_dict:
+                return name
+
+            for src_suffix, dst_suffixes in moe_param_aliases.items():
+                if not name.endswith(src_suffix):
+                    continue
+
+                prefix = name[: -len(src_suffix)]
+                for dst_suffix in dst_suffixes:
+                    candidate = prefix + dst_suffix
+                    if candidate in params_dict:
+                        return candidate
+
+                # Some MoE runtimes do not need explicit shape tensors.
+                if src_suffix.endswith("_shape"):
+                    return None
+
+            return None
+
         if is_nextn:
             if hasattr(self.config, "num_nextn_predict_layers"):
                 num_nextn_layers = self.config.num_nextn_predict_layers
@@ -1774,10 +1809,12 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 continue
                             if _is_npu:
                                 name = name.replace("weight_packed", "weight")
-                            name = name.replace(weight_name, param_name)
-                            if name not in params_dict:
+                            resolved_name = resolve_moe_param_name(
+                                name.replace(weight_name, param_name)
+                            )
+                            if resolved_name is None:
                                 continue
-                            param = params_dict[name]
+                            param = params_dict[resolved_name]
                             weight_loader = param.weight_loader
                             maybe_executor_submit(
                                 executor=executor,
@@ -1787,14 +1824,14 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 func_args=(
                                     param,
                                     loaded_weight,
-                                    name,
+                                    resolved_name,
                                 ),
                                 func_kwargs={
                                     "shard_id": shard_id,
                                     "expert_id": expert_id,
                                 },
                             )
-                            loaded_params.add(name)
+                            loaded_params.add(resolved_name)
                             break
                         else:
                             if name.endswith(".bias") and name not in params_dict:
