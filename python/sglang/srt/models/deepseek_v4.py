@@ -1424,6 +1424,15 @@ class DeepseekV4ForCausalLM(nn.Module):
             disable_reason = "Deepseek V3/R1 can not use shared experts fusion optimization under deepep expert parallelism."
         elif self.quant_config and self.quant_config.get_name() == "w4afp8":
             disable_reason = "Deepseek V3/R1 W4AFP8 model uses different quant method for routed experts and shared experts."
+        elif self.quant_config and (
+            self.quant_config.get_name() == "w4afp8"
+            or getattr(self.quant_config, "is_w4afp8_config", lambda: False)()
+            or getattr(self.quant_config, "is_w4a16_config", lambda: False)()
+        ):
+            disable_reason = (
+                "Deepseek V3/R1 W4AFP8/W4A16 model uses different quant method "
+                "for routed experts and shared experts."
+            )
         elif (
             envs.SGLANG_DSV4_MODE.get() == "2604" and envs.SGLANG_DSV4_FP4_EXPERTS.get()
         ):
