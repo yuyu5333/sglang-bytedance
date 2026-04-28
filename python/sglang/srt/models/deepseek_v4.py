@@ -1655,7 +1655,9 @@ class DeepseekV4ForCausalLM(nn.Module):
             )
 
         cache_compressor_weight = {}
-        COMPRESSOR_PART = ".compressor.w"
+        # Track compressor blocks that are absent in the instantiated model
+        # (e.g. compress_ratio=0 for some layers or checkpoint/code mismatch).
+        skipped_compressor_keys = set()
 
         fuse_wqa_wkv = envs.SGLANG_OPT_FUSE_WQA_WKV.get()
         cache_wqkv_a_weight: dict[str, dict[str, torch.Tensor]] = {}
@@ -1817,27 +1819,54 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 continue
                             if ".norm." in name and not self.pp_group.is_last_rank:
                                 continue
-                            elif COMPRESSOR_PART in name:
-                                is_kv = name.endswith(".wkv.weight")
-                                is_wgate = name.endswith(".wgate.weight")
+                            elif name.endswith(".compressor.wkv.weight") or name.endswith(
+                                ".compressor.wgate.weight"
+                            ):
+                                # Some DeepSeek-V4 checkpoints store compressor weights
+                                # as two shards: ".wkv.weight" and ".wgate.weight".
+                                # We fuse them into the model param ".wkv_gate.weight".
+                                is_kv = name.endswith(".compressor.wkv.weight")
+                                is_wgate = name.endswith(".compressor.wgate.weight")
                                 assert is_kv != is_wgate
+
                                 key = name.rsplit(".", 2)[0]
                                 assert key.endswith(".compressor")
+                                param_name = key + ".wkv_gate.weight"
+
+                                # Lenient mode: if the instantiated model does not have
+                                # compressor for this block (or param name mismatch),
+                                # skip the checkpoint weights and warn.
+                                if param_name not in params_dict:
+                                    if key not in skipped_compressor_keys:
+                                        logger.warning(
+                                            "Skipping checkpoint weights for %s because %s is not in params_dict.",
+                                            key,
+                                            param_name,
+                                        )
+                                        skipped_compressor_keys.add(key)
+                                    continue
+
                                 if key not in cache_compressor_weight:
-                                    cache_compressor_weight[key] = (
-                                        is_kv,
-                                        loaded_weight,
-                                    )
+                                    cache_compressor_weight[key] = (is_kv, loaded_weight)
                                 else:
-                                    assert key in cache_compressor_weight
-                                    cached_is_kv, cached_weight = (
-                                        cache_compressor_weight[key]
-                                    )
-                                    assert cached_is_kv != is_kv
+                                    cached_is_kv, cached_weight = cache_compressor_weight[
+                                        key
+                                    ]
+                                    # Lenient mode: if the other shard is missing or duplicated,
+                                    # warn and drop the cache entry.
+                                    if cached_is_kv == is_kv:
+                                        logger.warning(
+                                            "Duplicate compressor shard for %s (is_kv=%s); skipping.",
+                                            key,
+                                            is_kv,
+                                        )
+                                        cache_compressor_weight.pop(key, None)
+                                        continue
+
                                     kv = loaded_weight if is_kv else cached_weight
                                     wgate = loaded_weight if is_wgate else cached_weight
                                     fused_weight = torch.cat([kv, wgate], dim=0)
-                                    param_name = key + ".wkv_gate.weight"
+
                                     param = params_dict[param_name]
                                     weight_loader = auto_weight_loader(param)
                                     maybe_executor_submit(
@@ -1848,7 +1877,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                                         func_args=(param, fused_weight),
                                     )
                                     loaded_params.add(param_name)
-                                    cache_compressor_weight.pop(key)
+                                    cache_compressor_weight.pop(key, None)
                             elif fuse_wqa_wkv and (
                                 name.endswith(".wq_a.weight")
                                 or name.endswith(".wq_a.weight_scale_inv")
@@ -1914,7 +1943,15 @@ class DeepseekV4ForCausalLM(nn.Module):
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
-        assert len(cache_compressor_weight) == 0
+        # Lenient mode: do not crash if the checkpoint only contains one of
+        # (.wkv.weight, .wgate.weight) for a compressor block.
+        if cache_compressor_weight:
+            logger.warning(
+                "Skipping %d unmatched compressor shard(s): %s",
+                len(cache_compressor_weight),
+                list(cache_compressor_weight.keys()),
+            )
+            cache_compressor_weight.clear()
         assert len(cache_wqkv_a_weight) == 0, cache_wqkv_a_weight.keys()
         unloaded_params = params_dict.keys() - loaded_params
 
