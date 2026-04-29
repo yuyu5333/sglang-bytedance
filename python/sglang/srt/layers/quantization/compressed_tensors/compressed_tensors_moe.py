@@ -176,7 +176,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 )
         elif quant_config._is_w4afp8(weight_quant, input_quant):
             logger.info_once("Using CompressedTensorsW4AFP8MoE")
-            return CompressedTensorsW4AFP8MoE(weight_quant, input_quant)
+            return CompressedTensorsW4AFP8MoE(quant_config, weight_quant, input_quant)
         elif quant_config._is_dynamic_token_w4a8(weight_quant, input_quant):
             if _is_npu:
                 logger.info_once("Using NPUCompressedTensorsW4A8Int8DynamicMoEMethod")

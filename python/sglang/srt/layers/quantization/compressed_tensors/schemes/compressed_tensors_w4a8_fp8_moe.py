@@ -1,8 +1,8 @@
-"""W4AFP8 MoE scheme: INT4 group-quantized weights + FP8 dynamic activations.
+"""W4AFP8 MoE scheme: INT4 group-quantized weights + 8-bit dynamic activations.
 
 Loads INT4 weights from compressed-tensors pack-quantized format,
 converts to CUTLASS W4A8 layout, and runs CUTLASS grouped GEMM
-with dynamic FP8 activation quantization.
+with dynamic 8-bit (FP8 or INT8) activation quantization.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _unpack_repack_int32_to_cutlass_int8(
 
 
 class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
-    """W4AFP8 MoE: INT4 weights (pack-quantized) + dynamic per-token FP8 activations,
+    """W4AFP8 MoE: INT4 weights (pack-quantized) + dynamic per-token 8-bit activations,
     using CUTLASS W4A8 grouped GEMM kernel."""
 
     def __init__(
