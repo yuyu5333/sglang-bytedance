@@ -140,7 +140,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             and weight_quant.num_bits == 4
             and weight_type == "int"
             and input_quant.num_bits == 8
-            and input_type == "float"
+            and input_type in ["float", "int"]
             and input_quant.dynamic
         )
 
