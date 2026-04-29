@@ -721,7 +721,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
         elif self._is_w4afp8(weight_quant, input_quant):
             logger.info_once("Using CompressedTensorsW4A8MoE")
-            return CompressedTensorsW4AFP8MoE(self, weight_quant, input_quant)
+            return CompressedTensorsW4AFP8MoE(weight_quant, input_quant)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
