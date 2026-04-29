@@ -185,6 +185,33 @@ def _is_compressed_tensors_w4a16(config_file: str) -> bool:
     return False
 
 
+def _is_compressed_tensors_w4afp8(config_file: str) -> bool:
+    """Return True if the checkpoint's config.json declares a compressed-tensors
+    W4AFP8 quantization (int4 weights, int8 or fp8 input-activation quant)."""
+    try:
+        with open(config_file, "r") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    qc = cfg.get("quantization_config") or {}
+    if qc.get("quant_method") != "compressed-tensors":
+        return False
+    if qc.get("format") != "pack-quantized":
+        return False
+    for group in (qc.get("config_groups") or {}).values():
+        weights = group.get("weights") or {}
+        input_act = group.get("input_activations") or {}
+        if (
+            weights.get("num_bits") == 4
+            and weights.get("type") == "int"
+            and input_act.get("num_bits") == 8
+            and input_act.get("type") in ["float", "int"]
+            and input_act.get("dynamic") is True
+        ):
+            return True
+    return False
+
+
 def _load_deepseek_temp_model(
     model_path: str,
     model_type: Literal["deepseek_v32", "deepseek_ref"],
@@ -226,15 +253,15 @@ def _load_deepseek_temp_model(
                 f"SGLANG_APPLY_CONFIG_BACKUP={backup_mode!r} is not recognized; "
                 f"use 'none' (off), 'small', 'large', or 'auto'."
             )
-        # Skip backup when checkpoint is already compressed-tensors W4A16:
+        # Skip backup when checkpoint is already compressed-tensors W4A16 or W4AFP8:
         # its config.json is the source of truth for quant params.
         real_config_file = os.path.join(local_path, "config.json")
-        if os.path.exists(real_config_file) and _is_compressed_tensors_w4a16(
-            real_config_file
-        ):
+        is_w4a16 = _is_compressed_tensors_w4a16(real_config_file)
+        is_w4afp8 = _is_compressed_tensors_w4afp8(real_config_file)
+        if os.path.exists(real_config_file) and (is_w4a16 or is_w4afp8):
             logger.warning(
                 f"SGLANG_APPLY_CONFIG_BACKUP={backup_mode}: detected compressed-tensors "
-                f"W4A16 in {real_config_file}; keeping checkpoint config."
+                f"{'W4A16' if is_w4a16 else 'W4AFP8'} in {real_config_file}; keeping checkpoint config."
             )
             config_file = real_config_file
         else:

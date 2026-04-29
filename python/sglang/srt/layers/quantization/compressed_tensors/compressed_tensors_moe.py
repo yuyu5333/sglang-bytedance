@@ -19,6 +19,10 @@ from sglang.srt.distributed import (
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
+from sglang.srt.layers.quantization.compressed_tensors.schemes import (
+    CompressedTensorsW4AFP8MoE,
+)
+
 from sglang.srt.hardware_backend.npu.quantization.fused_moe_method_npu import (
     NPUW4A8Int8DynamicMoEMethod,
     NPUW4A16Int4DynamicMoEMethod,
@@ -170,6 +174,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 raise NotImplementedError(
                     f"The W8A8Int8 Fused MoE scheme is implemented only for NPU for now."
                 )
+        elif quant_config._is_w4afp8(weight_quant, input_quant):
+            logger.info_once("Using CompressedTensorsW4AFP8MoE")
+            return CompressedTensorsW4AFP8MoE(quant_config, weight_quant, input_quant)
         elif quant_config._is_dynamic_token_w4a8(weight_quant, input_quant):
             if _is_npu:
                 logger.info_once("Using NPUCompressedTensorsW4A8Int8DynamicMoEMethod")
