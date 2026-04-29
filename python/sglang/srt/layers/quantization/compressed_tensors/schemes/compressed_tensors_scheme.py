@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from sglang.srt.layers.moe import MoeRunnerConfig
 from sglang.srt.layers.quantization.base_scheme import BaseMoEScheme
 
 import torch
