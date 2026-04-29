@@ -272,6 +272,14 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             (num_experts, 3), dtype=torch.int32, device=device
         )
 
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output: StandardDispatchOutput,
+    ) -> CombineInput:
+        """Run the forward pass for W4AFP8 MoE."""
+        return self.apply_weights(layer, dispatch_output)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
