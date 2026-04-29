@@ -367,7 +367,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     def _is_w4afp8(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
-        """Detect W4AFP8: INT4 weights + FP8 dynamic per-token activations."""
+        """Detect W4AFP8: INT4 weights + 8-bit dynamic per-token activations."""
         if weight_quant is None or input_quant is None:
             return False
         return (
@@ -376,7 +376,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             and weight_quant.symmetric
             and not weight_quant.dynamic
             and input_quant.num_bits == 8
-            and input_quant.type == QuantizationType.FLOAT
+            and input_quant.type in [QuantizationType.FLOAT, QuantizationType.INT]
             and input_quant.dynamic  # currently not support static input scales
         )
 
@@ -720,7 +720,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     f"The W8A8Int8 Fused MoE scheme is implemented only for NPU for now."
                 )
         elif self._is_w4afp8(weight_quant, input_quant):
-            logger.info_once("Using CompressedTensorsW4AFP8MoE")
+            logger.info_once("Using CompressedTensorsW4A8MoE")
             return CompressedTensorsW4AFP8MoE(self, weight_quant, input_quant)
         else:
             raise RuntimeError(
