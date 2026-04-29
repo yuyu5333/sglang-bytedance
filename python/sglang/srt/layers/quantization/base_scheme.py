@@ -1,35 +1,37 @@
-# Adapted from https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/layers/quantization/compressed_tensors
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Optional
-
-from sglang.srt.layers.quantization.base_scheme import BaseMoEScheme
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-__all__ = ["CompressedTensorsScheme", "CompressedTensorsMoEScheme"]
+from sglang.srt.layers.moe import MoeRunnerConfig
+
+if TYPE_CHECKING:
+    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+
+__all__ = ["BaseLinearScheme", "BaseMoEScheme"]
 
 
-class CompressedTensorsScheme(ABC):
+class BaseLinearScheme(ABC):
     """
     Abstract class used to describe the weight creation and forward pass
-    of different quantization schemes supported by CompressedTensors.
+    of different quantization schemes.
     """
-
-    @classmethod
-    @abstractmethod
-    def get_min_capability(cls) -> int:
-        """
-        Get minimum device capability.
-        """
-        raise NotImplementedError
 
     @abstractmethod
     def create_weights(self, *args, **kwargs):
         """
         Weight creation for the particular scheme. Inputs to this function
 
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        """
+        Called after weight loading is complete for any cleanup that
+        needs to occur.
         """
         raise NotImplementedError
 
@@ -49,26 +51,12 @@ class CompressedTensorsScheme(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module):
-        """
-        Called after weight loading is complete for any cleanup that
-        needs to occur.
-        """
-        raise NotImplementedError
 
-class CompressedTensorsMoEScheme(BaseMoEScheme):
+class BaseMoEScheme(ABC):
     """
     Abstract class used to describe the weight creation and forward pass
-    of different quantization schemes supported by CompressedTensors.
+    of different quantization schemes.
     """
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        """
-        Get minimum device capability.
-        """
-        raise NotImplementedError
 
     @abstractmethod
     def create_weights(self, *args, **kwargs):
