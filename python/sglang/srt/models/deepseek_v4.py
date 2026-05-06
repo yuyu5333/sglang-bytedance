@@ -1527,6 +1527,13 @@ class DeepseekV4ForCausalLM(nn.Module):
     def remap_weight_name_to_dpsk_hf_format(
         name: str, is_nextn: bool = False, num_hidden_layers: Optional[int] = None
     ) -> str:
+        # DEBUG: 记录原始名字，便于追踪 layer 0 / layer 2 的 compressor 映射
+        _orig_name = name
+        _is_debug_target = (
+            ("layers.0." in name or "layers.2." in name)
+            and ("compressor" in name or ".attn." in name or ".ffn." in name)
+        ) or ("compressor" in name)
+
         if name == "embed.weight":
             return "model.embed_tokens.weight"
         if name == "head.weight":
@@ -1566,26 +1573,64 @@ class DeepseekV4ForCausalLM(nn.Module):
 
         if name.startswith("layers."):
             name = "model." + name
+        if _is_debug_target:
+            logger.debug(
+                f"[_map_name step=add_model_prefix] {_orig_name!r} -> {name!r}"
+            )
+        _before = name
         name = name.replace(".attn.", ".self_attn.")
+        if _is_debug_target and _before != name:
+            logger.debug(
+                f"[_map_name step=.attn.->.self_attn.] {_before!r} -> {name!r}"
+            )
+        _before = name
         name = name.replace(".ffn.", ".mlp.")
+        if _is_debug_target and _before != name:
+            logger.debug(
+                f"[_map_name step=.ffn.->.mlp.] {_before!r} -> {name!r}"
+            )
+        _before = name
         name = name.replace(".attn_norm.", ".input_layernorm.")
+        if _is_debug_target and _before != name:
+            logger.debug(
+                f"[_map_name step=.attn_norm.->.input_layernorm.] {_before!r} -> {name!r}"
+            )
+        _before = name
         name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
+        if _is_debug_target and _before != name:
+            logger.debug(
+                f"[_map_name step=.ffn_norm.->.post_attention_layernorm.] {_before!r} -> {name!r}"
+            )
 
         if not ATTN_BIT_WISE_EQUAL_MODE:
             if "self_attn" in name and (
                 "compressor" not in name or not COMPRESSOR_BIT_WISE_EQUAL_MODE
             ):
+                _before = name
                 name = name.replace(".scale", ".weight_scale_inv")
+                if _is_debug_target and _before != name:
+                    logger.debug(
+                        f"[_map_name step=self_attn.scale->weight_scale_inv] {_before!r} -> {name!r}"
+                    )
 
         if not MOE_BIT_WISE_EQUAL_MODE:
             name = name.replace(".gate.tid2eid", ".topk.tid2eid")
             name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
+            _before = name
             name = name.replace(".w1.", ".gate_proj.")
             name = name.replace(".w2.", ".down_proj.")
             name = name.replace(".w3.", ".up_proj.")
+            if _is_debug_target and _before != name:
+                logger.debug(
+                    f"[_map_name step=w1/w2/w3->gate_proj/down_proj/up_proj] {_before!r} -> {name!r}"
+                )
             if "mlp" in name:
                 name = name.replace(".scale", ".weight_scale_inv")
 
+        if _is_debug_target:
+            logger.debug(
+                f"[_map_name FINAL] orig={_orig_name!r} -> mapped={name!r}"
+            )
         return name
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
@@ -1820,14 +1865,35 @@ class DeepseekV4ForCausalLM(nn.Module):
                             elif COMPRESSOR_PART in name:
                                 is_kv = name.endswith(".wkv.weight")
                                 is_wgate = name.endswith(".wgate.weight")
+                                # DEBUG: 打印进入 compressor 融合分支的权重
+                                _is_layer_02 = (
+                                    ".layers.0." in name or ".layers.2." in name
+                                )
+                                if _is_layer_02 or "indexer.compressor" in name:
+                                    logger.debug(
+                                        f"[compressor ENTER] name={name!r} "
+                                        f"is_kv={is_kv} is_wgate={is_wgate} "
+                                        f"shape={tuple(loaded_weight.shape)}"
+                                    )
                                 assert is_kv != is_wgate
                                 key = name.rsplit(".", 2)[0]
+                                if _is_layer_02 or "indexer.compressor" in name:
+                                    logger.debug(
+                                        f"[compressor KEY] name={name!r} -> key={key!r} "
+                                        f"endswith('.compressor')={key.endswith('.compressor')}"
+                                    )
                                 assert key.endswith(".compressor")
                                 if key not in cache_compressor_weight:
                                     cache_compressor_weight[key] = (
                                         is_kv,
                                         loaded_weight,
                                     )
+                                    if _is_layer_02 or "indexer.compressor" in name:
+                                        logger.debug(
+                                            f"[compressor CACHE_PUT] key={key!r} "
+                                            f"first_piece_is_kv={is_kv} "
+                                            f"cache_size={len(cache_compressor_weight)}"
+                                        )
                                 else:
                                     assert key in cache_compressor_weight
                                     cached_is_kv, cached_weight = (
@@ -1838,6 +1904,32 @@ class DeepseekV4ForCausalLM(nn.Module):
                                     wgate = loaded_weight if is_wgate else cached_weight
                                     fused_weight = torch.cat([kv, wgate], dim=0)
                                     param_name = key + ".wkv_gate.weight"
+                                    if _is_layer_02 or "indexer.compressor" in name:
+                                        logger.debug(
+                                            f"[compressor FUSE] key={key!r} "
+                                            f"param_name={param_name!r} "
+                                            f"kv_shape={tuple(kv.shape)} "
+                                            f"wgate_shape={tuple(wgate.shape)} "
+                                            f"fused_shape={tuple(fused_weight.shape)} "
+                                            f"in_params_dict={param_name in params_dict}"
+                                        )
+                                    if param_name not in params_dict:
+                                        logger.warning(
+                                            f"[compressor FUSE MISS] param_name={param_name!r} "
+                                            f"NOT in params_dict; "
+                                            f"available compressor params: "
+                                            + str(
+                                                [
+                                                    p
+                                                    for p in params_dict.keys()
+                                                    if "compressor" in p
+                                                    and (
+                                                        ".layers.0." in p
+                                                        or ".layers.2." in p
+                                                    )
+                                                ]
+                                            )
+                                        )
                                     param = params_dict[param_name]
                                     weight_loader = auto_weight_loader(param)
                                     maybe_executor_submit(
@@ -1895,6 +1987,16 @@ class DeepseekV4ForCausalLM(nn.Module):
                                         logger.warning(
                                             f"{name} not found in params_dict."
                                         )
+                                    # DEBUG: layer 0 / 2 的权重被丢弃时，补打一条更醒目的日志
+                                    if (
+                                        ".layers.0." in name
+                                        or ".layers.2." in name
+                                        or "compressor" in name
+                                    ):
+                                        logger.warning(
+                                            f"[DROP layer0/2/compressor] name={name!r} "
+                                            f"NOT in params_dict -> skipped"
+                                        )
                                     continue
                                 param = params_dict[name]
 
@@ -1914,6 +2016,18 @@ class DeepseekV4ForCausalLM(nn.Module):
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
+        # DEBUG: 检查 compressor 融合缓存是否仍有残留（说明有 wkv/wgate 没配对成功）
+        if len(cache_compressor_weight) > 0:
+            logger.warning(
+                f"[compressor CACHE RESIDUAL] {len(cache_compressor_weight)} "
+                f"entries never paired: "
+                + str(
+                    [
+                        (k, v[0])  # (key, first_piece_was_kv)
+                        for k, v in cache_compressor_weight.items()
+                    ]
+                )
+            )
         assert len(cache_compressor_weight) == 0
         assert len(cache_wqkv_a_weight) == 0, cache_wqkv_a_weight.keys()
         unloaded_params = params_dict.keys() - loaded_params
@@ -1950,6 +2064,30 @@ class DeepseekV4ForCausalLM(nn.Module):
         }
         if os.environ.get("SGLANG_SKIP_CHECKPOINT_LOAD_CHECK", "0") == "0":
             if unloaded_params:
+                # DEBUG: 报错前 dump params_dict 里 layer 0 / layer 2 相关的 compressor + attention
+                # 参数名，方便和 checkpoint 做比对
+                _related_params = sorted(
+                    [
+                        p
+                        for p in params_dict.keys()
+                        if (".layers.0." in p or ".layers.2." in p)
+                        and (
+                            "compressor" in p
+                            or "self_attn" in p
+                            or "mlp" in p
+                            or "layernorm" in p
+                            or "hc_" in p
+                        )
+                    ]
+                )
+                logger.error(
+                    "[UNLOADED DEBUG] layer 0/2 related params registered in model:\n"
+                    + "\n".join(_related_params)
+                )
+                logger.error(
+                    "[UNLOADED DEBUG] unloaded params (sorted):\n"
+                    + "\n".join(sorted(unloaded_params))
+                )
                 raise RuntimeError(
                     f"Some weights are not initialized from checkpoints: {unloaded_params}"
                 )
