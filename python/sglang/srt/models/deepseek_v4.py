@@ -1730,7 +1730,17 @@ class DeepseekV4ForCausalLM(nn.Module):
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
             weight_names = []
+            # DEBUG: 统计迭代器实际产出的源权重数量 + layer 0/2/15 的命中情况
+            _iter_count = 0
+            _layer_hit_count = {0: 0, 2: 0, 15: 0}
+            _raw_names_head = []
             for name, loaded_weight in weights:
+                _iter_count += 1
+                if _iter_count <= 5:
+                    _raw_names_head.append(name)
+                for _lid in (0, 2, 15):
+                    if f"layers.{_lid}." in name:
+                        _layer_hit_count[_lid] += 1
                 try:
                     use_async_loading = should_async_load(loaded_weight)
 
@@ -2016,6 +2026,14 @@ class DeepseekV4ForCausalLM(nn.Module):
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
+        # DEBUG: 检查迭代器是否真的产出了所有层的权重
+        logger.error(
+            f"[ITER STATS] total_iter={_iter_count} "
+            f"layer0_hits={_layer_hit_count[0]} "
+            f"layer2_hits={_layer_hit_count[2]} "
+            f"layer15_hits={_layer_hit_count[15]} "
+            f"first5_raw_names={_raw_names_head}"
+        )
         # DEBUG: 检查 compressor 融合缓存是否仍有残留（说明有 wkv/wgate 没配对成功）
         if len(cache_compressor_weight) > 0:
             logger.warning(
