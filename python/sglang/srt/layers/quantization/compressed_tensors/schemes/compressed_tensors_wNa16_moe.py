@@ -340,6 +340,31 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
         )
         replace_tensor("w2_weight_scale", marlin_w2_scales)
 
+        # [DEBUG] 确认 process_weights_after_loading 结束后，
+        # 相关权重/scale 张量是否 contiguous。
+        for _dbg_name in (
+            "w13_weight_packed",
+            "w2_weight_packed",
+            "w13_weight_scale",
+            "w2_weight_scale",
+        ):
+            _dbg_attr = getattr(layer, _dbg_name, None)
+            if _dbg_attr is None:
+                continue
+            logger.warning(
+                "[marlin-moe-debug][post_load] layer=%s name=%s type=%s "
+                "shape=%s stride=%s is_contiguous=%s data_is_contiguous=%s "
+                "data_ptr_eq=%s",
+                id(layer),
+                _dbg_name,
+                type(_dbg_attr).__name__,
+                tuple(_dbg_attr.shape),
+                tuple(_dbg_attr.stride()),
+                _dbg_attr.is_contiguous(),
+                _dbg_attr.data.is_contiguous(),
+                _dbg_attr.data_ptr() == _dbg_attr.data.data_ptr(),
+            )
+
         layer.is_marlin_converted = True
 
     def restore_weights_before_loading(self, layer: torch.nn.Module):
@@ -389,6 +414,31 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
             expert_map = layer.dispatcher.local_expert_mapping
             if expert_map is not None:
                 global_num_experts = self.moe_runner_config.num_experts
+
+        # [DEBUG] 在调用 fused_marlin_moe 之前，确认传入的权重/scale 是否 contiguous。
+        # 每个 layer 实例仅打印一次，避免刷屏。
+        if not getattr(layer, "_marlin_apply_dbg_printed", False):
+            for _dbg_name in (
+                "w13_weight_packed",
+                "w2_weight_packed",
+                "w13_weight_scale",
+                "w2_weight_scale",
+            ):
+                _dbg_attr = getattr(layer, _dbg_name, None)
+                if _dbg_attr is None:
+                    continue
+                logger.warning(
+                    "[marlin-moe-debug][apply] layer=%s name=%s type=%s "
+                    "shape=%s stride=%s is_contiguous=%s data_is_contiguous=%s",
+                    id(layer),
+                    _dbg_name,
+                    type(_dbg_attr).__name__,
+                    tuple(_dbg_attr.shape),
+                    tuple(_dbg_attr.stride()),
+                    _dbg_attr.is_contiguous(),
+                    _dbg_attr.data.is_contiguous(),
+                )
+            layer._marlin_apply_dbg_printed = True
 
         output = fused_marlin_moe(
             x,
