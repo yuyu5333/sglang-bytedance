@@ -252,6 +252,12 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
             # the same buffer is reused
             target_attr.resize_(new_t.shape)
             target_attr.copy_(new_t)
+            # 修复：resize_ 在 shape 未变时不会重置 strides；若原 storage
+            # 因 weight loader 的 is_transposed 路径而处于非 contiguous 布局，
+            # 这里必须强制刷成 contiguous，否则后续 marlin kernel 会在
+            # RuntimeCheck(b_scales.is_contiguous()) 处失败。
+            if not target_attr.is_contiguous():
+                target_attr.data = target_attr.data.contiguous()
             del new_t
 
         num_experts = layer.w13_weight_g_idx.shape[0]
