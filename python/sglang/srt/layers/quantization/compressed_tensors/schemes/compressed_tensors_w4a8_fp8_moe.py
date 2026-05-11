@@ -33,6 +33,18 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["CompressedTensorsW4AFP8MoE"]
 
+# CUTLASS W4A8 grouped GEMM requires K to be a multiple of GroupSize (=128).
+# When per-rank intermediate_size is not a multiple of this (e.g. TP=16 on a
+# model with intermediate=3072 gives 192), we pad both w2 weight/scale and the
+# runtime intermediate buffer along the K dim of the 2nd GEMM up to the next
+# multiple. The padded weight/scale slots are zero-filled so they contribute
+# nothing to the GEMM output.
+_W4A8_K_PAD_ALIGN = 128
+
+
+def _ceil_to_multiple(x: int, align: int) -> int:
+    return ((x + align - 1) // align) * align
+
 
 def _unpack_repack_int32_to_cutlass_int8(
     weight_packed: torch.Tensor, num_bits: int
@@ -112,6 +124,17 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
 
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
 
+        # Compute padded intermediate size for the 2nd GEMM. CUTLASS W4A8
+        # requires K of the 2nd GEMM (== per-rank intermediate) to be a multiple
+        # of _W4A8_K_PAD_ALIGN (=GroupSize). Checkpoint tensors are still
+        # allocated with the original (unpadded) shape, padding is applied in
+        # process_weights_after_loading after the cutlass-layout conversion.
+        intermediate_size_padded = _ceil_to_multiple(
+            intermediate_size_per_partition, _W4A8_K_PAD_ALIGN
+        )
+        layer.w4a8_intermediate_size_orig = intermediate_size_per_partition
+        layer.w4a8_intermediate_size_padded = intermediate_size_padded
+
         # Weights in checkpoint (non-transposed) layout: [E, N, K // pack_factor]
         # This matches the pack-quantized checkpoint format directly.
         w13_weight = torch.nn.Parameter(
@@ -185,7 +208,7 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         self._init_cutlass_buffers(
             num_experts,
             hidden_size,
-            intermediate_size_per_partition,
+            intermediate_size_padded,
             layer.w13_weight_packed.device,
         )
 
@@ -226,6 +249,41 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         w2_weight_scale = layer.w2_weight_scale.to(dtype)
         w2_weight_scale = interleave_scales(w2_weight_scale)
         layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale, requires_grad=False)
+
+        # Pad w2 along the K dim of the 2nd GEMM (== per-rank intermediate)
+        # up to a multiple of GroupSize, if needed. Both packed weights and
+        # interleaved scales are padded with zeros so the padded K columns
+        # contribute exactly 0 to the GEMM output.
+        n_orig = getattr(layer, "w4a8_intermediate_size_orig", None)
+        n_padded = getattr(layer, "w4a8_intermediate_size_padded", None)
+        if n_orig is not None and n_padded is not None and n_padded > n_orig:
+            # w2_weight_packed is in CUTLASS int8 layout: [E, K_hidden, N//2]
+            # Pad the last (packed) dim from n_orig//2 to n_padded//2.
+            pad_packed = (n_padded - n_orig) // 2
+            w2_packed = layer.w2_weight_packed.data
+            w2_packed_padded = torch.nn.functional.pad(
+                w2_packed, (0, pad_packed), mode="constant", value=0
+            )
+            layer.w2_weight_packed = torch.nn.Parameter(
+                w2_packed_padded.contiguous(), requires_grad=False
+            )
+
+            # w2_weight_scale after interleave_scales has layout
+            # [E, num_groups (=N//group_size), K_hidden * alignment].
+            # Pad the middle dim from n_orig//gs to n_padded//gs with zeros.
+            pad_groups = (n_padded - n_orig) // self.group_size
+            w2_scale_t = layer.w2_weight_scale.data
+            assert w2_scale_t.dim() == 3, (
+                f"w2_weight_scale must be 3D after interleave_scales, "
+                f"got shape {tuple(w2_scale_t.shape)}"
+            )
+            # F.pad operates from the last dim backwards: (lastL, lastR, midL, midR)
+            w2_scale_padded = torch.nn.functional.pad(
+                w2_scale_t, (0, 0, 0, pad_groups), mode="constant", value=0
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                w2_scale_padded.contiguous(), requires_grad=False
+            )
 
         layer.is_w4afp8_converted = True
 
@@ -319,5 +377,8 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             layer.a13_scale,
             layer.a2_scale,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
+            intermediate_size_per_partition=getattr(
+                layer, "w4a8_intermediate_size_orig", None
+            ),
         )
         return StandardCombineInput(hidden_states=output)

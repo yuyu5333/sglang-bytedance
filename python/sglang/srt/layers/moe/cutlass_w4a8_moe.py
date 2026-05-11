@@ -58,6 +58,7 @@ def cutlass_w4a8_moe(
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
     routed_scaling_factor: float = 1.0,
+    intermediate_size_per_partition: Optional[int] = None,
 ) -> torch.Tensor:
     """
     This function computes a w4a8-quantized Mixture of Experts (MoE) layer
@@ -115,7 +116,21 @@ def cutlass_w4a8_moe(
     num_local_experts = w1_q.size(0)
     m = a.size(0)
     k = w1_q.size(2) * 2  # w1_q is transposed and packed
-    n = w2_q.size(2) * 2  # w2_q is transposed and packed
+    # n_padded is the K dim of the 2nd GEMM as expected by the kernel.
+    # w2_q on disk may already be padded by process_weights_after_loading
+    # (when per-rank intermediate is not a multiple of GroupSize=128).
+    n_padded = w2_q.size(2) * 2
+    # n is the logical (unpadded) intermediate size used by all upstream ops
+    # (1st GEMM output width, silu_mul, problem_sizes2 K dim before override).
+    if intermediate_size_per_partition is None:
+        n = n_padded
+    else:
+        assert intermediate_size_per_partition <= n_padded, (
+            f"intermediate_size_per_partition={intermediate_size_per_partition} "
+            f"exceeds w2_q-derived n_padded={n_padded}"
+        )
+        n = intermediate_size_per_partition
+    needs_k_pad = n_padded != n
     topk = topk_ids.size(1)
 
     if apply_router_weight_on_input:
@@ -202,63 +217,20 @@ def cutlass_w4a8_moe(
             c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
         )
 
-    # ===== DEBUG LOG: dump the full state going into the 2nd cutlass_w4a8_moe_mm =====
-    import os as _os
-    if _os.environ.get("SGLANG_DEBUG_W4A8_MOE", "0") == "1":
-        import torch.distributed as _dist
-        _rank = _dist.get_rank() if _dist.is_initialized() else -1
-        # force sync so any prior CUDA error surfaces here, not inside the GEMM
-        torch.cuda.synchronize()
-        try:
-            _eo_cpu = expert_offsets.detach().cpu().tolist()
-        except Exception as _e:
-            _eo_cpu = f"<failed to fetch: {_e}>"
-        try:
-            _ps2_cpu = problem_sizes2.detach().cpu().tolist()
-        except Exception as _e:
-            _ps2_cpu = f"<failed to fetch: {_e}>"
-        try:
-            _a2s_cpu = a2_scale.detach().float().cpu().tolist()
-        except Exception as _e:
-            _a2s_cpu = f"<failed to fetch: {_e}>"
-        print(
-            f"[W4A8-DEBUG rank={_rank}] BEFORE 2nd cutlass_w4a8_moe_mm (cutlass_w4a8_moe)\n"
-            f"  m={m} topk={topk} n={n} k={k} num_local_experts={num_local_experts}\n"
-            f"  c2:           shape={tuple(c2.shape)}, dtype={c2.dtype}, device={c2.device}, "
-            f"contig={c2.is_contiguous()}, stride={c2.stride()}\n"
-            f"  intermediate_q: shape={tuple(intermediate_q.shape)}, dtype={intermediate_q.dtype}, "
-            f"device={intermediate_q.device}, contig={intermediate_q.is_contiguous()}, "
-            f"stride={intermediate_q.stride()}\n"
-            f"  w2_q:         shape={tuple(w2_q.shape)}, dtype={w2_q.dtype}, device={w2_q.device}, "
-            f"stride={w2_q.stride()}\n"
-            f"  w2_scale:     shape={tuple(w2_scale.shape)}, dtype={w2_scale.dtype}, "
-            f"device={w2_scale.device}, stride={w2_scale.stride()}\n"
-            f"  a2_scale:     shape={tuple(a2_scale.shape)}, dtype={a2_scale.dtype}, "
-            f"device={a2_scale.device}, val={_a2s_cpu}\n"
-            f"  expert_offsets[:-1]: shape={tuple(expert_offsets[:-1].shape)}, "
-            f"dtype={expert_offsets.dtype}, full={_eo_cpu}\n"
-            f"  problem_sizes2: shape={tuple(problem_sizes2.shape)}, "
-            f"dtype={problem_sizes2.dtype}, val={_ps2_cpu}\n"
-            f"  a_strides2[0]={a_strides2[0].tolist() if a_strides2.numel() else a_strides2}, "
-            f"b_strides2[0]={b_strides2[0].tolist() if b_strides2.numel() else b_strides2}, "
-            f"c_strides2[0]={c_strides2[0].tolist() if c_strides2.numel() else c_strides2}, "
-            f"s_strides2[0]={s_strides2[0].tolist() if s_strides2.numel() else s_strides2}",
-            flush=True,
+    # If per-rank intermediate (n) is not a multiple of CUTLASS GroupSize, the
+    # 2nd GEMM's K dim has been padded up at weight load time. We mirror that
+    # padding on the runtime `intermediate_q` buffer and on `problem_sizes2`'s
+    # K column. The padded region is zeroed so it contributes nothing to the
+    # GEMM output (paired with zero-padded w2_scale columns).
+    if needs_k_pad:
+        intermediate_q_padded = torch.zeros(
+            (m * topk, n_padded), dtype=torch.float8_e4m3fn, device=device
         )
-        # quick sanity: NaN/inf in intermediate_q (cast to bf16; float8 has no isnan op)
-        try:
-            _iq_bf16 = intermediate_q.to(torch.bfloat16)
-            print(
-                f"[W4A8-DEBUG rank={_rank}] intermediate_q stats(bf16cast): "
-                f"min={_iq_bf16.min().item()}, max={_iq_bf16.max().item()}, "
-                f"any_nan={torch.isnan(_iq_bf16).any().item()}, "
-                f"any_inf={torch.isinf(_iq_bf16).any().item()}",
-                flush=True,
-            )
-        except Exception as _e:
-            print(f"[W4A8-DEBUG rank={_rank}] intermediate_q stats failed: {_e}", flush=True)
-        torch.cuda.synchronize()
-    # ===== END DEBUG LOG =====
+        intermediate_q_padded[:, :n].copy_(intermediate_q)
+        intermediate_q = intermediate_q_padded
+        # problem_sizes2 layout (per expert): [N_gemm=hidden, M_i, K_gemm=n].
+        # Override K column to n_padded; M column is per-expert and must stay.
+        problem_sizes2[:, 2].fill_(n_padded)
 
     cutlass_w4a8_moe_mm(
         c2,
