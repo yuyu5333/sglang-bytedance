@@ -285,14 +285,20 @@ class TestUnpackRepackInt32ToCutlassInt8(unittest.TestCase):
         k = 128
         group_size = 128
 
-        weight_int4 = torch.randint(-8, 7, (n, k), dtype=torch.int8)
+        # 包含全部 signed int4 边界值 [-8, 7]
+        weight_int4 = torch.randint(-8, 8, (n, k), dtype=torch.int8)
 
+        # compressed-tensors `pack_to_int32` 采用 unsigned-offset 编码：
+        # 存储前将每个 signed int4 值加上 zero-point=8，得到 [0, 15] 的 nibble。
+        # 这与 `_unpack_repack_int32_to_cutlass_int8` 中 `- offset` 的解码互逆。
         pack_factor = 8
+        offset = 1 << (4 - 1)  # = 8
+        mask = (1 << 4) - 1  # = 0x0F
         packed_int32 = torch.zeros(n, k // pack_factor, dtype=torch.int32)
         for col in range(k):
             group = col // pack_factor
             shift = (col % pack_factor) * 4
-            val = weight_int4[:, col].to(torch.int32) & 0x0F
+            val = (weight_int4[:, col].to(torch.int32) + offset) & mask
             packed_int32[:, group] |= val << shift
 
         result = _unpack_repack_int32_to_cutlass_int8(packed_int32, num_bits=4)
@@ -362,7 +368,13 @@ class TestIsW4AFP8Dispatch(unittest.TestCase):
         )
 
     def test_detects_valid_w4afp8(self):
-        config = SimpleNamespace(quant_format="pack-quantized")
+        # `_is_w4afp8` 是实例方法，签名为 (self, weight_quant, input_quant)。
+        # 当前实现不依赖 self 的任何属性，但仍需用实例调用以避免 self 被错位成
+        # 第一个业务参数。这里用 SimpleNamespace 作为"类实例"的轻量替身：
+        # 通过 `__get__` 绑定把函数转成 bound method。
+        fake_self = SimpleNamespace()
+        is_w4afp8 = self.ConfigCls._is_w4afp8.__get__(fake_self)
+
         weight_quant = self._make_quant_args(
             num_bits=4, qtype=self.QType.INT, symmetric=True, dynamic=False
         )
@@ -370,12 +382,12 @@ class TestIsW4AFP8Dispatch(unittest.TestCase):
             num_bits=8, qtype=self.QType.FLOAT, symmetric=True, dynamic=True
         )
 
-        self.assertTrue(
-            self.ConfigCls._is_w4afp8(config, weight_quant, input_quant)
-        )
+        self.assertTrue(is_w4afp8(weight_quant, input_quant))
 
     def test_rejects_non_int_weight(self):
-        config = SimpleNamespace(quant_format="pack-quantized")
+        fake_self = SimpleNamespace()
+        is_w4afp8 = self.ConfigCls._is_w4afp8.__get__(fake_self)
+
         weight_quant = self._make_quant_args(
             num_bits=4, qtype=self.QType.FLOAT, symmetric=True, dynamic=False
         )
@@ -383,12 +395,12 @@ class TestIsW4AFP8Dispatch(unittest.TestCase):
             num_bits=8, qtype=self.QType.FLOAT, symmetric=True, dynamic=True
         )
 
-        self.assertFalse(
-            self.ConfigCls._is_w4afp8(config, weight_quant, input_quant)
-        )
+        self.assertFalse(is_w4afp8(weight_quant, input_quant))
 
     def test_rejects_static_activation(self):
-        config = SimpleNamespace(quant_format="pack-quantized")
+        fake_self = SimpleNamespace()
+        is_w4afp8 = self.ConfigCls._is_w4afp8.__get__(fake_self)
+
         weight_quant = self._make_quant_args(
             num_bits=4, qtype=self.QType.INT, symmetric=True, dynamic=False
         )
@@ -396,12 +408,12 @@ class TestIsW4AFP8Dispatch(unittest.TestCase):
             num_bits=8, qtype=self.QType.FLOAT, symmetric=True, dynamic=False
         )
 
-        self.assertFalse(
-            self.ConfigCls._is_w4afp8(config, weight_quant, input_quant)
-        )
+        self.assertFalse(is_w4afp8(weight_quant, input_quant))
 
     def test_rejects_asymmetric_weight(self):
-        config = SimpleNamespace(quant_format="pack-quantized")
+        fake_self = SimpleNamespace()
+        is_w4afp8 = self.ConfigCls._is_w4afp8.__get__(fake_self)
+
         weight_quant = self._make_quant_args(
             num_bits=4, qtype=self.QType.INT, symmetric=False, dynamic=False
         )
@@ -409,12 +421,12 @@ class TestIsW4AFP8Dispatch(unittest.TestCase):
             num_bits=8, qtype=self.QType.FLOAT, symmetric=True, dynamic=True
         )
 
-        self.assertFalse(
-            self.ConfigCls._is_w4afp8(config, weight_quant, input_quant)
-        )
+        self.assertFalse(is_w4afp8(weight_quant, input_quant))
 
     def test_rejects_wrong_num_bits(self):
-        config = SimpleNamespace(quant_format="pack-quantized")
+        fake_self = SimpleNamespace()
+        is_w4afp8 = self.ConfigCls._is_w4afp8.__get__(fake_self)
+
         weight_quant = self._make_quant_args(
             num_bits=8, qtype=self.QType.INT, symmetric=True, dynamic=False
         )
@@ -422,17 +434,15 @@ class TestIsW4AFP8Dispatch(unittest.TestCase):
             num_bits=8, qtype=self.QType.FLOAT, symmetric=True, dynamic=True
         )
 
-        self.assertFalse(
-            self.ConfigCls._is_w4afp8(config, weight_quant, input_quant)
-        )
+        self.assertFalse(is_w4afp8(weight_quant, input_quant))
 
     def test_rejects_none_quant_args(self):
-        config = SimpleNamespace(quant_format="pack-quantized")
+        fake_self = SimpleNamespace()
+        is_w4afp8 = self.ConfigCls._is_w4afp8.__get__(fake_self)
 
-        self.assertFalse(self.ConfigCls._is_w4afp8(config, None, None))
+        self.assertFalse(is_w4afp8(None, None))
         self.assertFalse(
-            self.ConfigCls._is_w4afp8(
-                config,
+            is_w4afp8(
                 self._make_quant_args(num_bits=4, qtype=self.QType.INT),
                 None,
             )
