@@ -208,6 +208,7 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         self._init_cutlass_buffers(
             num_experts,
             hidden_size,
+            intermediate_size_per_partition,
             intermediate_size_padded,
             layer.w13_weight_packed.device,
         )
@@ -297,9 +298,16 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         num_experts: int,
         hidden_size: int,
         intermediate_size: int,
+        intermediate_size_padded: int,
         device: torch.device,
     ):
-        """Pre-allocate stride and workspace tensors for CUTLASS grouped GEMM."""
+        """Pre-allocate stride and workspace tensors for CUTLASS grouped GEMM.
+
+        第 1 个 GEMM 的 C/Scale 按 **unpadded** intermediate 设置 stride，
+        以匹配运行时 `c1` 的实际行宽（2 * intermediate）；
+        第 2 个 GEMM 的 A/B/S 按 **padded** intermediate 设置 stride，
+        以匹配 pad 后的 `intermediate_q` 和 `w2_weight_packed`/`w2_weight_scale`。
+        """
         self.a_strides1 = torch.full(
             (num_experts, 3), hidden_size, device=device, dtype=torch.int64
         )
@@ -310,7 +318,10 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             dtype=torch.int64,
         )
         self.a_strides2 = torch.full(
-            (num_experts, 3), intermediate_size, device=device, dtype=torch.int64
+            (num_experts, 3),
+            intermediate_size_padded,
+            device=device,
+            dtype=torch.int64,
         )
         self.c_strides2 = torch.full(
             (num_experts, 3), hidden_size, device=device, dtype=torch.int64
@@ -318,7 +329,7 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         self.b_strides1 = self.a_strides1
         self.s_strides13 = self.c_strides1
         self.b_strides2 = self.a_strides2
-        self.s_strides2 = self.c_strides2
+        self.s_strides2 = self.a_strides2
 
         self.expert_offsets = torch.empty(
             num_experts + 1, dtype=torch.int32, device=device
