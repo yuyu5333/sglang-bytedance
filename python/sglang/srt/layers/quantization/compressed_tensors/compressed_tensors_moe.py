@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -1140,6 +1141,27 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_scale, extra_weight_attrs)
         set_weight_attrs(w2_scale, {"load_full_w2": load_full_w2})
 
+        if os.environ.get("SGLANG_DEBUG_WNA16_SHAPES") == "1":
+            logger.warning(
+                "[WNA16 create_weights] num_experts=%d hidden=%d "
+                "inter_per_part=%d group_size=%d actorder=%r "
+                "load_full_w2=%s num_groups_w2=%d num_groups_w13=%d "
+                "w2_scale.shape=%s w13_scale.shape=%s is_k_full=%s "
+                "moe_tp_size=%d",
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                self.group_size,
+                self.actorder,
+                load_full_w2,
+                num_groups_w2,
+                num_groups_w13,
+                tuple(w2_scale.shape),
+                tuple(w13_scale.shape),
+                self.is_k_full,
+                layer.moe_tp_size,
+            )
+
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
         )
@@ -1216,6 +1238,38 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # Skip if the layer is already converted to Marlin format to prevent double-packing.
         if getattr(layer, "is_marlin_converted", False):
             return
+
+        if os.environ.get("SGLANG_DEBUG_WNA16_SHAPES") == "1":
+            w2s = layer.w2_weight_scale
+            w13s = layer.w13_weight_scale
+            try:
+                w2s_sample = w2s[0, 0, :8].float().cpu().tolist()
+            except Exception as e:
+                w2s_sample = f"<err:{e}>"
+            try:
+                w2s_any_zero = bool((w2s == 0).any().item())
+                w2s_any_nan = bool(torch.isnan(w2s.float()).any().item())
+            except Exception as e:
+                w2s_any_zero = f"<err:{e}>"
+                w2s_any_nan = f"<err:{e}>"
+            logger.warning(
+                "[WNA16 post_load BEFORE_REPACK] w2_weight_scale.shape=%s "
+                "w2_weight_scale.dtype=%s w2s[0,0,:8]=%s any_zero=%s "
+                "any_nan=%s w13_weight_scale.shape=%s "
+                "w2_weight_packed.shape=%s w13_weight_packed.shape=%s "
+                "group_size=%d is_k_full=%s actorder=%r",
+                tuple(w2s.shape),
+                w2s.dtype,
+                w2s_sample,
+                w2s_any_zero,
+                w2s_any_nan,
+                tuple(w13s.shape),
+                tuple(layer.w2_weight_packed.shape),
+                tuple(layer.w13_weight_packed.shape),
+                self.group_size,
+                self.is_k_full,
+                self.actorder,
+            )
 
         if not hasattr(layer, "_original_shapes"):
             layer._original_shapes = {}
@@ -1363,6 +1417,29 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             expert_map = layer.dispatcher.local_expert_mapping
             if expert_map is not None:
                 global_num_experts = self.moe_runner_config.num_experts
+
+        if os.environ.get("SGLANG_DEBUG_WNA16_SHAPES") == "1" and not getattr(
+            self, "_wna16_apply_logged", False
+        ):
+            logger.warning(
+                "[WNA16 apply] x.shape=%s w13_qweight=%s w2_qweight=%s "
+                "w13_scale=%s w2_scale=%s topk_weights=%s topk_ids=%s "
+                "group_size=%d is_k_full=%s actorder=%r "
+                "global_num_experts=%s",
+                tuple(x.shape),
+                tuple(layer.w13_weight_packed.shape),
+                tuple(layer.w2_weight_packed.shape),
+                tuple(layer.w13_weight_scale.shape),
+                tuple(layer.w2_weight_scale.shape),
+                tuple(topk_weights.shape),
+                tuple(topk_ids.shape),
+                self.group_size,
+                self.is_k_full,
+                self.actorder,
+                global_num_experts,
+            )
+            # Only log once per layer to avoid log flood across layers/steps.
+            self._wna16_apply_logged = True
 
         output = fused_marlin_moe(
             x,
