@@ -1389,6 +1389,143 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ):
         self.moe_runner_config = moe_runner_config
 
+    def _debug_compare_single_expert_path(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        global_num_experts: int,
+    ) -> None:
+        from sgl_kernel.scalar_type import scalar_types
+
+        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+        from sglang.srt.layers.quantization.marlin_utils import (
+            apply_gptq_marlin_linear,
+            marlin_make_empty_zp,
+            marlin_make_workspace,
+        )
+
+        prefix = getattr(layer, "prefix", "")
+        if os.environ.get("SGLANG_DEBUG_WNA16_REF") != "1":
+            return
+        if "layers.0" not in prefix and prefix != "":
+            return
+        if getattr(self, "_wna16_ref_logged", False):
+            return
+        if x.shape[0] == 0 or topk_ids.shape[0] == 0 or topk_ids.shape[1] == 0:
+            return
+
+        tok = 0
+        global_expert = int(topk_ids[tok, 0].item())
+        local_expert = global_expert
+        if expert_map is not None:
+            matches = (expert_map == global_expert).nonzero(as_tuple=False)
+            if matches.numel() == 0:
+                logger.warning(
+                    "[WNA16 ref] layer=%s skipped=no_local_match global_expert=%d",
+                    prefix or "<unknown>",
+                    global_expert,
+                )
+                self._wna16_ref_logged = True
+                return
+            local_expert = int(matches[0].item())
+
+        wtype = scalar_types.uint4b8 if self.num_bits == 4 else scalar_types.uint8b128
+        empty_zp = marlin_make_empty_zp(x.device)
+        workspace = marlin_make_workspace(x.device)
+
+        hidden_size = x.shape[-1]
+        intermediate_size = layer.w2_weight_packed.shape[1] * 16
+
+        x_ref = x[tok : tok + 1].contiguous()
+        topk_w_ref = topk_weights[tok : tok + 1, :1].contiguous()
+        topk_id_ref = topk_ids[tok : tok + 1, :1].contiguous()
+        router_ref = router_logits[tok : tok + 1].contiguous()
+
+        w13_g_idx = layer.w13_weight_g_idx[local_expert].contiguous()
+        w2_g_idx = layer.w2_weight_g_idx[local_expert].contiguous()
+        w13_sort = layer.w13_g_idx_sort_indices[local_expert].contiguous()
+        w2_sort = layer.w2_g_idx_sort_indices[local_expert].contiguous()
+
+        gemm1_out = apply_gptq_marlin_linear(
+            input=x_ref,
+            weight=layer.w13_weight_packed[local_expert].contiguous(),
+            weight_scale=layer.w13_weight_scale[local_expert].contiguous(),
+            weight_zp=empty_zp,
+            g_idx=w13_g_idx,
+            g_idx_sort_indices=w13_sort,
+            workspace=workspace,
+            wtype=wtype,
+            output_size_per_partition=2 * intermediate_size,
+            input_size_per_partition=hidden_size,
+            is_k_full=self.is_k_full,
+        )
+        gate, up = gemm1_out.chunk(2, dim=-1)
+        hidden = torch.nn.functional.silu(gate) * up
+        seq_out = apply_gptq_marlin_linear(
+            input=hidden,
+            weight=layer.w2_weight_packed[local_expert].contiguous(),
+            weight_scale=layer.w2_weight_scale[local_expert].contiguous(),
+            weight_zp=empty_zp,
+            g_idx=w2_g_idx,
+            g_idx_sort_indices=w2_sort,
+            workspace=workspace,
+            wtype=wtype,
+            output_size_per_partition=hidden_size,
+            input_size_per_partition=intermediate_size,
+            is_k_full=self.is_k_full,
+        )
+        seq_out.mul_(topk_w_ref[:, :1].to(seq_out.dtype))
+
+        fused_out = fused_marlin_moe(
+            x_ref,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            router_ref,
+            topk_w_ref,
+            topk_id_ref,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            g_idx1=layer.w13_weight_g_idx,
+            g_idx2=layer.w2_weight_g_idx,
+            sort_indices1=layer.w13_g_idx_sort_indices,
+            sort_indices2=layer.w2_g_idx_sort_indices,
+            num_bits=self.num_bits,
+            is_k_full=self.is_k_full,
+            routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
+        )
+
+        diff = (fused_out.float() - seq_out.float()).abs()
+        logger.warning(
+            "[WNA16 ref] layer=%s gs=%d tok=%d global_expert=%d local_expert=%d "
+            "x_ref=%s topk_w=%s gemm1=%s hidden=%s seq_out=%s fused_out=%s "
+            "seq_head=%s fused_head=%s diff_max=%.6f diff_mean=%.6f diff_rmse=%.6f",
+            prefix or "<unknown>",
+            self.group_size,
+            tok,
+            global_expert,
+            local_expert,
+            tuple(x_ref.shape),
+            tuple(topk_w_ref.shape),
+            tuple(gemm1_out.shape),
+            tuple(hidden.shape),
+            tuple(seq_out.shape),
+            tuple(fused_out.shape),
+            seq_out[0, :8].float().cpu().tolist(),
+            fused_out[0, :8].float().cpu().tolist(),
+            diff.max().item(),
+            diff.mean().item(),
+            diff.pow(2).mean().sqrt().item(),
+        )
+        self._wna16_ref_logged = True
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1440,6 +1577,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             )
             # Only log once per layer to avoid log flood across layers/steps.
             self._wna16_apply_logged = True
+
+        self._debug_compare_single_expert_path(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            global_num_experts=global_num_experts,
+        )
 
         output = fused_marlin_moe(
             x,
