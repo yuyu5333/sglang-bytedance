@@ -1121,12 +1121,18 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
+        scale_storage_dtype = (
+            torch.float32
+            if os.environ.get("SGLANG_DEBUG_WNA16_FP32_SCALE") == "1"
+            else params_dtype
+        )
+
         w13_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
                 num_groups_w13,
                 2 * intermediate_size_per_partition,
-                dtype=params_dtype,
+                dtype=scale_storage_dtype,
             ),
             requires_grad=False,
         )
@@ -1134,7 +1140,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_scale, extra_weight_attrs)
 
         w2_scale = torch.nn.Parameter(
-            torch.ones(num_experts, num_groups_w2, hidden_size, dtype=params_dtype),
+            torch.ones(
+                num_experts,
+                num_groups_w2,
+                hidden_size,
+                dtype=scale_storage_dtype,
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_scale)
@@ -1146,8 +1157,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "[WNA16 create_weights] num_experts=%d hidden=%d "
                 "inter_per_part=%d group_size=%d actorder=%r "
                 "load_full_w2=%s num_groups_w2=%d num_groups_w13=%d "
-                "w2_scale.shape=%s w13_scale.shape=%s is_k_full=%s "
-                "moe_tp_size=%d",
+                "w2_scale.shape=%s w13_scale.shape=%s scale_storage_dtype=%s "
+                "is_k_full=%s moe_tp_size=%d",
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
@@ -1158,6 +1169,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 num_groups_w13,
                 tuple(w2_scale.shape),
                 tuple(w13_scale.shape),
+                scale_storage_dtype,
                 self.is_k_full,
                 layer.moe_tp_size,
             )
@@ -1472,6 +1484,13 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             scale_mat = scales[g_idx]
         return q.to(torch.float32) * scale_mat.to(torch.float32)
 
+    def _runtime_scale(
+        self, scale: torch.Tensor, target_dtype: torch.dtype
+    ) -> torch.Tensor:
+        if scale.dtype == target_dtype:
+            return scale
+        return scale.to(dtype=target_dtype)
+
     def _debug_compare_single_expert_path(
         self,
         layer: torch.nn.Module,
@@ -1534,11 +1553,19 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx = layer.w2_weight_g_idx[local_expert].contiguous()
         w13_sort = layer.w13_g_idx_sort_indices[local_expert].contiguous()
         w2_sort = layer.w2_g_idx_sort_indices[local_expert].contiguous()
+        w13_scale_runtime = self._runtime_scale(
+            layer.w13_weight_scale[local_expert].contiguous(), x_ref.dtype
+        )
+        w2_scale_runtime = self._runtime_scale(
+            layer.w2_weight_scale[local_expert].contiguous(), hidden.dtype
+            if "hidden" in locals()
+            else x_ref.dtype
+        )
 
         gemm1_out = apply_gptq_marlin_linear(
             input=x_ref,
             weight=layer.w13_weight_packed[local_expert].contiguous(),
-            weight_scale=layer.w13_weight_scale[local_expert].contiguous(),
+            weight_scale=w13_scale_runtime,
             weight_zp=empty_zp,
             g_idx=w13_g_idx,
             g_idx_sort_indices=w13_sort,
@@ -1550,10 +1577,13 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         gate, up = gemm1_out.chunk(2, dim=-1)
         hidden = torch.nn.functional.silu(gate) * up
+        w2_scale_runtime = self._runtime_scale(
+            layer.w2_weight_scale[local_expert].contiguous(), hidden.dtype
+        )
         seq_out = apply_gptq_marlin_linear(
             input=hidden,
             weight=layer.w2_weight_packed[local_expert].contiguous(),
-            weight_scale=layer.w2_weight_scale[local_expert].contiguous(),
+            weight_scale=w2_scale_runtime,
             weight_zp=empty_zp,
             g_idx=w2_g_idx,
             g_idx_sort_indices=w2_sort,
@@ -1618,8 +1648,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             x_ref,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
+            self._runtime_scale(layer.w13_weight_scale, x_ref.dtype),
+            self._runtime_scale(layer.w2_weight_scale, x_ref.dtype),
             router_ref,
             topk_w_ref,
             topk_id_ref,
@@ -1692,14 +1722,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         ):
             logger.warning(
                 "[WNA16 apply] x.shape=%s w13_qweight=%s w2_qweight=%s "
-                "w13_scale=%s w2_scale=%s topk_weights=%s topk_ids=%s "
-                "group_size=%d is_k_full=%s actorder=%r "
+                "w13_scale=%s w2_scale=%s w13_scale_dtype=%s w2_scale_dtype=%s "
+                "topk_weights=%s topk_ids=%s group_size=%d is_k_full=%s actorder=%r "
                 "global_num_experts=%s",
                 tuple(x.shape),
                 tuple(layer.w13_weight_packed.shape),
                 tuple(layer.w2_weight_packed.shape),
                 tuple(layer.w13_weight_scale.shape),
                 tuple(layer.w2_weight_scale.shape),
+                layer.w13_weight_scale.dtype,
+                layer.w2_weight_scale.dtype,
                 tuple(topk_weights.shape),
                 tuple(topk_ids.shape),
                 self.group_size,
@@ -1720,12 +1752,14 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=global_num_experts,
         )
 
+        w13_scale_runtime = self._runtime_scale(layer.w13_weight_scale, x.dtype)
+        w2_scale_runtime = self._runtime_scale(layer.w2_weight_scale, x.dtype)
         output = fused_marlin_moe(
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
+            w13_scale_runtime,
+            w2_scale_runtime,
             router_logits,
             topk_weights,
             topk_ids,
