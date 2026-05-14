@@ -1271,6 +1271,49 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 self.actorder,
             )
 
+        if (
+            os.environ.get("SGLANG_DEBUG_WNA16_ORIG_REF") == "1"
+            and self._debug_target_layer(layer)
+        ):
+            debug_expert = int(os.environ.get("SGLANG_DEBUG_WNA16_EXPERT_ID", "0"))
+            num_experts_local = layer.w13_weight_packed.shape[0]
+            if 0 <= debug_expert < num_experts_local:
+                hidden_size_local = layer.w13_weight_packed.shape[1] * self.packed_factor
+                inter_size_local = layer.w2_weight_packed.shape[1] * self.packed_factor
+                orig_w13 = self._debug_dequant_orig_weight(
+                    layer.w13_weight_packed[debug_expert].contiguous(),
+                    layer.w13_weight_scale[debug_expert].contiguous(),
+                    hidden_size_local,
+                    2 * inter_size_local,
+                ).cpu()
+                orig_w2 = self._debug_dequant_orig_weight(
+                    layer.w2_weight_packed[debug_expert].contiguous(),
+                    layer.w2_weight_scale[debug_expert].contiguous(),
+                    inter_size_local,
+                    hidden_size_local,
+                ).cpu()
+                layer._debug_orig_expert_id = int(debug_expert)
+                layer._debug_orig_w13_ref = orig_w13
+                layer._debug_orig_w2_ref = orig_w2
+                logger.warning(
+                    "[WNA16 orig_capture] layer=%s expert=%d gs=%d "
+                    "orig_w13=%s orig_w2=%s orig_w13_head=%s orig_w2_head=%s",
+                    getattr(layer, "prefix", "<unknown>") or "<unknown>",
+                    debug_expert,
+                    self.group_size,
+                    tuple(orig_w13.shape),
+                    tuple(orig_w2.shape),
+                    orig_w13[:2, :4].reshape(-1).float().cpu().tolist(),
+                    orig_w2[:2, :4].reshape(-1).float().cpu().tolist(),
+                )
+            else:
+                logger.warning(
+                    "[WNA16 orig_capture] layer=%s skipped=expert_out_of_range expert=%d num_experts=%d",
+                    getattr(layer, "prefix", "<unknown>") or "<unknown>",
+                    debug_expert,
+                    num_experts_local,
+                )
+
         if not hasattr(layer, "_original_shapes"):
             layer._original_shapes = {}
 
@@ -1389,6 +1432,46 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ):
         self.moe_runner_config = moe_runner_config
 
+    def _debug_target_layer(self, layer: torch.nn.Module) -> bool:
+        prefix = getattr(layer, "prefix", "")
+        target = os.environ.get("SGLANG_DEBUG_WNA16_LAYER_SUBSTR", "layers.0")
+        return target == "" or target in prefix or prefix == ""
+
+    def _debug_unpack_rows(
+        self, packed_q_w: torch.Tensor, size_k: int, size_n: int
+    ) -> torch.Tensor:
+        pack_factor = 32 // self.num_bits
+        q = torch.empty((size_k, size_n), dtype=torch.int32, device=packed_q_w.device)
+        mask = (1 << self.num_bits) - 1
+        packed_i32 = packed_q_w.to(torch.int32)
+        for i in range(pack_factor):
+            q[i::pack_factor, :] = (packed_i32 >> (self.num_bits * i)) & mask
+        return q
+
+    def _debug_dequant_orig_weight(
+        self,
+        packed_q_w: torch.Tensor,
+        scales: torch.Tensor,
+        size_k: int,
+        size_n: int,
+    ) -> torch.Tensor:
+        from sgl_kernel.scalar_type import scalar_types
+
+        q = self._debug_unpack_rows(packed_q_w, size_k, size_n)
+        bias = (
+            scalar_types.uint4b8.bias if self.num_bits == 4 else scalar_types.uint8b128.bias
+        )
+        q = q - bias
+        if self.group_size == -1:
+            scale_mat = scales[0:1, :].expand(size_k, -1)
+        else:
+            g_idx = (
+                torch.arange(size_k, device=packed_q_w.device, dtype=torch.int64)
+                // self.group_size
+            )
+            scale_mat = scales[g_idx]
+        return q.to(torch.float32) * scale_mat.to(torch.float32)
+
     def _debug_compare_single_expert_path(
         self,
         layer: torch.nn.Module,
@@ -1413,7 +1496,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         prefix = getattr(layer, "prefix", "")
         if os.environ.get("SGLANG_DEBUG_WNA16_REF") != "1":
             return
-        if "layers.0" not in prefix and prefix != "":
+        if not self._debug_target_layer(layer):
             return
         if getattr(self, "_wna16_ref_logged", False):
             return
@@ -1499,6 +1582,37 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             seq_out_after_topk,
             seq_out_after_routed,
         )
+
+        debug_orig_expert = getattr(layer, "_debug_orig_expert_id", None)
+        debug_orig_w13 = getattr(layer, "_debug_orig_w13_ref", None)
+        debug_orig_w2 = getattr(layer, "_debug_orig_w2_ref", None)
+        if (
+            debug_orig_expert is not None
+            and debug_orig_w13 is not None
+            and debug_orig_w2 is not None
+            and int(debug_orig_expert) == int(local_expert)
+        ):
+            orig_w13 = debug_orig_w13.to(device=x.device, dtype=torch.float32)
+            orig_w2 = debug_orig_w2.to(device=x.device, dtype=torch.float32)
+            orig_gemm1 = x_ref.float() @ orig_w13
+            orig_gate, orig_up = orig_gemm1.chunk(2, dim=-1)
+            orig_hidden = torch.nn.functional.silu(orig_gate) * orig_up
+            orig_out = orig_hidden @ orig_w2
+            orig_out.mul_(topk_w_ref[:, :1].to(orig_out.dtype))
+            orig_out.mul_(float(routed_scaling))
+            diff_orig = (seq_out.float() - orig_out.float()).abs()
+            logger.warning(
+                "[WNA16 orig_vs_repack] layer=%s gs=%d expert=%d "
+                "orig_head=%s repack_head=%s diff_max=%.6f diff_mean=%.6f diff_rmse=%.6f",
+                prefix or "<unknown>",
+                self.group_size,
+                local_expert,
+                orig_out[0, :8].float().cpu().tolist(),
+                seq_out[0, :8].float().cpu().tolist(),
+                diff_orig.max().item(),
+                diff_orig.mean().item(),
+                diff_orig.pow(2).mean().sqrt().item(),
+            )
 
         fused_out = fused_marlin_moe(
             x_ref,
