@@ -1449,6 +1449,55 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         target = os.environ.get("SGLANG_DEBUG_WNA16_LAYER_SUBSTR", "layers.0")
         return target == "" or target in prefix or prefix == ""
 
+    def _debug_log_router(
+        self,
+        layer: torch.nn.Module,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> None:
+        if os.environ.get("SGLANG_DEBUG_WNA16_ROUTER") != "1":
+            return
+        if not self._debug_target_layer(layer):
+            return
+        if getattr(self, "_wna16_router_logged", False):
+            return
+        if (
+            topk_ids.ndim != 2
+            or topk_ids.shape[0] == 0
+            or topk_ids.shape[1] == 0
+            or router_logits.ndim != 2
+            or router_logits.shape[0] == 0
+        ):
+            return
+
+        tok = 0
+        tok_topk_ids = topk_ids[tok].to(torch.int64)
+        tok_topk_weights = topk_weights[tok].float()
+        tok_logits = router_logits[tok].float()
+        tok_logits_topk = tok_logits[tok_topk_ids]
+        top2_gap = None
+        if tok_logits_topk.numel() >= 2:
+            top2_gap = float((tok_logits_topk[0] - tok_logits_topk[1]).item())
+
+        logger.warning(
+            "[WNA16 router] layer=%s gs=%d tok=%d router_shape=%s "
+            "topk_ids=%s topk_weights=%s topk_logits=%s "
+            "router_min=%.6f router_max=%.6f router_mean=%.6f top1_top2_gap=%s",
+            getattr(layer, "prefix", "<unknown>") or "<unknown>",
+            self.group_size,
+            tok,
+            tuple(router_logits.shape),
+            tok_topk_ids.cpu().tolist(),
+            tok_topk_weights.cpu().tolist(),
+            tok_logits_topk.cpu().tolist(),
+            float(tok_logits.min().item()),
+            float(tok_logits.max().item()),
+            float(tok_logits.mean().item()),
+            top2_gap,
+        )
+        self._wna16_router_logged = True
+
     def _debug_unpack_rows(
         self, packed_q_w: torch.Tensor, size_k: int, size_n: int
     ) -> torch.Tensor:
@@ -1741,6 +1790,13 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             )
             # Only log once per layer to avoid log flood across layers/steps.
             self._wna16_apply_logged = True
+
+        self._debug_log_router(
+            layer=layer,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            router_logits=router_logits,
+        )
 
         self._debug_compare_single_expert_path(
             layer=layer,
