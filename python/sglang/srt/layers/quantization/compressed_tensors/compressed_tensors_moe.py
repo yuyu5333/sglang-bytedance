@@ -1480,7 +1480,25 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             input_size_per_partition=intermediate_size,
             is_k_full=self.is_k_full,
         )
+        routed_scaling = self.moe_runner_config.routed_scaling_factor
+        if routed_scaling is None:
+            routed_scaling = 1.0
+        seq_out_before_scale = seq_out[0, :8].float().cpu().tolist()
         seq_out.mul_(topk_w_ref[:, :1].to(seq_out.dtype))
+        seq_out_after_topk = seq_out[0, :8].float().cpu().tolist()
+        seq_out.mul_(routed_scaling)
+        seq_out_after_routed = seq_out[0, :8].float().cpu().tolist()
+        logger.warning(
+            "[WNA16 ref_scale] layer=%s gs=%d topk_weight=%s routed_scaling=%s "
+            "seq_before=%s seq_after_topk=%s seq_after_routed=%s",
+            prefix or "<unknown>",
+            self.group_size,
+            topk_w_ref[0, :1].float().cpu().tolist(),
+            routed_scaling,
+            seq_out_before_scale,
+            seq_out_after_topk,
+            seq_out_after_routed,
+        )
 
         fused_out = fused_marlin_moe(
             x_ref,
