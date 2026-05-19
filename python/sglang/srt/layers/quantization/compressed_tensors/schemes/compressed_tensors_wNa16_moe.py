@@ -336,6 +336,74 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
 
         layer.is_marlin_converted = True
 
+        # 诊断指纹：打印 Marlin repack 完成后实际驻留 GPU 的关键张量统计，
+        # 用于对比 Pro / Flash 在每层 expert 权重上的差异。
+        # 仅在 rank0/TP0 上打印，避免多 rank 重复刷屏。
+        try:
+            from sglang.srt.distributed import (
+                get_tensor_model_parallel_rank,
+            )
+
+            tp_rank = get_tensor_model_parallel_rank()
+        except Exception:
+            tp_rank = 0
+        if tp_rank == 0:
+            layer_id = getattr(layer, "layer_id", -1)
+
+            def _fp(t):
+                if t is None:
+                    return "None"
+                try:
+                    # 用 float64 累加，避免 bf16/fp16 求和精度溢出
+                    flat = t.detach().reshape(-1)
+                    if flat.dtype in (
+                        torch.int8,
+                        torch.uint8,
+                        torch.int16,
+                        torch.int32,
+                        torch.int64,
+                    ):
+                        # 整数（packed weight / g_idx）走 int64 求和
+                        s = flat.to(torch.int64).sum().item()
+                        amin = flat.min().item()
+                        amax = flat.max().item()
+                        return (
+                            f"shape={tuple(t.shape)} dtype={t.dtype} "
+                            f"sum={s} min={amin} max={amax}"
+                        )
+                    f64 = flat.to(torch.float64)
+                    return (
+                        f"shape={tuple(t.shape)} dtype={t.dtype} "
+                        f"sum={f64.sum().item():.6e} "
+                        f"mean={f64.mean().item():.6e} "
+                        f"std={f64.std().item():.6e} "
+                        f"min={f64.min().item():.6e} "
+                        f"max={f64.max().item():.6e}"
+                    )
+                except Exception as e:
+                    return f"<fingerprint error: {e!r}>"
+
+            logger.info(
+                "[W4A16 marlin fingerprint] layer_id=%s\n"
+                "  w13_weight_packed: %s\n"
+                "  w2_weight_packed : %s\n"
+                "  w13_weight_scale : %s\n"
+                "  w2_weight_scale  : %s\n"
+                "  w13_weight_g_idx : %s\n"
+                "  w2_weight_g_idx  : %s\n"
+                "  w13_g_idx_sort_indices: %s\n"
+                "  w2_g_idx_sort_indices : %s",
+                layer_id,
+                _fp(layer.w13_weight_packed),
+                _fp(layer.w2_weight_packed),
+                _fp(layer.w13_weight_scale),
+                _fp(layer.w2_weight_scale),
+                _fp(getattr(layer, "w13_weight_g_idx", None)),
+                _fp(getattr(layer, "w2_weight_g_idx", None)),
+                _fp(getattr(layer, "w13_g_idx_sort_indices", None)),
+                _fp(getattr(layer, "w2_g_idx_sort_indices", None)),
+            )
+
     def restore_weights_before_loading(self, layer: torch.nn.Module):
         """Forcibly resize parameters back to their original shapes (e.g., GPTQ format) before loading weights."""
 
