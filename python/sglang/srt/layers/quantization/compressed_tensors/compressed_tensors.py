@@ -762,6 +762,16 @@ class CompressedTensorsConfig(QuantizationConfig):
                 raise NotImplementedError(
                     f"The W8A8Int8 Fused MoE scheme is implemented only for NPU for now."
                 )
+        elif self._is_w4afp8(weight_quant, input_quant):
+            # On NPU prefer the dedicated NPU W4A8Int8 path when activations are INT8.
+            if (
+                _is_npu
+                and self._is_dynamic_token_w4a8(weight_quant, input_quant)
+            ):
+                logger.info_once("Using NPUCompressedTensorsW4A8Int8DynamicMoE")
+                return NPUCompressedTensorsW4A8Int8DynamicMoE(self)
+            logger.info_once("Using CompressedTensorsW4AFP8MoE")
+            return CompressedTensorsW4AFP8MoE(self, weight_quant, input_quant)
         elif self._is_dynamic_token_w4a8(weight_quant, input_quant):
             if _is_npu:
                 logger.info_once("Using NPUCompressedTensorsW4A8Int8DynamicMoE")
@@ -770,9 +780,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 raise NotImplementedError(
                     f"The W4A8Int8 Fused MoE scheme is implemented only for NPU for now."
                 )
-        elif self._is_w4afp8(weight_quant, input_quant):
-            logger.info_once("Using CompressedTensorsW4AFP8MoE")
-            return CompressedTensorsW4AFP8MoE(self, weight_quant, input_quant)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
