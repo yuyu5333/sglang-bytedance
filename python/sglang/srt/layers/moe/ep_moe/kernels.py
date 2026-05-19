@@ -537,6 +537,9 @@ def silu_and_mul_masked_fwd(
         num_warps=num_warps,
     )
     return output
+
+
+@triton.jit
 def silu_mul_dynamic_scale_triton_kernel_for_cutlass_moe(
     input_ptr,
     scale_ptr,
