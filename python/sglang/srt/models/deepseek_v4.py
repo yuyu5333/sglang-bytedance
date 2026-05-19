@@ -1207,6 +1207,12 @@ class DeepseekV4ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
+        # 诊断日志：用于对比 Pro/Flash 在 W4A16 路径下被加载/跳过的专家参数。
+        # 每条记录为 (ckpt_name, resolved_name, expert_id, shard_id)。
+        # 只在 load_weights 末尾、确认 is_w4a16_config() 时一次性打印。
+        _w4a16_expert_loaded_records: list = []
+        _w4a16_expert_skipped_records: list = []
+
         if is_nextn:
             if hasattr(self.config, "num_nextn_predict_layers"):
                 num_nextn_layers = self.config.num_nextn_predict_layers
@@ -1378,6 +1384,10 @@ class DeepseekV4ForCausalLM(nn.Module):
                             resolved_name = name.replace(weight_name, param_name)
                             if resolved_name not in params_dict:
                                 skip_unmaterialized_expert_param = True
+                                # 诊断：记录 W4A16 路径下被跳过的专家权重映射尝试
+                                _w4a16_expert_skipped_records.append(
+                                    (name, resolved_name, expert_id, shard_id)
+                                )
                                 continue
                             param = params_dict[resolved_name]
                             weight_loader = param.weight_loader
@@ -1397,6 +1407,10 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 },
                             )
                             loaded_params.add(resolved_name)
+                            # 诊断：记录 W4A16 路径下成功加载的专家权重映射
+                            _w4a16_expert_loaded_records.append(
+                                (name, resolved_name, expert_id, shard_id)
+                            )
                             break
                         else:
                             if skip_unmaterialized_expert_param:
@@ -1525,6 +1539,47 @@ class DeepseekV4ForCausalLM(nn.Module):
         if unloaded_params:
             logger.warning(
                 f"Some weights are not initialized from checkpoints: {unloaded_params}"
+            )
+
+        # 诊断日志：仅在 W4A16 路径下打印实际被加载/跳过的专家参数明细，
+        # 用于对比 Pro 与 Flash 的差异。每条记录格式：
+        #   ckpt_name -> resolved_param_name (expert_id=, shard_id=)
+        qc = self.quant_config
+        is_w4a16 = (
+            qc is not None
+            and qc.get_name() == "compressed_tensors"
+            and getattr(qc, "is_w4a16_config", lambda: False)()
+        )
+        if is_w4a16 and (
+            _w4a16_expert_loaded_records or _w4a16_expert_skipped_records
+        ):
+            loaded_sorted = sorted(
+                _w4a16_expert_loaded_records,
+                key=lambda r: (r[1], r[2], r[3]),
+            )
+            skipped_sorted = sorted(
+                _w4a16_expert_skipped_records,
+                key=lambda r: (r[1], r[2], r[3]),
+            )
+            loaded_lines = "\n".join(
+                f"  LOADED  ckpt={c!r} -> param={p!r} "
+                f"(expert_id={eid}, shard_id={sid})"
+                for c, p, eid, sid in loaded_sorted
+            )
+            skipped_lines = "\n".join(
+                f"  SKIPPED ckpt={c!r} -> param={p!r} "
+                f"(expert_id={eid}, shard_id={sid})"
+                for c, p, eid, sid in skipped_sorted
+            )
+            logger.info(
+                "[W4A16 expert load diagnostic] is_nextn=%s "
+                "loaded=%d skipped=%d\n%s%s%s",
+                is_nextn,
+                len(loaded_sorted),
+                len(skipped_sorted),
+                loaded_lines,
+                "\n" if loaded_lines and skipped_lines else "",
+                skipped_lines,
             )
 
         self.post_load_weights(is_nextn=is_nextn, weight_names=weight_names)
