@@ -854,7 +854,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             input_ids_global=input_ids_global,
         )
         if _use_tp_moe_gather:
-            hidden_states, global_hidden_states = get_local_dp_buffer(), hidden_states
+            hidden_states, global_hidden_states = get_local_dp_buffer(get_tp_group()), hidden_states
             dp_scatter(hidden_states, global_hidden_states, forward_batch)
         if _use_tp_attn_a2a_scatter:
             assert _a2a_scatter_chunks is not None
