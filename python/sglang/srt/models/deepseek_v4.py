@@ -1369,7 +1369,6 @@ class DeepseekV4ForCausalLM(nn.Module):
                         break
                     else:
                         skip_unmaterialized_expert_param = False
-                        unresolved_expert_attempts = []
                         for mapping in expert_params_mapping:
                             param_name, weight_name, expert_id, shard_id = mapping
                             if weight_name not in name:
@@ -1379,10 +1378,6 @@ class DeepseekV4ForCausalLM(nn.Module):
                             resolved_name = name.replace(weight_name, param_name)
                             if resolved_name not in params_dict:
                                 skip_unmaterialized_expert_param = True
-                                unresolved_expert_attempts.append(
-                                    (weight_name, param_name, resolved_name,
-                                     expert_id, shard_id)
-                                )
                                 continue
                             param = params_dict[resolved_name]
                             weight_loader = param.weight_loader
@@ -1405,30 +1400,6 @@ class DeepseekV4ForCausalLM(nn.Module):
                             break
                         else:
                             if skip_unmaterialized_expert_param:
-                                # 详细日志：打印被 skip_unmaterialized_expert_param
-                                # 逻辑丢弃的权重名称、尝试过的 expert mapping 以及
-                                # 解析后但不在 params_dict 中的目标参数名，方便
-                                # 对比 Pro / Flash 模型加载差异。
-                                attempts_repr = "; ".join(
-                                    f"weight_name={wn!r} -> param_name={pn!r} "
-                                    f"resolved={rn!r} (expert_id={eid}, "
-                                    f"shard_id={sid})"
-                                    for wn, pn, rn, eid, sid in
-                                    unresolved_expert_attempts
-                                )
-                                logger.warning(
-                                    "[skip_unmaterialized_expert_param] "
-                                    "drop ckpt weight name=%r shape=%s dtype=%s "
-                                    "(no resolved_name in params_dict); "
-                                    "tried %d expert mapping(s): %s",
-                                    name,
-                                    tuple(loaded_weight.shape)
-                                    if hasattr(loaded_weight, "shape")
-                                    else None,
-                                    getattr(loaded_weight, "dtype", None),
-                                    len(unresolved_expert_attempts),
-                                    attempts_repr,
-                                )
                                 continue
                             if name.endswith(".bias") and name not in params_dict:
                                 continue
@@ -1541,25 +1512,6 @@ class DeepseekV4ForCausalLM(nn.Module):
         unloaded_params = params_dict.keys() - loaded_params
 
         skipped_checking_patterns = ["attn_mqa.k_scale", "attn_mqa.v_scale"]
-        # compressed-tensors W4A16 MoE checkpoints do not contain g_idx tensors
-        # when actorder is disabled; they are materialized in
-        # process_weights_after_loading().
-        qc = self.quant_config
-        if (
-            qc is not None
-            and qc.get_name() == "compressed_tensors"
-            and getattr(qc, "is_w4a16_config", lambda: False)()
-        ):
-            weight_quant = qc.target_scheme_map.get("Linear", {}).get("weights")
-            if getattr(weight_quant, "actorder", None) != "group":
-                skipped_checking_patterns.extend(
-                    [
-                        "mlp.experts.w13_weight_g_idx",
-                        "mlp.experts.w2_weight_g_idx",
-                        "mlp.experts.w13_g_idx_sort_indices",
-                        "mlp.experts.w2_g_idx_sort_indices",
-                    ]
-                )
         if is_nextn:
             skipped_checking_patterns.extend(["lm_head", "embed_tokens"])
         unloaded_params = {
