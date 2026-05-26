@@ -22,10 +22,7 @@ if _is_cuda:
 else:
     from sgl_kernel import silu_and_mul
 
-from sglang.jit_kernel.per_tensor_quant_fp8 import (
-    per_tensor_absmax_fp8,
-    per_tensor_quant_fp8,
-)
+from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 from sglang.srt.layers.moe.ep_moe.kernels import (
     cutlass_w4_run_moe_ep_preproess,
     deepep_ll_get_cutlass_w4a8_moe_mm_data,
