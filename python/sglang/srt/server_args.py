@@ -399,6 +399,11 @@ class ServerArgs:
     quantization: Optional[str] = None
     quantization_param_path: Optional[str] = None
     kv_cache_dtype: str = "auto"
+    # Path to a calibration .pt file for the rotated + non-uniform-bit KV
+    # cache pool (see python/sglang/srt/mem_cache/rotated_quant_memory_pool.py
+    # and KVRoadMap.md "启发三 / M1"). When set, the KV cache pool is
+    # replaced with RotatedQuantMHATokenToKVPool. Currently MHA only.
+    rotated_kv_quant_config: Optional[str] = None
     enable_fp32_lm_head: bool = False
     modelopt_quant: Optional[Union[str, Dict]] = None
     modelopt_checkpoint_restore_path: Optional[str] = None
@@ -4646,6 +4651,21 @@ class ServerArgs:
             default=ServerArgs.kv_cache_dtype,
             choices=["auto", "fp8_e5m2", "fp8_e4m3", "bf16", "bfloat16", "fp4_e2m1"],
             help='Data type for kv cache storage. "auto" will use model data type. "bf16" or "bfloat16" for BF16 KV cache. "fp8_e5m2" and "fp8_e4m3" are supported for CUDA 11.8+. "fp4_e2m1" (only mxfp4) is supported for CUDA 12.8+ and PyTorch 2.8.0+',
+        )
+        parser.add_argument(
+            "--rotated-kv-quant-config",
+            type=str,
+            default=ServerArgs.rotated_kv_quant_config,
+            help=(
+                "Path to a .pt calibration file enabling the rotated + "
+                "non-uniform-bit KV cache pool (Hadamard rotation + Lloyd "
+                "reverse-water-filling per-coordinate bit allocation, "
+                "stored as packed uint8). When provided, the standard MHA "
+                "KV pool is replaced with RotatedQuantMHATokenToKVPool. "
+                "Schema: {layer_id: {'k': {R, bits, scale, zero}, "
+                "'v': {...}}}. See KVRoadMap.md '启发三 / M1' for details. "
+                "MHA only; not yet compatible with MLA / DSA."
+            ),
         )
         parser.add_argument(
             "--enable-fp32-lm-head",
