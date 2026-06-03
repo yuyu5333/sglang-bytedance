@@ -5,7 +5,10 @@ from typing import Optional
 import torch
 
 from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import BaseSparseAlgorithm
-from sglang.srt.mem_cache.sparsity.algorithms.deepseek_nsa import DeepSeekNSAAlgorithm
+from sglang.srt.mem_cache.sparsity.algorithms.deepseek_dsa import DeepSeekDSAAlgorithm
+from sglang.srt.mem_cache.sparsity.algorithms.freq_domain_algorithm import (
+    FreqDomainAlgorithm,
+)
 from sglang.srt.mem_cache.sparsity.algorithms.quest_algorithm import QuestAlgorithm
 from sglang.srt.mem_cache.sparsity.backend.backend_adaptor import (
     FlashAttentionAdaptor,
@@ -23,6 +26,9 @@ _global_sparse_coordinator: Optional[SparseCoordinator] = None
 _ALGORITHM_REGISTRY = {
     "quest": lambda config, device, **kw: QuestAlgorithm(config, device, **kw),
     "deepseek_nsa": lambda config, device, **kw: DeepSeekNSAAlgorithm(
+        config, device, **kw
+    ),
+    "freq_domain": lambda config, device, **kw: FreqDomainAlgorithm(
         config, device, **kw
     ),
 }
