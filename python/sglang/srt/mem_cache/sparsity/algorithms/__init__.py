@@ -2,7 +2,7 @@ from sglang.srt.mem_cache.sparsity.algorithms.base_algorithm import (
     BaseSparseAlgorithm,
     BaseSparseAlgorithmImpl,
 )
-from sglang.srt.mem_cache.sparsity.algorithms.deepseek_dsa import DeepSeekDSAAlgorithm
+from sglang.srt.mem_cache.sparsity.algorithms.deepseek_nsa import DeepSeekNSAAlgorithm
 from sglang.srt.mem_cache.sparsity.algorithms.freq_domain_algorithm import (
     FreqDomainAlgorithm,
 )
@@ -11,7 +11,7 @@ from sglang.srt.mem_cache.sparsity.algorithms.quest_algorithm import QuestAlgori
 __all__ = [
     "BaseSparseAlgorithm",
     "BaseSparseAlgorithmImpl",
-    "DeepSeekDSAAlgorithm",
+    "DeepSeekNSAAlgorithm",
     "FreqDomainAlgorithm",
     "QuestAlgorithm",
 ]
