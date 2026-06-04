@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -5,6 +6,9 @@ import torch
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseSparseAlgorithm(ABC):
@@ -165,6 +169,33 @@ class BaseSparseAlgorithmImpl(BaseSparseAlgorithm):
         self.sparsity_ratio = config.sparse_extra_config.get("sparsity_ratio", 0.7)
         self.num_recent_pages = config.sparse_extra_config.get("num_recent_pages", 4)
         self.page_size = config.page_size
+        self.debug_log = bool(config.sparse_extra_config.get("debug_log", False))
+        self.debug_log_limit = int(config.sparse_extra_config.get("debug_log_limit", 20))
+        self.debug_log_layers = config.sparse_extra_config.get("debug_log_layers", None)
+        self._debug_log_counters = {}
+
+    def _should_debug_log(self, event_name: str, layer_id: int | None = None) -> bool:
+        if not self.debug_log:
+            return False
+
+        if layer_id is not None and self.debug_log_layers is not None:
+            debug_layers = self.debug_log_layers
+            if isinstance(debug_layers, int):
+                debug_layers = {debug_layers}
+            elif isinstance(debug_layers, (list, tuple, set)):
+                debug_layers = set(int(x) for x in debug_layers)
+            else:
+                debug_layers = None
+
+            if debug_layers is not None and layer_id not in debug_layers:
+                return False
+
+        counter = self._debug_log_counters.get(event_name, 0)
+        if counter >= self.debug_log_limit:
+            return False
+
+        self._debug_log_counters[event_name] = counter + 1
+        return True
 
     def initialize_representation_pool(
         self,
@@ -185,6 +216,21 @@ class BaseSparseAlgorithmImpl(BaseSparseAlgorithm):
 
         # Initialize algorithm-specific representation pools
         self._initialize_representation_pools(start_layer, end_layer, total_num_pages)
+
+        if self._should_debug_log("initialize_representation_pool"):
+            logger.info(
+                "Sparse debug init: algo=%s layers=[%d,%d) page_size=%s total_tokens=%d total_pages=%d "
+                "sparsity_ratio=%.4f num_recent_pages=%d debug_layers=%s",
+                self.__class__.__name__,
+                start_layer,
+                end_layer,
+                self.page_size,
+                total_num_tokens,
+                total_num_pages,
+                float(self.sparsity_ratio),
+                int(self.num_recent_pages),
+                self.debug_log_layers,
+            )
 
     def construct_representations(
         self,
@@ -337,6 +383,50 @@ class BaseSparseAlgorithmImpl(BaseSparseAlgorithm):
             combined = (
                 torch.cat([topk_idx, recent_idx], dim=0).sort()[0].to(torch.int32)
             )
+
+            if self._should_debug_log("retrieve_topk", layer_id):
+                valid_scores = scores[0][torch.isfinite(scores[0])]
+                if valid_scores.numel() > 0:
+                    score_min = float(valid_scores.min().item())
+                    score_max = float(valid_scores.max().item())
+                    score_mean = float(valid_scores.mean().item())
+                    score_std = float(valid_scores.std(unbiased=False).item())
+                    preview_k = min(5, valid_scores.numel())
+                    preview_scores, preview_idx = torch.topk(
+                        scores, k=preview_k, dim=1, sorted=True
+                    )
+                    preview_idx = preview_idx[0].to(torch.int32).cpu().tolist()
+                    preview_scores = [float(x) for x in preview_scores[0].cpu().tolist()]
+                else:
+                    score_min = float("nan")
+                    score_max = float("nan")
+                    score_mean = float("nan")
+                    score_std = float("nan")
+                    preview_idx = []
+                    preview_scores = []
+
+                logger.info(
+                    "Sparse debug topk: algo=%s layer=%d req_index=%d seq_len=%d num_pages=%d recent_start=%d "
+                    "history_pages=%d topk_k=%d recent_pages=%d finite_scores=%d score_min=%.6f score_max=%.6f "
+                    "score_mean=%.6f score_std=%.6f top_pages=%s top_scores=%s selected=%s",
+                    self.__class__.__name__,
+                    layer_id,
+                    int(req_pool_indices[i].item()),
+                    int(seq_lens[i].item()),
+                    num_pages,
+                    recent_start,
+                    history_pages,
+                    k,
+                    int(recent_idx.numel()),
+                    int(valid_scores.numel()),
+                    score_min,
+                    score_max,
+                    score_mean,
+                    score_std,
+                    preview_idx,
+                    preview_scores,
+                    combined.cpu().tolist()[: min(16, combined.numel())],
+                )
 
             per_request_indices.append(combined)
             per_request_lengths.append(int(combined.numel()))

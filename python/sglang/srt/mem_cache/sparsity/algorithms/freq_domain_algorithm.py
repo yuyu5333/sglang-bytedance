@@ -169,6 +169,18 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
             self.score_mode,
         )
 
+        if self._should_debug_log("freq_init"):
+            basis_abs = self._dct_basis.abs()
+            logger.info(
+                "FreqDomain debug init: page_size=%d num_freq_keep=%d score_mode=%s "
+                "basis_abs_mean=%.6f basis_abs_max=%.6f",
+                self.page_size,
+                self.num_freq_keep,
+                self.score_mode,
+                float(basis_abs.mean().item()),
+                float(basis_abs.max().item()),
+            )
+
     # ------------------------------------------------------------------
     # Representation construction (prefill + decode share this path)
     # ------------------------------------------------------------------
@@ -249,6 +261,28 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
         self.page_freq_coeffs[layer_id][target_pages] = coeffs[idx[:, 0], idx[:, 1]]
         self.page_valid[layer_id][target_pages] = True
 
+        if self._should_debug_log("freq_construct", layer_id):
+            valid_tokens = tok_mask.sum(dim=2).to(torch.float32)
+            coeff_abs_mean = coeffs.abs().mean(dim=(0, 1, 3, 4)).cpu().tolist()
+            coeff_abs_max = coeffs.abs().amax(dim=(0, 1, 3, 4)).cpu().tolist()
+            logger.info(
+                "FreqDomain debug construct: layer=%d reqs=%d max_pages=%d valid_pages=%d "
+                "seq_len_min=%d seq_len_max=%d valid_tokens_mean=%.4f valid_tokens_min=%d "
+                "valid_tokens_max=%d coeff_abs_mean=%s coeff_abs_max=%s target_pages=%s",
+                layer_id,
+                n,
+                max_pages,
+                int(idx.shape[0]),
+                int(seq_lens.min().item()),
+                int(seq_lens.max().item()),
+                float(valid_tokens.mean().item()),
+                int(valid_tokens.min().item()),
+                int(valid_tokens.max().item()),
+                [round(float(x), 6) for x in coeff_abs_mean],
+                [round(float(x), 6) for x in coeff_abs_max],
+                target_pages[: min(8, target_pages.numel())].cpu().tolist(),
+            )
+
     # ------------------------------------------------------------------
     # Top-k page scoring in the frequency domain
     # ------------------------------------------------------------------
@@ -315,5 +349,54 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
         criticality = torch.where(
             valid_mask, criticality, torch.full_like(criticality, float("-inf"))
         )
+
+        if self._should_debug_log("freq_scores", layer_id):
+            finite_inner = inner[torch.isfinite(inner)]
+            finite_scores = criticality[torch.isfinite(criticality)]
+            if finite_inner.numel() > 0:
+                inner_abs_mean = float(finite_inner.abs().mean().item())
+                inner_abs_max = float(finite_inner.abs().max().item())
+            else:
+                inner_abs_mean = float("nan")
+                inner_abs_max = float("nan")
+
+            if finite_scores.numel() > 0:
+                score_mean = float(finite_scores.mean().item())
+                score_std = float(finite_scores.std(unbiased=False).item())
+                score_max = float(finite_scores.max().item())
+            else:
+                score_mean = float("nan")
+                score_std = float("nan")
+                score_max = float("nan")
+
+            preview_k = min(5, criticality.shape[1])
+            if preview_k > 0:
+                preview_scores, preview_idx = torch.topk(
+                    criticality, k=preview_k, dim=1, sorted=True
+                )
+                preview_idx = preview_idx[0].to(torch.int32).cpu().tolist()
+                preview_scores = [float(x) for x in preview_scores[0].cpu().tolist()]
+            else:
+                preview_idx = []
+                preview_scores = []
+
+            logger.info(
+                "FreqDomain debug scores: layer=%d score_mode=%s query_shape=%s kv_heads=%d "
+                "valid_pages=%d total_pages=%d inner_abs_mean=%.6f inner_abs_max=%.6f "
+                "score_mean=%.6f score_std=%.6f score_max=%.6f top_pages=%s top_scores=%s",
+                layer_id,
+                self.score_mode,
+                tuple(queries.shape),
+                kv_heads,
+                int(valid_mask.sum().item()),
+                int(valid_mask.numel()),
+                inner_abs_mean,
+                inner_abs_max,
+                score_mean,
+                score_std,
+                score_max,
+                preview_idx,
+                preview_scores,
+            )
 
         return criticality

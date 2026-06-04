@@ -109,7 +109,21 @@ def _parse_sparse_config(server_args) -> SparseConfig:
 
 def parse_hisparse_config(server_args) -> SparseConfig:
     """Parse hisparse config from server_args, returning defaults if no config provided."""
-    return _parse_sparse_config(server_args)
+    config = _parse_sparse_config(server_args)
+    if config.sparse_extra_config.get("debug_log", False):
+        logger.info(
+            "HiSparse debug config: algorithm=%s backend=%s top_k=%s page_size=%s "
+            "device_buffer_size=%s host_to_device_ratio=%s min_sparse_prompt_len=%s extra=%s",
+            config.algorithm,
+            config.backend,
+            config.top_k,
+            config.page_size,
+            config.device_buffer_size,
+            config.host_to_device_ratio,
+            config.min_sparse_prompt_len,
+            config.sparse_extra_config,
+        )
+    return config
 
 
 def create_sparse_coordinator(
