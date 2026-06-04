@@ -786,6 +786,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                         else self.tp_group.cpu_group
                     ),
                     host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
+                    debug_log=bool(
+                        hisparse_cfg.sparse_extra_config.get("debug_log", False)
+                    ),
+                    debug_log_limit=int(
+                        hisparse_cfg.sparse_extra_config.get("debug_log_limit", 20)
+                    ),
+                    debug_log_layers=hisparse_cfg.sparse_extra_config.get(
+                        "debug_log_layers", None
+                    ),
                 )
             self._pre_initialize_flashinfer_allreduce_workspace()
             self.init_device_graphs()

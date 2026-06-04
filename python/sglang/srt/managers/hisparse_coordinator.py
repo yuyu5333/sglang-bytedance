@@ -1,7 +1,7 @@
 # to be combined with the sparse coordinator class and sparse algorithm family
 
 import logging
-from typing import List, NamedTuple, Union
+from typing import List, NamedTuple, Optional, Union
 
 import torch
 
@@ -52,6 +52,9 @@ class HiSparseCoordinator:
         device: str,
         tp_group,
         host_to_device_ratio: int = 2,
+        debug_log: bool = False,
+        debug_log_limit: int = 20,
+        debug_log_layers: Optional[list[int]] = None,
     ):
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
@@ -59,6 +62,10 @@ class HiSparseCoordinator:
         self.device_buffer_size = device_buffer_size
         self.device = device
         self.compress_ratio = self.token_to_kv_pool_allocator.compress_ratio
+        self.debug_log = debug_log
+        self.debug_log_limit = debug_log_limit
+        self.debug_log_layers = debug_log_layers
+        self._debug_log_counters = {}
 
         self.is_dsv4_hisparse = isinstance(
             self.token_to_kv_pool_allocator, DeepSeekV4HiSparseTokenToKVPoolAllocator
@@ -166,6 +173,46 @@ class HiSparseCoordinator:
         # CPU flag: True means "skip backup on the next decode step" because
         # staging already backed up all prefill tokens.  Cleared after one step.
         self._skip_first_backup = [False] * max_num_req_slots
+
+        if self.should_debug_log("hisparse_init"):
+            logger.info(
+                "HiSparse debug init: allocator=%s is_dsv4=%s compress_ratio=%d top_k=%d "
+                "device_buffer_size=%d padded_buffer_size=%d host_to_device_ratio=%d "
+                "page_size=%d layer_num=%d tp_world_size=%d",
+                type(self.token_to_kv_pool_allocator).__name__,
+                self.is_dsv4_hisparse,
+                self.compress_ratio,
+                self.top_k,
+                self.device_buffer_size,
+                self.padded_buffer_size,
+                host_to_device_ratio,
+                self.mem_pool_device.page_size,
+                layer_num,
+                self.tp_world_size,
+            )
+
+    def should_debug_log(self, event_name: str, layer_id: Optional[int] = None) -> bool:
+        if not self.debug_log:
+            return False
+
+        if layer_id is not None and self.debug_log_layers is not None:
+            debug_layers = self.debug_log_layers
+            if isinstance(debug_layers, int):
+                debug_layers = {debug_layers}
+            elif isinstance(debug_layers, (list, tuple, set)):
+                debug_layers = set(int(x) for x in debug_layers)
+            else:
+                debug_layers = None
+
+            if debug_layers is not None and layer_id not in debug_layers:
+                return False
+
+        counter = self._debug_log_counters.get(event_name, 0)
+        if counter >= self.debug_log_limit:
+            return False
+
+        self._debug_log_counters[event_name] = counter + 1
+        return True
 
     def set_decode_producer_stream(self, stream) -> None:
         self.decode_producer_stream = stream
@@ -435,6 +482,14 @@ class HiSparseCoordinator:
             req.hisparse_staging = False
             finish_count -= 1
             ready_reqs.append(req)
+
+        if ready_reqs and self.should_debug_log("collect_ready_reqs"):
+            logger.info(
+                "HiSparse debug staging: ready_count=%d req_pool_indices=%s kv_allocated_lens=%s",
+                len(ready_reqs),
+                [int(req.req_pool_idx) for req in ready_reqs if req.req_pool_idx is not None],
+                [int(req.kv_allocated_len) for req in ready_reqs],
+            )
         return ready_reqs
 
     def map_last_loc_to_buffer(
@@ -469,6 +524,16 @@ class HiSparseCoordinator:
             self.mem_pool_device.full_to_hisparse_device_index_mapping[
                 compressed_locs
             ] = reserved_buffer_loc
+            if self.should_debug_log("map_last_loc_to_buffer_non_dsv4"):
+                logger.info(
+                    "HiSparse debug map_last: non_dsv4 batch=%d seq_len_min=%d seq_len_max=%d "
+                    "req_pool_indices=%s reserved_preview=%s",
+                    int(req_pool_indices.numel()),
+                    int(seq_lens.min().item()),
+                    int(seq_lens.max().item()),
+                    req_pool_indices[: min(8, req_pool_indices.numel())].cpu().tolist(),
+                    reserved_buffer_loc[: min(8, reserved_buffer_loc.numel())].cpu().tolist(),
+                )
             return
 
         active_reqs = seq_lens % self.compress_ratio == 0
@@ -497,6 +562,19 @@ class HiSparseCoordinator:
         self.mem_pool_device.full_to_hisparse_device_index_mapping[compressed_locs] = (
             reserved_buffer_loc
         )
+
+        if self.should_debug_log("map_last_loc_to_buffer_dsv4"):
+            logger.info(
+                "HiSparse debug map_last: dsv4 active_reqs=%d seq_len_min=%d seq_len_max=%d "
+                "compressed_seq_len_min=%d compressed_seq_len_max=%d req_pool_indices=%s reserved_preview=%s",
+                int(active_req_pool_indices.numel()),
+                int(active_seq_lens.min().item()),
+                int(active_seq_lens.max().item()),
+                int(compressed_seq_lens.min().item()),
+                int(compressed_seq_lens.max().item()),
+                active_req_pool_indices[: min(8, active_req_pool_indices.numel())].cpu().tolist(),
+                reserved_buffer_loc[: min(8, reserved_buffer_loc.numel())].cpu().tolist(),
+            )
 
     def _eager_backup_previous_token(
         self,
@@ -800,4 +878,34 @@ class HiSparseCoordinator:
             block_size=block_size,
             num_real_reqs=self.num_real_reqs,
         )
+
+        if self.should_debug_log("swap_in_selected_pages", layer_id):
+            valid_input = top_k_result[top_k_result >= 0]
+            valid_output = top_k_indices[top_k_indices >= 0]
+            if top_k_result.numel() > 0:
+                input_preview = (
+                    top_k_result[0, : min(8, top_k_result.shape[1])].detach().cpu().tolist()
+                )
+            else:
+                input_preview = []
+            if top_k_indices.numel() > 0:
+                output_preview = (
+                    top_k_indices[0, : min(8, top_k_indices.shape[1])].detach().cpu().tolist()
+                )
+            else:
+                output_preview = []
+
+            logger.info(
+                "HiSparse debug swap_in: layer=%d num_reqs=%d compressed_seq_len_min=%d "
+                "compressed_seq_len_max=%d valid_input=%d valid_output=%d input_preview=%s "
+                "output_preview=%s",
+                layer_id,
+                num_reqs,
+                int(compressed_seq_lens.min().item()) if compressed_seq_lens.numel() > 0 else -1,
+                int(compressed_seq_lens.max().item()) if compressed_seq_lens.numel() > 0 else -1,
+                int(valid_input.numel()),
+                int(valid_output.numel()),
+                input_preview,
+                output_preview,
+            )
         return top_k_indices

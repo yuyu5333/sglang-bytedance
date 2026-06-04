@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import torch
@@ -37,6 +38,9 @@ if is_hip():
 else:
     FP8_DTYPE = torch.float8_e4m3fn
     FP8_MAX = torch.finfo(FP8_DTYPE).max
+
+
+logger = logging.getLogger(__name__)
 
 
 def fp8_paged_mqa_logits_torch(
@@ -408,6 +412,27 @@ class C4IndexerBackendMixin:
             hisparse_coordinator is not None and forward_batch.forward_mode.is_decode()
         )
 
+        if (
+            hisparse_coordinator is not None
+            and hisparse_coordinator.should_debug_log(
+                "dsv4_indexer_route", c4_indexer.layer_id
+            )
+        ):
+            seq_lens = indexer_metadata.c4_seq_lens
+            seq_lens_flat = seq_lens.reshape(-1)
+            logger.info(
+                "HiSparse debug indexer route: layer=%d capture_enabled=%s hisparse_decode=%s "
+                "forward_mode=%s batch=%d c4_seq_len_min=%d c4_seq_len_max=%d topk_shape=%s",
+                c4_indexer.layer_id,
+                capture_enabled,
+                hisparse_decode,
+                getattr(forward_batch.forward_mode, "name", str(forward_batch.forward_mode)),
+                int(core_metadata.c4_sparse_page_indices.size(0)),
+                int(seq_lens_flat.min().item()) if seq_lens_flat.numel() > 0 else -1,
+                int(seq_lens_flat.max().item()) if seq_lens_flat.numel() > 0 else -1,
+                tuple(core_metadata.c4_sparse_page_indices.shape),
+            )
+
         raw_indices = None
         if capture_enabled:
             raw_indices = torch.empty_like(core_metadata.c4_sparse_page_indices)
@@ -443,11 +468,64 @@ class C4IndexerBackendMixin:
                 indexer_metadata.c4_page_size,
                 raw_indices,
             )
+
+        if (
+            hisparse_coordinator is not None
+            and hisparse_coordinator.should_debug_log(
+                "dsv4_indexer_topk", c4_indexer.layer_id
+            )
+        ):
+            raw_preview = []
+            sparse_preview = []
+            valid_raw = 0
+            valid_sparse = 0
+            if raw_indices is not None:
+                valid_raw = int((raw_indices >= 0).sum().item())
+                if raw_indices.numel() > 0:
+                    raw_preview = (
+                        raw_indices[0, : min(8, raw_indices.shape[1])]
+                        .detach()
+                        .cpu()
+                        .tolist()
+                    )
+            sparse_indices = core_metadata.c4_sparse_page_indices
+            if sparse_indices is not None:
+                valid_sparse = int((sparse_indices >= 0).sum().item())
+                if sparse_indices.numel() > 0:
+                    sparse_preview = (
+                        sparse_indices[0, : min(8, sparse_indices.shape[1])]
+                        .detach()
+                        .cpu()
+                        .tolist()
+                    )
+
+            logger.info(
+                "HiSparse debug indexer topk: layer=%d hisparse_decode=%s raw_indices=%s "
+                "valid_raw=%d valid_sparse=%d raw_preview=%s sparse_preview=%s",
+                c4_indexer.layer_id,
+                hisparse_decode,
+                raw_indices is not None,
+                valid_raw,
+                valid_sparse,
+                raw_preview,
+                sparse_preview,
+            )
+
         if hisparse_coordinator is not None:
             if hisparse_decode:
                 compress_layer_id = token_to_kv_pool.layer_mapping[
                     c4_indexer.layer_id
                 ].compress_layer_id
+                if hisparse_coordinator.should_debug_log(
+                    "dsv4_indexer_swap_entry", compress_layer_id
+                ):
+                    logger.info(
+                        "HiSparse debug indexer swap_entry: layer=%d compress_layer=%d reqs=%d raw_indices=%s",
+                        c4_indexer.layer_id,
+                        compress_layer_id,
+                        int(forward_batch.req_pool_indices.numel()),
+                        raw_indices is not None,
+                    )
                 core_metadata.c4_sparse_page_indices = (
                     hisparse_coordinator.swap_in_selected_pages(
                         req_pool_indices=forward_batch.req_pool_indices,
@@ -461,6 +539,29 @@ class C4IndexerBackendMixin:
                     token_to_kv_pool.c4_kv_pool.translate_loc_to_hisparse_device(
                         core_metadata.c4_sparse_page_indices
                     )
+                )
+
+            if hisparse_coordinator.should_debug_log(
+                "dsv4_indexer_post_swap", c4_indexer.layer_id
+            ):
+                sparse_indices = core_metadata.c4_sparse_page_indices
+                post_preview = []
+                valid_post = 0
+                if sparse_indices is not None:
+                    valid_post = int((sparse_indices >= 0).sum().item())
+                    if sparse_indices.numel() > 0:
+                        post_preview = (
+                            sparse_indices[0, : min(8, sparse_indices.shape[1])]
+                            .detach()
+                            .cpu()
+                            .tolist()
+                        )
+                logger.info(
+                    "HiSparse debug indexer post_swap: layer=%d hisparse_decode=%s valid_post=%d post_preview=%s",
+                    c4_indexer.layer_id,
+                    hisparse_decode,
+                    valid_post,
+                    post_preview,
                 )
 
         if capture_enabled:
