@@ -340,20 +340,6 @@ class BaseSparseAlgorithmImpl(BaseSparseAlgorithm):
 
             per_request_indices.append(combined)
             per_request_lengths.append(int(combined.numel()))
-            if not hasattr(self, "_debug_budget_log_count"):
-                self._debug_budget_log_count = 0
-            if self._debug_budget_log_count < 8:
-                self._debug_budget_log_count += 1
-                finite_scores = scores[torch.isfinite(scores)]
-                # #region debug-point E:retrieve-topk-budget
-                exec(
-                    "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
-                    " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
-                    " except Exception:\n  pass\n"
-                    " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'E', 'location': 'base_algorithm:retrieve_topk', 'msg': '[DEBUG] sparse budget selected pages', 'data': {'layer_id': int(layer_id), 'request_index': int(i), 'num_pages': int(num_pages), 'recent_start': int(recent_start), 'history_pages': int(history_pages), 'history_k': int(k), 'num_recent_pages': int(self.num_recent_pages), 'selected_total': int(combined.numel()), 'sparsity_ratio': float(self.sparsity_ratio), 'finite_score_count': int(finite_scores.numel()), 'finite_score_mean': float(finite_scores.mean().item()) if finite_scores.numel() > 0 else None, 'topk_sample': topk_idx[: min(8, topk_idx.numel())].tolist(), 'recent_sample': recent_idx[: min(8, recent_idx.numel())].tolist(), 'combined_sample': combined[: min(8, combined.numel())].tolist()}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
-                    "except Exception:\n pass"
-                )
-                # #endregion
 
         max_len = max(max(per_request_lengths, default=0), 1)
         out_indices = torch.full((bs, max_len), -1, dtype=torch.int32, device=device)

@@ -800,17 +800,4 @@ class HiSparseCoordinator:
             block_size=block_size,
             num_real_reqs=self.num_real_reqs,
         )
-        if not hasattr(self, "_debug_swap_in_log_count"):
-            self._debug_swap_in_log_count = 0
-        if self._debug_swap_in_log_count < 4:
-            self._debug_swap_in_log_count += 1
-            # #region debug-point A:hisparse-swap-in
-            exec(
-                "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
-                " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
-                " except Exception:\n  pass\n"
-                " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'hisparse_coordinator:swap_in_selected_pages', 'msg': '[DEBUG] hisparse swap-in executed', 'data': {'layer_id': int(layer_id), 'num_reqs': int(num_reqs), 'top_k': int(self.top_k), 'device_buffer_size': int(self.device_buffer_size), 'compressed_seq_lens': compressed_seq_lens[: min(4, compressed_seq_lens.numel())].tolist(), 'top_k_result_shape': list(top_k_result.shape), 'top_k_result_sample': top_k_result[: min(2, top_k_result.shape[0]), : min(8, top_k_result.shape[1])].tolist() if top_k_result.numel() > 0 else []}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
-                "except Exception:\n pass"
-            )
-            # #endregion
         return top_k_indices

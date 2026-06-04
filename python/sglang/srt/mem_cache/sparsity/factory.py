@@ -45,15 +45,6 @@ def _create_sparse_algorithm(
     if factory is None:
         raise ValueError(f"Unknown sparse algorithm: {algorithm_name}")
 
-    # #region debug-point A:create-sparse-algorithm
-    exec(
-        "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
-        " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
-        " except Exception:\n  pass\n"
-        " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'factory:_create_sparse_algorithm', 'msg': '[DEBUG] sparse algorithm requested', 'data': {'algorithm': algorithm_name, 'backend': config.backend, 'page_size': config.page_size}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
-        "except Exception:\n pass"
-    )
-    # #endregion
     return factory(config, device, **kwargs)
 
 
@@ -104,15 +95,6 @@ def _parse_sparse_config(server_args) -> SparseConfig:
     min_sparse_prompt_len = extra_config.pop("min_sparse_prompt_len", None)
     page_size = extra_config.pop("page_size", None)
 
-    # #region debug-point A:parse-hisparse-config
-    exec(
-        "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
-        " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
-        " except Exception:\n  pass\n"
-        " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'factory:_parse_sparse_config', 'msg': '[DEBUG] hisparse config parsed', 'data': {'algorithm': algorithm, 'backend': backend, 'top_k': top_k, 'device_buffer_size': device_buffer_size, 'host_to_device_ratio': host_to_device_ratio, 'page_size': page_size, 'extra_keys': sorted(list(extra_config.keys()))}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
-        "except Exception:\n pass"
-    )
-    # #endregion
     return SparseConfig(
         top_k=top_k,
         device_buffer_size=device_buffer_size,
@@ -156,15 +138,6 @@ def create_sparse_coordinator(
         device=device,
     )
     register_sparse_coordinator(coordinator)
-    # #region debug-point A:create-sparse-coordinator
-    exec(
-        "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
-        " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
-        " except Exception:\n  pass\n"
-        " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'factory:create_sparse_coordinator', 'msg': '[DEBUG] sparse coordinator created', 'data': {'algorithm_type': type(algorithm).__name__, 'backend_type': type(backend_adaptor).__name__, 'start_layer': start_layer, 'end_layer': end_layer}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
-        "except Exception:\n pass"
-    )
-    # #endregion
     return coordinator
 
 
