@@ -519,12 +519,27 @@ class C4IndexerBackendMixin:
                 if hisparse_coordinator.should_debug_log(
                     "dsv4_indexer_swap_entry", compress_layer_id
                 ):
+                    raw_preview = []
+                    valid_raw = 0
+                    if raw_indices is not None:
+                        valid_raw = int((raw_indices >= 0).sum().item())
+                        if raw_indices.numel() > 0:
+                            raw_preview = (
+                                raw_indices[0, : min(16, raw_indices.shape[1])]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            )
                     logger.info(
-                        "HiSparse debug indexer swap_entry: layer=%d compress_layer=%d reqs=%d raw_indices=%s",
+                        "HiSparse debug indexer swap_entry: layer=%d compress_layer=%d reqs=%d "
+                        "raw_indices=%s valid_raw=%d compressed_seq_lens=%s raw_preview=%s",
                         c4_indexer.layer_id,
                         compress_layer_id,
                         int(forward_batch.req_pool_indices.numel()),
                         raw_indices is not None,
+                        valid_raw,
+                        indexer_metadata.c4_seq_lens.reshape(-1)[:16].detach().cpu().tolist(),
+                        raw_preview,
                     )
                 core_metadata.c4_sparse_page_indices = (
                     hisparse_coordinator.swap_in_selected_pages(
@@ -547,21 +562,30 @@ class C4IndexerBackendMixin:
                 sparse_indices = core_metadata.c4_sparse_page_indices
                 post_preview = []
                 valid_post = 0
+                unique_post = []
                 if sparse_indices is not None:
                     valid_post = int((sparse_indices >= 0).sum().item())
                     if sparse_indices.numel() > 0:
                         post_preview = (
-                            sparse_indices[0, : min(8, sparse_indices.shape[1])]
+                            sparse_indices[0, : min(16, sparse_indices.shape[1])]
+                            .detach()
+                            .cpu()
+                            .tolist()
+                        )
+                        unique_post = (
+                            torch.unique(sparse_indices[sparse_indices >= 0])[:16]
                             .detach()
                             .cpu()
                             .tolist()
                         )
                 logger.info(
-                    "HiSparse debug indexer post_swap: layer=%d hisparse_decode=%s valid_post=%d post_preview=%s",
+                    "HiSparse debug indexer post_swap: layer=%d hisparse_decode=%s valid_post=%d "
+                    "post_preview=%s unique_post=%s",
                     c4_indexer.layer_id,
                     hisparse_decode,
                     valid_post,
                     post_preview,
+                    unique_post,
                 )
 
         if capture_enabled:

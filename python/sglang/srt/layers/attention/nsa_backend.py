@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple, TypeAlias
@@ -29,6 +30,9 @@ from sglang.srt.layers.attention.nsa.utils import (
     nsa_cp_round_robin_split_q_seqs,
     pad_nsa_cache_seqlens,
 )
+
+
+logger = logging.getLogger(__name__)
 from sglang.srt.layers.attention.utils import (
     concat_mla_absorb_q_general,
     mla_quantize_and_rope_for_fp8,
@@ -1623,6 +1627,53 @@ class NativeSparseAttnBackend(
                 page_table=metadata.page_table_1,
                 topk_indices=topk_indices,
                 page_size=1,
+            )
+
+        if (
+            forward_batch.hisparse_coordinator is not None
+            and forward_batch.hisparse_coordinator.should_debug_log(
+                "nsa_attention_input", layer.layer_id
+            )
+        ):
+            valid_topk = int((topk_indices >= 0).sum().item()) if topk_indices is not None else 0
+            valid_page_table = (
+                int((page_table_1 >= 0).sum().item()) if page_table_1 is not None else 0
+            )
+            topk_preview = []
+            page_table_preview = []
+            unique_page_table = []
+            if topk_indices is not None and topk_indices.numel() > 0:
+                topk_preview = (
+                    topk_indices[0, : min(16, topk_indices.shape[1])]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+            if page_table_1 is not None and page_table_1.numel() > 0:
+                page_table_preview = (
+                    page_table_1[0, : min(16, page_table_1.shape[1])]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+                unique_page_table = (
+                    torch.unique(page_table_1[page_table_1 >= 0])[:16]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+
+            logger.info(
+                "HiSparse debug attention input: layer=%d impl=%s q_tokens=%d valid_topk=%d "
+                "valid_page_table=%d topk_preview=%s page_table_preview=%s unique_page_table=%s",
+                layer.layer_id,
+                self.nsa_decode_impl,
+                int(q_nope.shape[0]),
+                valid_topk,
+                valid_page_table,
+                topk_preview,
+                page_table_preview,
+                unique_page_table,
             )
 
         if self.nsa_decode_impl == "flashmla_sparse":
