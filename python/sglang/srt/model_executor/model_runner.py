@@ -774,6 +774,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 hisparse_top_k = getattr(
                     self.model_config.hf_text_config, "index_topk", hisparse_cfg.top_k
                 )
+                # #region debug-point A:model-runner-hisparse-init
+                exec(
+                    "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
+                    " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
+                    " except Exception:\n  pass\n"
+                    " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'model_runner:init_hisparse', 'msg': '[DEBUG] model runner using hisparse coordinator path', 'data': {'enable_hisparse': bool(self.enable_hisparse), 'algorithm': hisparse_cfg.algorithm, 'backend': hisparse_cfg.backend, 'top_k': hisparse_top_k, 'device_buffer_size': hisparse_cfg.device_buffer_size, 'host_to_device_ratio': hisparse_cfg.host_to_device_ratio, 'page_size': hisparse_cfg.page_size, 'extra_config': dict(hisparse_cfg.sparse_extra_config)}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
+                    "except Exception:\n pass"
+                )
+                # #endregion
                 self.hisparse_coordinator = HiSparseCoordinator(
                     req_to_token_pool=self.req_to_token_pool,
                     token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,

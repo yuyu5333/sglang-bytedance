@@ -118,6 +118,17 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
         self.page_valid = {}
         # DCT basis cache: only depends on (page_size, num_freq_keep, device).
         self._dct_basis = None
+        self._debug_repr_log_count = 0
+        self._debug_score_log_count = 0
+        # #region debug-point B:freq-domain-init
+        exec(
+            "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
+            " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
+            " except Exception:\n  pass\n"
+            " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'B', 'location': 'freq_domain:__init__', 'msg': '[DEBUG] freq_domain algorithm initialized', 'data': {'num_freq_keep': int(self.num_freq_keep), 'score_mode': self.score_mode, 'page_size': int(self.page_size), 'sparsity_ratio': float(self.sparsity_ratio), 'num_recent_pages': int(self.num_recent_pages)}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
+            "except Exception:\n pass"
+        )
+        # #endregion
 
     # ------------------------------------------------------------------
     # Pool initialisation
@@ -168,6 +179,15 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
             self.num_freq_keep,
             self.score_mode,
         )
+        # #region debug-point B:init-representation-pool
+        exec(
+            "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
+            " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
+            " except Exception:\n  pass\n"
+            " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'B', 'location': 'freq_domain:_initialize_representation_pools', 'msg': '[DEBUG] freq_domain representation pools initialized', 'data': {'start_layer': int(start_layer), 'end_layer': int(end_layer), 'total_num_pages': int(total_num_pages), 'num_freq_keep': int(self.num_freq_keep), 'page_size': int(self.page_size), 'head_num': int(head_num), 'head_dim': int(head_dim)}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
+            "except Exception:\n pass"
+        )
+        # #endregion
 
     # ------------------------------------------------------------------
     # Representation construction (prefill + decode share this path)
@@ -248,6 +268,19 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
         )
         self.page_freq_coeffs[layer_id][target_pages] = coeffs[idx[:, 0], idx[:, 1]]
         self.page_valid[layer_id][target_pages] = True
+        if self._debug_repr_log_count < 4:
+            self._debug_repr_log_count += 1
+            valid_tokens = tok_mask.sum(dim=-1)
+            tail_pages = (valid_tokens < page_size) & pg_mask
+            # #region debug-point C:compute-page-representations
+            exec(
+                "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
+                " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
+                " except Exception:\n  pass\n"
+                " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'C', 'location': 'freq_domain:_compute_page_representations', 'msg': '[DEBUG] freq_domain page representations computed', 'data': {'layer_id': int(layer_id), 'batch_size': int(n), 'max_pages': int(max_pages), 'page_size': int(page_size), 'valid_page_count': int(idx.shape[0]), 'tail_page_count': int(tail_pages.sum().item()), 'valid_tokens_min': int(valid_tokens[pg_mask].min().item()) if pg_mask.any() else 0, 'valid_tokens_max': int(valid_tokens[pg_mask].max().item()) if pg_mask.any() else 0, 'valid_tokens_sample': valid_tokens[pg_mask][: min(8, valid_tokens[pg_mask].numel())].tolist() if pg_mask.any() else []}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
+                "except Exception:\n pass"
+            )
+            # #endregion
 
     # ------------------------------------------------------------------
     # Top-k page scoring in the frequency domain
@@ -315,5 +348,17 @@ class FreqDomainAlgorithm(BaseSparseAlgorithmImpl):
         criticality = torch.where(
             valid_mask, criticality, torch.full_like(criticality, float("-inf"))
         )
+        if self._debug_score_log_count < 8:
+            self._debug_score_log_count += 1
+            finite_scores = criticality[torch.isfinite(criticality)]
+            # #region debug-point D:retrieve-page-scores
+            exec(
+                "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
+                " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
+                " except Exception:\n  pass\n"
+                " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'D', 'location': 'freq_domain:_retrieve_page_scores', 'msg': '[DEBUG] freq_domain page scores computed', 'data': {'layer_id': int(layer_id), 'score_mode': self.score_mode, 'kv_heads': int(kv_heads), 'q_heads': int(q_heads), 'gqa_group': int(q_heads // kv_heads) if q_heads >= kv_heads and kv_heads > 0 and q_heads % kv_heads == 0 else None, 'phys_pages_shape': list(phys_pages.shape), 'valid_count': int(valid_mask.sum().item()), 'finite_score_count': int(finite_scores.numel()), 'score_min': float(finite_scores.min().item()) if finite_scores.numel() > 0 else None, 'score_max': float(finite_scores.max().item()) if finite_scores.numel() > 0 else None, 'score_mean': float(finite_scores.mean().item()) if finite_scores.numel() > 0 else None, 'score_sample': finite_scores[: min(8, finite_scores.numel())].tolist() if finite_scores.numel() > 0 else []}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
+                "except Exception:\n pass"
+            )
+            # #endregion
 
         return criticality

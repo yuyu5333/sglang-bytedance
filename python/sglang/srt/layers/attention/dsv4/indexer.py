@@ -443,6 +443,20 @@ class C4IndexerBackendMixin:
                 indexer_metadata.c4_page_size,
                 raw_indices,
             )
+        if hisparse_coordinator is not None and hisparse_decode:
+            if not hasattr(self, "_debug_hisparse_indexer_log_count"):
+                self._debug_hisparse_indexer_log_count = 0
+            if self._debug_hisparse_indexer_log_count < 4:
+                self._debug_hisparse_indexer_log_count += 1
+                # #region debug-point A:indexer-hisparse-decode
+                exec(
+                    "try:\n import json, urllib.request\n _p='.dbg/freq-domain-accuracy.env'; _u='http://127.0.0.1:7777/event'; _s='freq-domain-accuracy'\n"
+                    " try:\n  with open(_p) as _f: _c=_f.read(); _u=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SERVER_URL=')), _u); _s=next((l.split('=',1)[1] for l in _c.splitlines() if l.startswith('DEBUG_SESSION_ID=')), _s)\n"
+                    " except Exception:\n  pass\n"
+                    " urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({'sessionId': _s, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'indexer:hisparse_decode', 'msg': '[DEBUG] indexer produced hisparse raw indices', 'data': {'capture_enabled': bool(capture_enabled), 'hisparse_decode': bool(hisparse_decode), 'page_size': int(indexer_metadata.c4_page_size), 'seq_lens': indexer_metadata.c4_seq_lens[: min(4, indexer_metadata.c4_seq_lens.numel())].tolist(), 'raw_indices_shape': list(raw_indices.shape) if raw_indices is not None else None, 'raw_indices_sample': raw_indices[: min(2, raw_indices.shape[0]), : min(8, raw_indices.shape[1])].tolist() if raw_indices is not None and raw_indices.numel() > 0 else []}}).encode(), headers={'Content-Type': 'application/json'}), timeout=0.2).read()\n"
+                    "except Exception:\n pass"
+                )
+                # #endregion
         if hisparse_coordinator is not None:
             if hisparse_decode:
                 compress_layer_id = token_to_kv_pool.layer_mapping[
