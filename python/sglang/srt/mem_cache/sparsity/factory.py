@@ -140,6 +140,17 @@ def create_sparse_coordinator(
     backend_adaptor = _create_backend_adaptor(
         config.backend, device, algorithm, req_to_token_pool
     )
+    if config.sparse_extra_config.get("debug_log", False):
+        logger.info(
+            "Sparse coordinator activated: algorithm=%s algorithm_class=%s backend=%s "
+            "device=%s start_layer=%s end_layer=%s",
+            config.algorithm,
+            type(algorithm).__name__,
+            config.backend,
+            device,
+            start_layer,
+            end_layer,
+        )
 
     coordinator = SparseCoordinator(
         config=config,
