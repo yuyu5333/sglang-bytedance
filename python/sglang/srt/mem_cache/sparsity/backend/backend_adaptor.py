@@ -72,8 +72,39 @@ class NSABackendAdaptor(BackendAdaptor):
         """
         Transform logical page indices to physical device indices for NSA backend.
         """
-        # TODO: Implement NSA backend adaptor logic
-        pass
+        if not sparse_mask.any():
+            return None
+
+        physical_pages = self._logical_to_physical_pages_batch(
+            selected_indices,
+            forward_batch.req_pool_indices,
+            req_to_token,
+            page_size,
+        )
+
+        return physical_pages
+
+    def _logical_to_physical_pages_batch(
+        self,
+        logical_pages: torch.Tensor,
+        req_pool_indices: torch.Tensor,
+        req_to_token: torch.Tensor,
+        page_size: int,
+    ) -> torch.Tensor:
+        bs, max_pages = logical_pages.shape
+
+        page_starts = logical_pages * page_size
+        page_starts_clamped = page_starts.clamp(min=0)
+
+        req_indices_expanded = req_pool_indices.unsqueeze(1).expand(-1, max_pages)
+        first_tokens = req_to_token[req_indices_expanded, page_starts_clamped]
+
+        physical_pages = first_tokens // page_size
+        physical_pages = torch.where(
+            logical_pages >= 0, physical_pages, torch.zeros_like(physical_pages) - 1
+        )
+
+        return physical_pages.to(torch.int32)
 
 
 class FlashAttentionAdaptor(BackendAdaptor):

@@ -157,6 +157,44 @@ class SparseCoordinator:
         # TODO: Implement request end handling
         # - Release host indices if any were allocated for offloading
 
+    def request_finished(self, req: "Req") -> None:
+        """Alias for on_request_end for compatibility with HiSparseCoordinator."""
+        self.on_request_end(req)
+
+    def admit_request_into_staging(self, req: "Req") -> None:
+        """Alias for on_request_begin for compatibility with HiSparseCoordinator."""
+        self.on_request_begin(req)
+
+    def wait_for_pending_backup(self) -> None:
+        """Compatibility with HiSparseCoordinator."""
+        pass
+
+    def collect_ready_reqs(self) -> List["Req"]:
+        """Compatibility with HiSparseCoordinator."""
+        # For SparseCoordinator, all requests are ready as we don't do staging
+        return []
+
+    def set_decode_producer_stream(self, stream) -> None:
+        """Compatibility with HiSparseCoordinator."""
+        pass
+
+    def map_last_loc_to_buffer(
+        self,
+        seq_lens: torch.Tensor,
+        out_cache_loc: torch.Tensor,
+        req_pool_indices: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+    ) -> None:
+        """Compatibility with HiSparseCoordinator."""
+        pass
+
+    def should_debug_log(self, event: str, layer_id: int) -> bool:
+        """Compatibility with HiSparseCoordinator."""
+        # Delegate to algorithm's debug log logic if available
+        if hasattr(self.algorithm, "_should_debug_log"):
+            return self.algorithm._should_debug_log(event, layer_id)
+        return False
+
     def forward_begin(self, forward_batch: "ForwardBatch") -> None:
         """
         Handle forward pass begin event. Called before each forward pass starts.

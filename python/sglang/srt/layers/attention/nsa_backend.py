@@ -1614,12 +1614,26 @@ class NativeSparseAttnBackend(
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
         if forward_batch.hisparse_coordinator is not None:
-            page_table_1 = forward_batch.hisparse_coordinator.swap_in_selected_pages(
-                forward_batch.req_pool_indices,
-                forward_batch.seq_lens,
-                topk_indices,
-                layer.layer_id,
+            from sglang.srt.mem_cache.sparsity.core.sparse_coordinator import (
+                SparseCoordinator,
             )
+
+            if isinstance(forward_batch.hisparse_coordinator, SparseCoordinator):
+                page_table_1 = forward_batch.hisparse_coordinator.attention_begin(
+                    query=q_nope,
+                    key=None,
+                    value=None,
+                    layer=layer,
+                    forward_batch=forward_batch,
+                    attn_metadata=metadata,
+                )
+            else:
+                page_table_1 = forward_batch.hisparse_coordinator.swap_in_selected_pages(
+                    forward_batch.req_pool_indices,
+                    forward_batch.seq_lens,
+                    topk_indices,
+                    layer.layer_id,
+                )
         elif envs.SGLANG_NSA_FUSE_TOPK.get():
             page_table_1 = topk_indices
         else:

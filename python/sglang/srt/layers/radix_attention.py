@@ -135,7 +135,7 @@ class RadixAttention(nn.Module):
                 )
             return output
         else:
-            return forward_batch.attn_backend.forward(
+            output = forward_batch.attn_backend.forward(
                 q,
                 k,
                 v,
@@ -144,6 +144,18 @@ class RadixAttention(nn.Module):
                 save_kv_cache,
                 **kwargs,
             )
+
+            if forward_batch.hisparse_coordinator is not None:
+                from sglang.srt.mem_cache.sparsity.core.sparse_coordinator import (
+                    SparseCoordinator,
+                )
+
+                if isinstance(forward_batch.hisparse_coordinator, SparseCoordinator):
+                    forward_batch.hisparse_coordinator.attention_end(
+                        output, self, forward_batch
+                    )
+
+            return output
 
 
 @register_custom_op(mutates_args=["output"])
@@ -204,6 +216,16 @@ def unified_attention_with_output(
         save_kv_cache,
         **kwargs,
     )
+
+    if forward_batch.hisparse_coordinator is not None:
+        from sglang.srt.mem_cache.sparsity.core.sparse_coordinator import (
+            SparseCoordinator,
+        )
+
+        if isinstance(forward_batch.hisparse_coordinator, SparseCoordinator):
+            forward_batch.hisparse_coordinator.attention_end(
+                ret, attention_layer, forward_batch
+            )
     forward_batch.out_cache_loc = original_out_cache_loc
     forward_batch.out_cache_loc_swa = original_out_cache_loc_swa
     if original_out_cache_loc_swa is not None and hasattr(

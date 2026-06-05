@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
     from sglang.srt.layers.logits_processor import LogitsProcessorOutput
     from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
+    from sglang.srt.mem_cache.sparsity.core.sparse_coordinator import SparseCoordinator
     from sglang.srt.managers.schedule_batch import ModelWorkerBatch, MultimodalInputs
     from sglang.srt.mem_cache.memory_pool import KVCache, ReqToTokenPool
     from sglang.srt.model_executor.model_runner import ModelRunner
@@ -432,7 +433,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     return_pooled_hidden_states: bool = False
 
     # For hisparse
-    hisparse_coordinator: Optional[HiSparseCoordinator] = None
+    hisparse_coordinator: Optional[Union[HiSparseCoordinator, SparseCoordinator]] = None
 
     # For ngram embedding
     ngram_embedding_info: Optional[NgramEmbeddingInfo] = None

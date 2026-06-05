@@ -774,80 +774,93 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 hisparse_top_k = getattr(
                     self.model_config.hf_text_config, "index_topk", hisparse_cfg.top_k
                 )
-                if bool(hisparse_cfg.sparse_extra_config.get("debug_log", False)):
-                    allocator_name = type(self.token_to_kv_pool_allocator).__name__
-                    requested_algorithm = hisparse_cfg.algorithm
-                    requested_extra = hisparse_cfg.sparse_extra_config
-                    using_native_hisparse = (
-                        allocator_name == "DeepSeekV4HiSparseTokenToKVPoolAllocator"
+
+                if hisparse_cfg.algorithm == "freq_domain":
+                    from sglang.srt.mem_cache.sparsity import create_sparse_coordinator
+
+                    self.hisparse_coordinator = create_sparse_coordinator(
+                        device=self.device,
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool=self.token_to_kv_pool,
+                        start_layer=0,
+                        end_layer=self.model_config.num_hidden_layers - 1,
+                        server_args=self.server_args,
                     )
-                    logger.info(
-                        "HiSparse effective path: requested_algorithm=%s requested_top_k=%s "
-                        "effective_top_k=%s allocator=%s runtime=%s create_sparse_coordinator_called=%s",
-                        requested_algorithm,
-                        hisparse_cfg.top_k,
-                        hisparse_top_k,
-                        allocator_name,
-                        (
-                            "HiSparseCoordinator(native_dsv4)"
-                            if using_native_hisparse
-                            else "HiSparseCoordinator(generic)"
-                        ),
-                        False,
-                    )
-                    if using_native_hisparse and requested_algorithm not in (
-                        None,
-                        "",
-                        "deepseek_nsa",
-                    ):
-                        logger.warning(
-                            "HiSparse requested algorithm is NOT active on this runtime path: "
-                            "requested_algorithm=%s extra_config=%s ignored_keys=%s reason=%s",
-                            requested_algorithm,
-                            requested_extra,
-                            [
-                                key
-                                for key in (
-                                    "algorithm",
-                                    "num_freq_keep",
-                                    "score_mode",
-                                    "sparsity_ratio",
-                                    "num_recent_pages",
-                                )
-                                if key == "algorithm" or key in requested_extra
-                            ],
-                            "enable_hisparse on DeepSeekV4 constructs native DSV4 HiSparseCoordinator "
-                            "and does not instantiate SparseCoordinator/FreqDomainAlgorithm",
+                else:
+                    if bool(hisparse_cfg.sparse_extra_config.get("debug_log", False)):
+                        allocator_name = type(self.token_to_kv_pool_allocator).__name__
+                        requested_algorithm = hisparse_cfg.algorithm
+                        requested_extra = hisparse_cfg.sparse_extra_config
+                        using_native_hisparse = (
+                            allocator_name == "DeepSeekV4HiSparseTokenToKVPoolAllocator"
                         )
-                    if hisparse_top_k != hisparse_cfg.top_k:
-                        logger.warning(
-                            "HiSparse top_k override: requested_top_k=%s effective_top_k=%s source=%s",
+                        logger.info(
+                            "HiSparse effective path: requested_algorithm=%s requested_top_k=%s "
+                            "effective_top_k=%s allocator=%s runtime=%s create_sparse_coordinator_called=%s",
+                            requested_algorithm,
                             hisparse_cfg.top_k,
                             hisparse_top_k,
-                            "model_config.hf_text_config.index_topk",
+                            allocator_name,
+                            (
+                                "HiSparseCoordinator(native_dsv4)"
+                                if using_native_hisparse
+                                else "HiSparseCoordinator(generic)"
+                            ),
+                            False,
                         )
-                self.hisparse_coordinator = HiSparseCoordinator(
-                    req_to_token_pool=self.req_to_token_pool,
-                    token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-                    top_k=hisparse_top_k,
-                    device_buffer_size=hisparse_cfg.device_buffer_size,
-                    device=self.device,
-                    tp_group=(
-                        self.attention_tp_group.cpu_group
-                        if self.server_args.enable_dp_attention
-                        else self.tp_group.cpu_group
-                    ),
-                    host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
-                    debug_log=bool(
-                        hisparse_cfg.sparse_extra_config.get("debug_log", False)
-                    ),
-                    debug_log_limit=int(
-                        hisparse_cfg.sparse_extra_config.get("debug_log_limit", 20)
-                    ),
-                    debug_log_layers=hisparse_cfg.sparse_extra_config.get(
-                        "debug_log_layers", None
-                    ),
-                )
+                        if using_native_hisparse and requested_algorithm not in (
+                            None,
+                            "",
+                            "deepseek_nsa",
+                        ):
+                            logger.warning(
+                                "HiSparse requested algorithm is NOT active on this runtime path: "
+                                "requested_algorithm=%s extra_config=%s ignored_keys=%s reason=%s",
+                                requested_algorithm,
+                                requested_extra,
+                                [
+                                    key
+                                    for key in (
+                                        "algorithm",
+                                        "num_freq_keep",
+                                        "score_mode",
+                                        "sparsity_ratio",
+                                        "num_recent_pages",
+                                    )
+                                    if key == "algorithm" or key in requested_extra
+                                ],
+                                "enable_hisparse on DeepSeekV4 constructs native DSV4 HiSparseCoordinator "
+                                "and does not instantiate SparseCoordinator/FreqDomainAlgorithm",
+                            )
+                        if hisparse_top_k != hisparse_cfg.top_k:
+                            logger.warning(
+                                "HiSparse top_k override: requested_top_k=%s effective_top_k=%s source=%s",
+                                hisparse_cfg.top_k,
+                                hisparse_top_k,
+                                "model_config.hf_text_config.index_topk",
+                            )
+                    self.hisparse_coordinator = HiSparseCoordinator(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        top_k=hisparse_top_k,
+                        device_buffer_size=hisparse_cfg.device_buffer_size,
+                        device=self.device,
+                        tp_group=(
+                            self.attention_tp_group.cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_group.cpu_group
+                        ),
+                        host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
+                        debug_log=bool(
+                            hisparse_cfg.sparse_extra_config.get("debug_log", False)
+                        ),
+                        debug_log_limit=int(
+                            hisparse_cfg.sparse_extra_config.get("debug_log_limit", 20)
+                        ),
+                        debug_log_layers=hisparse_cfg.sparse_extra_config.get(
+                            "debug_log_layers", None
+                        ),
+                    )
             self._pre_initialize_flashinfer_allreduce_workspace()
             self.init_device_graphs()
         elif self.device == "cpu":
