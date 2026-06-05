@@ -409,6 +409,7 @@ class ServerArgs:
     # and KVRoadMap.md "启发三 / M1"). When set, the KV cache pool is
     # replaced with RotatedQuantMHATokenToKVPool. Currently MHA only.
     rotated_kv_quant_config: Optional[str] = None
+    rotated_kv_quant_mode: Optional[str] = None
     enable_fp32_lm_head: bool = False
     modelopt_quant: Optional[Union[str, Dict]] = None
     modelopt_checkpoint_restore_path: Optional[str] = None
@@ -4759,6 +4760,22 @@ class ServerArgs:
                 "Schema: {layer_id: {'k': {R, bits, scale, zero}, "
                 "'v': {...}}}. See KVRoadMap.md '启发三 / M1' for details. "
                 "MHA only; not yet compatible with MLA / DSA."
+            ),
+        )
+        parser.add_argument(
+            "--rotated-kv-quant-mode",
+            type=str,
+            default=ServerArgs.rotated_kv_quant_mode,
+            choices=["eval", "wall"],
+            help=(
+                "DSv4 rotated-quant pool execution mode. 'eval' (default) "
+                "keeps the FP8 main storage and exposes simulate_quantize_nope "
+                "for offline accuracy evaluation (M3.b). 'wall' replaces the "
+                "swa_kv_pool main buffer with INT2/3/4 packed nope + raw BF16 "
+                "rope and exposes dequant_swa_to_fp8_layout for the M3.c.2 "
+                "attention shim (FlashMLA stays unchanged; c4/c128/indexer "
+                "remain FP8). Only meaningful when --rotated-kv-quant-config "
+                "is also set with a DSv4-mode calibration file."
             ),
         )
         parser.add_argument(

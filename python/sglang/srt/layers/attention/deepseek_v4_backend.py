@@ -966,6 +966,15 @@ class DeepseekV4AttnBackend(
         if isinstance(core_attn_metadata, DSV4AttnMetadata):
             if save_kv_cache:
                 self.store_cache(layer_id, swa_k, forward_batch)
+            # M3.c.2: rotated-quant wall-storage hook. The pool packs nope into
+            # INT2/3/4 on store; this prologue dequants the pages this batch will
+            # actually read into a shadow FP8 buffer that FlashMLA can consume
+            # unchanged. No-op for non-rotated pools (duck-typed).
+            _rq_prologue = getattr(
+                token_to_kv_pool, "_rotated_quant_attention_prologue", None
+            )
+            if _rq_prologue is not None:
+                _rq_prologue(layer_id, core_attn_metadata, compress_ratio)
             swa_k_cache = token_to_kv_pool.get_swa_key_buffer_radix(layer_id)
 
             extra_k_cache, extra_indices, extra_topk_lengths = None, None, None
