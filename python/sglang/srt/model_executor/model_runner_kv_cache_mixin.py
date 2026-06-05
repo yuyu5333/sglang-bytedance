@@ -379,6 +379,33 @@ class ModelRunnerKVCacheMixin:
             is_dsa_model, is_dsv4_model, current_platform
         )
 
+        # 启发三 / M1 + M3.a + M3.b: rotated + non-uniform-bit KV cache.
+        # M1: vanilla MHA (full INT2/3/4 storage replacement).
+        # M3.a: standard MLA (latent INT2/3/4 + rope raw).
+        # M3.b: DeepSeek-V4 EVALUATION MODE (main FP8 storage unchanged;
+        #       per-layer rotated quantizers loaded for offline accuracy
+        #       evaluation via simulate_quantize_nope). Wall-storage
+        #       replacement of DSv4 nope is M3.c (kernel-side).
+        # Reject paths still unsupported: DSA / hybrid SWA / FP4 outputs.
+        if self.server_args.rotated_kv_quant_config:
+            is_hybrid_swa = getattr(self, "is_hybrid_swa", False)
+            if (
+                is_dsa_model
+                or is_hybrid_swa
+                or is_float4_e2m1fn_x2(self.kv_cache_dtype)
+            ):
+                raise ValueError(
+                    "--rotated-kv-quant-config supports MHA (M1), "
+                    "standard MLA (M3.a), and DeepSeek-V4 in evaluation "
+                    "mode (M3.b). Detected "
+                    f"is_dsa={is_dsa_model}, is_dsv4={is_dsv4_model}, "
+                    f"use_mla={self.use_mla_backend}, "
+                    f"is_hybrid_swa={is_hybrid_swa}, "
+                    f"kv_cache_dtype={self.kv_cache_dtype}. "
+                    "See KVRoadMap.md '启发三 / M3.c' for the roadmap "
+                    "to push DSv4 main storage to true INT2/3/4."
+                )
+
         if is_dsv4_model:
             swa_page_size = self.page_size
             assert swa_page_size == 256, "In paged swa mode, page_size must be 256."
@@ -393,28 +420,78 @@ class ModelRunnerKVCacheMixin:
                 ] * self.num_effective_layers
             else:
                 compression_ratios = self.model_config.compress_ratios
-            self.token_to_kv_pool = DeepSeekV4TokenToKVPool(
-                max_num_reqs=self.max_running_requests,
-                swa_size=self.swa_max_total_num_tokens,
-                c4_size=self.c4_max_total_num_tokens,
-                c128_size=self.c128_max_total_num_tokens,
-                c4_state_pool_size=self.c4_state_pool_size,
-                c128_state_pool_size=self.c128_state_pool_size,
-                page_size=self.page_size,
-                swa_page_size=swa_page_size,
-                dtype=self.kv_cache_dtype,
-                state_dtype=self.state_dtype,
-                qk_nope_head_dim=self.model_config.qk_nope_head_dim,
-                qk_rope_head_dim=self.model_config.qk_rope_head_dim,
-                indexer_head_dim=self.model_config.index_head_dim,
-                layer_num=self.num_effective_layers,
-                device=self.device,
-                enable_memory_saver=self.server_args.enable_memory_saver,
-                compression_ratios=compression_ratios,
-                start_layer=self.start_layer,
-                end_layer=self.end_layer,
-                enable_hisparse=self.enable_hisparse,
-            )
+            if self.server_args.rotated_kv_quant_config:
+                # 启发三 / M3.b + M3.c.1: DSv4 rotated INT2/3/4 KV pool.
+                # mode='eval'  (M3.b)  — main FP8 storage unchanged; per-layer
+                #                         rotated quantizers loaded for offline
+                #                         accuracy eval (simulate_quantize_nope).
+                # mode='wall'  (M3.c.1) — swa_kv_pool main buffer replaced with
+                #                         INT2/3/4 packed nope + raw BF16 rope.
+                #                         M3.c.2 will wire a dequant-shim into
+                #                         the attention prologue (FlashMLA stays
+                #                         unchanged). c4/c128/indexer remain FP8.
+                # See rotated_quant_dsv4_memory_pool.py for the long form.
+                from sglang.srt.mem_cache.rotated_quant_dsv4_memory_pool import (
+                    RotatedQuantDeepSeekV4TokenToKVPool,
+                )
+
+                rq_mode = (
+                    self.server_args.rotated_kv_quant_mode or "eval"
+                )
+                logger.info(
+                    "Routing DSv4 KV cache to "
+                    "RotatedQuantDeepSeekV4TokenToKVPool "
+                    "(mode=%s; calib=%s).",
+                    rq_mode,
+                    self.server_args.rotated_kv_quant_config,
+                )
+                self.token_to_kv_pool = RotatedQuantDeepSeekV4TokenToKVPool(
+                    max_num_reqs=self.max_running_requests,
+                    swa_size=self.swa_max_total_num_tokens,
+                    c4_size=self.c4_max_total_num_tokens,
+                    c128_size=self.c128_max_total_num_tokens,
+                    c4_state_pool_size=self.c4_state_pool_size,
+                    c128_state_pool_size=self.c128_state_pool_size,
+                    page_size=self.page_size,
+                    swa_page_size=swa_page_size,
+                    dtype=self.kv_cache_dtype,
+                    state_dtype=self.state_dtype,
+                    qk_nope_head_dim=self.model_config.qk_nope_head_dim,
+                    qk_rope_head_dim=self.model_config.qk_rope_head_dim,
+                    indexer_head_dim=self.model_config.index_head_dim,
+                    layer_num=self.num_effective_layers,
+                    device=self.device,
+                    enable_memory_saver=self.server_args.enable_memory_saver,
+                    compression_ratios=compression_ratios,
+                    calib_path=self.server_args.rotated_kv_quant_config,
+                    start_layer=self.start_layer,
+                    end_layer=self.end_layer,
+                    enable_hisparse=self.enable_hisparse,
+                    mode=rq_mode,
+                )
+            else:
+                self.token_to_kv_pool = DeepSeekV4TokenToKVPool(
+                    max_num_reqs=self.max_running_requests,
+                    swa_size=self.swa_max_total_num_tokens,
+                    c4_size=self.c4_max_total_num_tokens,
+                    c128_size=self.c128_max_total_num_tokens,
+                    c4_state_pool_size=self.c4_state_pool_size,
+                    c128_state_pool_size=self.c128_state_pool_size,
+                    page_size=self.page_size,
+                    swa_page_size=swa_page_size,
+                    dtype=self.kv_cache_dtype,
+                    state_dtype=self.state_dtype,
+                    qk_nope_head_dim=self.model_config.qk_nope_head_dim,
+                    qk_rope_head_dim=self.model_config.qk_rope_head_dim,
+                    indexer_head_dim=self.model_config.index_head_dim,
+                    layer_num=self.num_effective_layers,
+                    device=self.device,
+                    enable_memory_saver=self.server_args.enable_memory_saver,
+                    compression_ratios=compression_ratios,
+                    start_layer=self.start_layer,
+                    end_layer=self.end_layer,
+                    enable_hisparse=self.enable_hisparse,
+                )
         elif current_platform.is_out_of_tree() and not self.mambaish_config:
             if self.use_mla_backend and is_dsa_model:
                 PoolCls = current_platform.get_dsa_kv_pool_cls()
@@ -581,6 +658,33 @@ class ModelRunnerKVCacheMixin:
                     start_layer=self.start_layer,
                     end_layer=self.end_layer,
                 )
+            elif self.server_args.rotated_kv_quant_config:
+                # 启发三 / M3.a: rotated + non-uniform-bit MLA KV pool.
+                # latent 段做 Hadamard 旋转 + INT2/3/4 量化；rope 段保留
+                # 原 dtype（与 RoPE 不交换）。详见
+                # rotated_quant_mla_memory_pool.py 与 KVRoadMap.md。
+                from sglang.srt.mem_cache.rotated_quant_mla_memory_pool import (
+                    RotatedQuantMLATokenToKVPool,
+                )
+
+                logger.info(
+                    "Routing MLA KV cache to RotatedQuantMLATokenToKVPool "
+                    "(calib=%s).",
+                    self.server_args.rotated_kv_quant_config,
+                )
+                self.token_to_kv_pool = RotatedQuantMLATokenToKVPool(
+                    self.max_total_num_tokens,
+                    page_size=self.page_size,
+                    dtype=self.kv_cache_dtype,
+                    kv_lora_rank=self.model_config.kv_lora_rank,
+                    qk_rope_head_dim=self.model_config.qk_rope_head_dim,
+                    layer_num=self.num_effective_layers,
+                    device=self.device,
+                    enable_memory_saver=self.server_args.enable_memory_saver,
+                    calib_path=self.server_args.rotated_kv_quant_config,
+                    start_layer=self.start_layer,
+                    end_layer=self.end_layer,
+                )
             else:
                 self.token_to_kv_pool = MLATokenToKVPool(
                     self.max_total_num_tokens,
@@ -676,6 +780,40 @@ class ModelRunnerKVCacheMixin:
                         enable_kv_cache_copy=(
                             self.server_args.speculative_algorithm is not None
                         ),
+                    )
+                elif self.server_args.rotated_kv_quant_config:
+                    # Rotated + non-uniform-bit packed KV pool (启发三 / M1).
+                    # See KVRoadMap.md and rotated_quant_memory_pool.py.
+                    if self.server_args.prefill_only_disable_kv_cache:
+                        raise ValueError(
+                            "--rotated-kv-quant-config is incompatible with "
+                            "--prefill-only-disable-kv-cache (NoOp pool)."
+                        )
+                    from sglang.srt.mem_cache.rotated_quant_memory_pool import (
+                        RotatedQuantMHATokenToKVPool,
+                    )
+
+                    logger.info(
+                        "Routing KV cache to RotatedQuantMHATokenToKVPool "
+                        "(calib=%s).",
+                        self.server_args.rotated_kv_quant_config,
+                    )
+                    self.token_to_kv_pool = RotatedQuantMHATokenToKVPool(
+                        self.max_total_num_tokens,
+                        page_size=self.page_size,
+                        dtype=self.kv_cache_dtype,
+                        head_num=self.model_config.get_num_kv_heads(
+                            get_attention_tp_size()
+                        ),
+                        head_dim=self.model_config.head_dim,
+                        v_head_dim=self.model_config.v_head_dim,
+                        layer_num=self.num_effective_layers,
+                        device=self.device,
+                        enable_memory_saver=self.server_args.enable_memory_saver,
+                        calib_path=self.server_args.rotated_kv_quant_config,
+                        start_layer=self.start_layer,
+                        end_layer=self.end_layer,
+                        enable_alt_stream=not self.server_args.enable_pdmux,
                     )
                 else:
                     pool_cls = (

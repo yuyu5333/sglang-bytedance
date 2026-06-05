@@ -416,6 +416,36 @@ class RotatedQuantMHATokenToKVPool(MHATokenToKVPool):
     def get_kv_buffer(self, layer_id: int):
         return self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
 
+    # ------------------------------------------------------------------
+    # Disagg / size APIs: must report the *packed* uint8 storage, not the
+    # dequant view. The base class implementations call _get_key_buffer
+    # which here returns dequant BF16, so we override to use the raw
+    # buffers directly.
+    # ------------------------------------------------------------------
+    def get_contiguous_buf_infos(self):
+        kv_data_ptrs = [
+            self.k_buffer[i - self.start_layer].data_ptr()
+            for i in range(self.start_layer, self.start_layer + self.layer_num)
+        ] + [
+            self.v_buffer[i - self.start_layer].data_ptr()
+            for i in range(self.start_layer, self.start_layer + self.layer_num)
+        ]
+        kv_data_lens = [
+            self.k_buffer[i - self.start_layer].nbytes
+            for i in range(self.start_layer, self.start_layer + self.layer_num)
+        ] + [
+            self.v_buffer[i - self.start_layer].nbytes
+            for i in range(self.start_layer, self.start_layer + self.layer_num)
+        ]
+        kv_item_lens = [
+            self.k_buffer[i - self.start_layer][0].nbytes * self.page_size
+            for i in range(self.start_layer, self.start_layer + self.layer_num)
+        ] + [
+            self.v_buffer[i - self.start_layer][0].nbytes * self.page_size
+            for i in range(self.start_layer, self.start_layer + self.layer_num)
+        ]
+        return kv_data_ptrs, kv_data_lens, kv_item_lens
+
 
 __all__ = [
     "RotatedQuantMHATokenToKVPool",
