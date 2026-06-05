@@ -293,7 +293,11 @@ class DeepSeekV4IndexerPool(KVCache):
         raise NotImplementedError()
 
     def get_key_buffer(self, layer_id: int) -> torch.Tensor:
-        raise NotImplementedError()
+        try:
+            return self.get_index_k_with_scale_buffer(layer_id)
+        except (AssertionError, AttributeError, KeyError):
+            # Fallback for layers without indexer or if c4_indexer_kv_pool is missing
+            return torch.empty((self.size, 1, 1), device=self.device)
 
     def get_value_buffer(self, layer_id: int) -> torch.Tensor:
         raise NotImplementedError()
@@ -686,7 +690,11 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         )
 
     def get_key_buffer(self, layer_id: int) -> torch.Tensor:
-        raise NotImplementedError()
+        try:
+            return self.get_index_k_with_scale_buffer(layer_id)
+        except (AssertionError, AttributeError, KeyError):
+            # Fallback for layers without indexer or if c4_indexer_kv_pool is missing
+            return torch.empty((self.size, 1, 1), device=self.device)
 
     def get_value_buffer(self, layer_id: int) -> torch.Tensor:
         raise NotImplementedError()

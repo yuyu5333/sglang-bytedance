@@ -211,7 +211,10 @@ class BaseSparseAlgorithmImpl(BaseSparseAlgorithm):
         self.end_layer = end_layer
         self.states = states
 
-        total_num_tokens = token_to_kv_pool.get_key_buffer(start_layer).shape[0]
+        if hasattr(token_to_kv_pool, "size"):
+            total_num_tokens = token_to_kv_pool.size
+        else:
+            total_num_tokens = token_to_kv_pool.get_key_buffer(start_layer).shape[0]
         total_num_pages = (total_num_tokens + self.page_size - 1) // self.page_size
 
         # Initialize algorithm-specific representation pools
