@@ -131,6 +131,8 @@ class SparseCoordinator:
             self.states,
         )
 
+        self.num_real_reqs = torch.zeros(1, dtype=torch.int32, device=self.device)
+
         logger.info(
             f"SparseCoordinator initialized with sparse algorithm={type(algorithm).__name__}"
         )
@@ -173,6 +175,31 @@ class SparseCoordinator:
         """Compatibility with HiSparseCoordinator."""
         # For SparseCoordinator, all requests are ready as we don't do staging
         return []
+
+    def has_ongoing_staging(self) -> bool:
+        """Compatibility with HiSparseCoordinator."""
+        return False
+
+    def get_token_stats(self) -> Any:
+        """Compatibility with HiSparseCoordinator."""
+        # Return a dummy stats object that mimics HiSparseTokenStats
+        from sglang.srt.managers.hisparse_coordinator import HiSparseTokenStats
+
+        return HiSparseTokenStats(
+            device_tokens=0,
+            device_token_usage=0.0,
+            host_tokens=0,
+            host_token_usage=0.0,
+        )
+
+    def retract_req(self, req: "Req") -> None:
+        """Compatibility with HiSparseCoordinator."""
+        pass
+
+    def admit_request_direct(self, req: "Req") -> None:
+        """Compatibility with HiSparseCoordinator."""
+        # For SparseCoordinator, requests are admitted via on_request_begin
+        self.on_request_begin(req)
 
     def set_decode_producer_stream(self, stream) -> None:
         """Compatibility with HiSparseCoordinator."""
