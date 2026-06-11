@@ -8,6 +8,7 @@ with dynamic 8-bit (FP8 or INT8) activation quantization.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -296,6 +297,15 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
         topk_output = dispatch_output.topk_output
         topk_weights, topk_ids, _ = topk_output
 
+        # ---- DEBUG DUMP (off by default) -------------------------------------
+        # Enable by exporting SGLANG_W4A8_DUMP_DIR=/some/path.
+        # Dumps inputs / weights / scales / output for ONE layer, ONE step only.
+        dump_dir = os.environ.get("SGLANG_W4A8_DUMP_DIR")
+        should_dump = dump_dir is not None and not CompressedTensorsW4AFP8MoE._dumped
+        if should_dump:
+            CompressedTensorsW4AFP8MoE._dumped = True  # latch immediately to avoid races
+        # ----------------------------------------------------------------------
+
         # TODO: currently, group_size is hardcoded to 128 in the cutlass_w4a8_moe kernel.
         output = cutlass_w4a8_moe(
             x,
@@ -320,4 +330,87 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             layer.a2_scale,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )
+
+        if should_dump:
+            self._dump_cutlass_w4a8_moe_io(
+                dump_dir=dump_dir,
+                layer=layer,
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                output=output,
+            )
+
         return StandardCombineInput(hidden_states=output)
+
+    # Class-level latch: ensures only the first layer / step that reaches this
+    # path performs the dump, regardless of TP rank or how many MoE layers exist.
+    _dumped: bool = False
+
+    def _dump_cutlass_w4a8_moe_io(
+        self,
+        dump_dir: str,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Save one layer's full cutlass_w4a8_moe inputs + output to a .pt file."""
+        os.makedirs(dump_dir, exist_ok=True)
+        rank = (
+            torch.distributed.get_rank()
+            if torch.distributed.is_available() and torch.distributed.is_initialized()
+            else 0
+        )
+        out_path = os.path.join(dump_dir, f"cutlass_w4a8_moe_dump_rank{rank}.pt")
+
+        def _snap(t):
+            return None if t is None else t.detach().to("cpu").clone()
+
+        payload = {
+            # --- positional args, in the exact order passed to cutlass_w4a8_moe ---
+            "x": _snap(x),                                       # hidden states
+            "w13_weight_packed": _snap(layer.w13_weight_packed), # int8-packed CUTLASS weight
+            "w2_weight_packed": _snap(layer.w2_weight_packed),
+            "w13_weight_scale": _snap(layer.w13_weight_scale),   # interleaved bf16 weight scale
+            "w2_weight_scale": _snap(layer.w2_weight_scale),
+            "topk_weights": _snap(topk_weights),
+            "topk_ids": _snap(topk_ids),
+            "a_strides1": _snap(self.a_strides1),
+            "b_strides1": _snap(self.b_strides1),
+            "c_strides1": _snap(self.c_strides1),
+            "a_strides2": _snap(self.a_strides2),
+            "b_strides2": _snap(self.b_strides2),
+            "c_strides2": _snap(self.c_strides2),
+            "s_strides13": _snap(self.s_strides13),
+            "s_strides2": _snap(self.s_strides2),
+            "expert_offsets": _snap(self.expert_offsets),
+            "problem_sizes1": _snap(self.problem_sizes1),
+            "problem_sizes2": _snap(self.problem_sizes2),
+            "a13_scale": _snap(getattr(layer, "a13_scale", None)),
+            "a2_scale": _snap(getattr(layer, "a2_scale", None)),
+            # --- kwarg ---
+            "routed_scaling_factor": (
+                self.moe_runner_config.routed_scaling_factor or 1.0
+            ),
+            # --- output ---
+            "output": _snap(output),
+        }
+        torch.save(payload, out_path)
+
+        # Compact metadata to stdout so it's easy to spot in logs.
+        meta = {
+            k: (
+                (tuple(v.shape), str(v.dtype))
+                if isinstance(v, torch.Tensor)
+                else v
+            )
+            for k, v in payload.items()
+        }
+        logger.warning(
+            "[cutlass_w4a8_moe dump] rank=%d saved to %s; tensors=%s",
+            rank,
+            out_path,
+            meta,
+        )
