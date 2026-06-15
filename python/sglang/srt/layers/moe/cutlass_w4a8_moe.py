@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cutlass W4A8 MoE kernel."""
 
+import os
 from typing import Optional
 
 import torch
 
 from sglang.srt.utils import is_cuda, is_cuda_alike
+
+# 进程内只在第一次进入 cutlass_w4a8_moe 时落盘一次，避免每 step 都写盘。
+_CUTLASS_W4A8_INNER_DUMPED = False
 
 _is_cuda = is_cuda()
 _is_cuda_alike = is_cuda_alike()
@@ -129,9 +133,77 @@ def cutlass_w4a8_moe(
     if get_moe_expert_parallel_world_size() > 1:
         topk_ids = torch.where(topk_ids == -1, num_local_experts, topk_ids)
 
+    # ------------------------------------------------------------------
+    # DEBUG DUMP: 每个算子前后的输入/输出快照。
+    # 通过 SGLANG_W4A8_INNER_DUMP_DIR 启用；只在进程内 dump 一次。
+    # 命名规则: cutlass_w4a8_inner_rank{R}.pt，结构：
+    #   {
+    #     "step_00_inputs": {... 整个 cutlass_w4a8_moe 的入参 ...},
+    #     "step_01_ep_preprocess":      {"in": {...},  "out": {...}},
+    #     "step_02_a1_absmax":          {"in": {...},  "out": {...}},
+    #     "step_03_pre_reorder":        {"in": {...},  "out": {...}},
+    #     "step_04_get_mm_data":        {"in": {...},  "out": {...}},
+    #     "step_05_gemm1":              {"in": {...},  "out": {...}},
+    #     "step_06_silu_mul_quant":     {"in": {...},  "out": {...}},
+    #     "step_07_gemm2":              {"in": {...},  "out": {...}},
+    #     "step_08_post_reorder":       {"in": {...},  "out": {...}},
+    #   }
+    # ------------------------------------------------------------------
+    global _CUTLASS_W4A8_INNER_DUMPED
+    _inner_dump_dir = os.environ.get("SGLANG_W4A8_INNER_DUMP_DIR")
+    _do_inner_dump = bool(_inner_dump_dir) and not _CUTLASS_W4A8_INNER_DUMPED
+    _inner_dump: dict = {}
+
+    def _snap(x):
+        """Detach a tensor (or pass through scalars/None) onto CPU for safe storage."""
+        if isinstance(x, torch.Tensor):
+            return x.detach().to("cpu").clone()
+        return x
+
+    def _record(label: str, payload: dict):
+        if _do_inner_dump:
+            _inner_dump[label] = {k: _snap(v) for k, v in payload.items()}
+
+    if _do_inner_dump:
+        _record(
+            "step_00_inputs",
+            {
+                "a": a,
+                "w1_q": w1_q,
+                "w2_q": w2_q,
+                "w1_scale": w1_scale,
+                "w2_scale": w2_scale,
+                "topk_weights": topk_weights,
+                "topk_ids": topk_ids,
+                "a_strides1": a_strides1,
+                "b_strides1": b_strides1,
+                "c_strides1": c_strides1,
+                "a_strides2": a_strides2,
+                "b_strides2": b_strides2,
+                "c_strides2": c_strides2,
+                "s_strides13": s_strides13,
+                "s_strides2": s_strides2,
+                "expert_offsets": expert_offsets,
+                "problem_sizes1": problem_sizes1,
+                "problem_sizes2": problem_sizes2,
+                "a1_scale": a1_scale,
+                "a2_scale": a2_scale,
+                "apply_router_weight_on_input": apply_router_weight_on_input,
+                "routed_scaling_factor": routed_scaling_factor,
+                "num_local_experts": num_local_experts,
+                "m": m,
+                "k": k,
+                "n": n,
+                "topk": topk,
+            },
+        )
+
+    # -------- step 1: cutlass_w4_run_moe_ep_preproess --------
+    _step1_in = {"topk_ids": topk_ids}
     src2dst = cutlass_w4_run_moe_ep_preproess(
         topk_ids,
     )
+    _record("step_01_ep_preprocess", {"in_topk_ids": _step1_in["topk_ids"], "out_src2dst": src2dst})
 
     gateup_input = torch.empty(
         (m * topk, k),
@@ -139,11 +211,28 @@ def cutlass_w4a8_moe(
         dtype=torch.float8_e4m3fn,
     )
 
+    # -------- step 2: per_tensor_absmax_fp8 (a1_scale fallback) --------
     # TODO: fuse per_tensor_absmax_fp8 and pre_reorder_for_cutlass_moe
     if a1_scale is None:
+        _step2_in_a = a
         a1_scale = torch.zeros(1, dtype=torch.float32, device=device)
         per_tensor_absmax_fp8(a, a1_scale)
+        _record(
+            "step_02_a1_absmax",
+            {"in_a": _step2_in_a, "out_a1_scale": a1_scale},
+        )
 
+    # -------- step 3: pre_reorder_for_cutlass_moe --------
+    _step3_in = {
+        "a": a,
+        "src2dst": src2dst,
+        "topk_ids": topk_ids,
+        "a1_scale": a1_scale,
+        "num_local_experts": num_local_experts,
+        "topk": topk,
+        "m": m,
+        "k": k,
+    }
     pre_reorder_for_cutlass_moe(
         a,
         gateup_input,
@@ -155,12 +244,24 @@ def cutlass_w4a8_moe(
         m,
         k,
     )
+    _record(
+        "step_03_pre_reorder",
+        {**{f"in_{k_}": v for k_, v in _step3_in.items()}, "out_gateup_input": gateup_input},
+    )
 
     # NOTE: a_map and c_map are not used in the get_cutlass_w4a8_moe_mm_data kernel,
     # they are kept to allow for a quick switch of the permutation logic
     # from the current triton kernel implementation to the cutlass-based one if needed.
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+
+    # -------- step 4: get_cutlass_w4a8_moe_mm_data --------
+    _step4_in = {
+        "topk_ids": topk_ids,
+        "num_local_experts": num_local_experts,
+        "n": n,
+        "k": k,
+    }
     get_cutlass_w4a8_moe_mm_data(
         topk_ids,
         expert_offsets,
@@ -172,10 +273,35 @@ def cutlass_w4a8_moe(
         n,
         k,
     )
+    _record(
+        "step_04_get_mm_data",
+        {
+            **{f"in_{k_}": v for k_, v in _step4_in.items()},
+            "out_expert_offsets": expert_offsets,
+            "out_problem_sizes1": problem_sizes1,
+            "out_problem_sizes2": problem_sizes2,
+            "out_a_map": a_map,
+            "out_c_map": c_map,
+        },
+    )
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
 
+    # -------- step 5: cutlass_w4a8_moe_mm (gemm 1) --------
+    _step5_in = {
+        "gateup_input": gateup_input,
+        "w1_q": w1_q,
+        "a1_scale_float": a1_scale.float(),
+        "w1_scale": w1_scale,
+        "expert_offsets_prefix": expert_offsets[:-1],
+        "problem_sizes1": problem_sizes1,
+        "a_strides1": a_strides1,
+        "b_strides1": b_strides1,
+        "c_strides1": c_strides1,
+        "s_strides13": s_strides13,
+        "topk": topk,
+    }
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -191,21 +317,63 @@ def cutlass_w4a8_moe(
         128,
         topk,
     )
+    _record(
+        "step_05_gemm1",
+        {**{f"in_{k_}": v for k_, v in _step5_in.items()}, "out_c1": c1},
+    )
 
     intermediate_q = torch.empty(
         (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
 
+    # -------- step 6: silu_mul + per-tensor quant (dynamic 或 static) --------
     if a2_scale is None:
         a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
+        _step6_in = {
+            "c1": c1,
+            "expert_offsets_last": expert_offsets[-1:],
+            "m_topk": m * topk,
+            "n": n,
+            "branch": "dynamic",
+        }
         silu_mul_dynamic_tensorwise_quant_for_cutlass_moe(
             c1, intermediate_q, a2_scale, expert_offsets[-1:], m * topk, n
         )
     else:
+        _step6_in = {
+            "c1": c1,
+            "a2_scale_float": a2_scale.float(),
+            "expert_offsets_last": expert_offsets[-1:],
+            "m_topk": m * topk,
+            "n": n,
+            "branch": "static",
+        }
         silu_mul_static_tensorwise_quant_for_cutlass_moe(
             c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
         )
+    _record(
+        "step_06_silu_mul_quant",
+        {
+            **{f"in_{k_}": v for k_, v in _step6_in.items()},
+            "out_intermediate_q": intermediate_q,
+            "out_a2_scale": a2_scale,
+        },
+    )
 
+    # -------- step 7: cutlass_w4a8_moe_mm (gemm 2) --------
+    _step7_in = {
+        "intermediate_q": intermediate_q,
+        "w2_q": w2_q,
+        "a2_scale_float": a2_scale.float(),
+        "w2_scale": w2_scale,
+        "expert_offsets_prefix": expert_offsets[:-1],
+        "problem_sizes2": problem_sizes2,
+        "a_strides2": a_strides2,
+        "b_strides2": b_strides2,
+        "c_strides2": c_strides2,
+        "s_strides2": s_strides2,
+        "topk": topk,
+    }
     cutlass_w4a8_moe_mm(
         c2,
         intermediate_q,
@@ -221,9 +389,25 @@ def cutlass_w4a8_moe(
         128,
         topk,
     )
+    _record(
+        "step_07_gemm2",
+        {**{f"in_{k_}": v for k_, v in _step7_in.items()}, "out_c2": c2},
+    )
 
     output = torch.empty_like(a)
 
+    # -------- step 8: post_reorder_for_cutlass_moe --------
+    _step8_in = {
+        "c2": c2,
+        "src2dst": src2dst,
+        "topk_ids": topk_ids,
+        "topk_weights": topk_weights,
+        "num_local_experts": num_local_experts,
+        "topk": topk,
+        "m": m,
+        "k": k,
+        "routed_scaling_factor": routed_scaling_factor,
+    }
     post_reorder_for_cutlass_moe(
         c2,
         output,
@@ -236,6 +420,27 @@ def cutlass_w4a8_moe(
         k,
         routed_scaling_factor,
     )
+    _record(
+        "step_08_post_reorder",
+        {**{f"in_{k_}": v for k_, v in _step8_in.items()}, "out_output": output},
+    )
+
+    if _do_inner_dump:
+        try:
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_available() and torch.distributed.is_initialized()
+                else 0
+            )
+        except Exception:
+            rank = 0
+        os.makedirs(_inner_dump_dir, exist_ok=True)
+        _inner_dump_path = os.path.join(
+            _inner_dump_dir, f"cutlass_w4a8_inner_rank{rank}.pt"
+        )
+        torch.save(_inner_dump, _inner_dump_path)
+        _CUTLASS_W4A8_INNER_DUMPED = True
+
     return output
 
 
