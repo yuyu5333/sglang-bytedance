@@ -423,6 +423,18 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         """
         return layer_id
 
+    def wait_layer_transfer(self, layer_id: int) -> None:
+        """No-op layer-transfer barrier for wall mode.
+
+        Wall packed_buffers are written by our own store overrides on the
+        same CUDA stream as attention; shadow_buffers are refreshed on
+        demand by the prologue. Neither participates in the parent's
+        layer_transfer_counter pipeline (hicache / async H2D), so there
+        is nothing to wait on. If hicache support is added later this
+        method can be promoted to wait on swa_kv_pool's counter.
+        """
+        return
+
     def _layer_id_for_extra(self, layer_id: int) -> Tuple[str, int]:
         """Map absolute layer_id to (pool_kind in {'c4','c128'}, local_layer)."""
         compress_ratio, compress_layer_id, compress_kv_pool = self.layer_mapping[
