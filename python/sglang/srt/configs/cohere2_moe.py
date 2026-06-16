@@ -5,11 +5,22 @@ from transformers.configuration_utils import PretrainedConfig as PreTrainedConfi
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 try:
-    from huggingface_hub.dataclasses import strict
+    from huggingface_hub.dataclasses import strict as _strict
 except ImportError:  # older huggingface_hub
+    _strict = None
 
-    def strict(cls):  # type: ignore[misc]
+
+def strict(cls):  # type: ignore[misc]
+    """Apply huggingface_hub's @strict only when the class is a real
+    dataclass; otherwise no-op. Newer hf_hub raises if not, but
+    transformers <5 declares config classes as plain classes.
+    """
+    if _strict is None:
         return cls
+    import dataclasses
+    if dataclasses.is_dataclass(cls):
+        return _strict(cls)
+    return cls
 
 
 @strict
