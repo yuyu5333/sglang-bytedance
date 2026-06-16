@@ -62,22 +62,76 @@ def packed_bytes_per_token(row_bytes_nope: int) -> int:
     return int(row_bytes_nope) + _ROPE_BYTES
 
 
+def _build_pack_meta_from_bits(
+    bits: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Build (dim_of_bit, bitpos_in_dim, row_bits, row_bytes) for Triton pack.
+
+    Returns CPU tensors. Caller moves to device as needed.
+    """
+    bits_cpu = bits.cpu().to(torch.int32)
+    D = int(bits_cpu.shape[0])
+    bits_list = bits_cpu.tolist()
+    row_bits = int(sum(bits_list))
+    row_bytes = (row_bits + 7) // 8
+
+    dim_of_bit = torch.zeros(row_bits, dtype=torch.int32)
+    bitpos_in_dim = torch.zeros(row_bits, dtype=torch.int32)
+    cursor = 0
+    for d in range(D):
+        b = bits_list[d]
+        if b <= 0:
+            continue
+        dim_of_bit[cursor:cursor + b] = d
+        bitpos_in_dim[cursor:cursor + b] = torch.arange(b, dtype=torch.int32)
+        cursor += b
+    return dim_of_bit, bitpos_in_dim, row_bits, row_bytes
+
+
+# Per-config pack-meta cache keyed by device (small: ~448 int32 per dim).
+_PACK_META_CACHE: dict[int, dict[str, object]] = {}
+
+
+def _get_cached_pack_meta(
+    cfg: RotatedQuantizerConfig, device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return cached (dim_of_bit_gpu, bitpos_in_dim_gpu) for this cfg+device."""
+    key = id(cfg)
+    entry = _PACK_META_CACHE.get(key)
+    dev_key = str(device)
+    if entry is not None and entry.get("device") == dev_key:
+        return entry["dim_of_bit"], entry["bitpos_in_dim"]
+    dim_of_bit, bitpos_in_dim, _rb, _rbytes = _build_pack_meta_from_bits(cfg.bits)
+    if device and device.type == "cuda":
+        dim_of_bit = dim_of_bit.to(device)
+        bitpos_in_dim = bitpos_in_dim.to(device)
+    _PACK_META_CACHE[key] = {
+        "device": dev_key,
+        "dim_of_bit": dim_of_bit,
+        "bitpos_in_dim": bitpos_in_dim,
+    }
+    return dim_of_bit, bitpos_in_dim
+
+
 # ----------------------------------------------------------------------
 # Store path (write)
 # ----------------------------------------------------------------------
 def rotated_store_to_packed(
-    input_bf16: torch.Tensor,  # [N, 512] BF16  (cat(nope, rope))
+    input_bf16: torch.Tensor,  # [N, 512] BF16  (cat(nope, rope)
     cache: torch.Tensor,       # [num_pages, bytes_per_page] uint8
-    indices: torch.Tensor,     # [N] int32, flat token-loc (page * page_size + slot)
+    indices: torch.Tensor,   # [N] int32, flat token-loc (page * page_size + slot
     *,
     page_size: int,
     cfg: RotatedQuantizerConfig,
 ) -> None:
     """Store rotated INT2/3/4 packed nope + raw BF16 rope into paged cache.
 
-    Per-token bytes ``= row_bytes_nope + 128`` (rope BF16). The whole row is
-    written contiguously: ``cache[page, slot*Bpt : slot*Bpt + row_bytes_nope]``
-    is the packed nope, followed by ``128 B`` of raw BF16 rope.
+    Per-token bytes ``= row_bytes_nope + 128`` (rope BF16). GPU-only:
+    ``cache[page, slot*Bpt : slot*Bpt + row_bytes_nope]`` is the packed
+    nope, followed by ``128 B`` of raw BF16 rope.
+
+    ``T3 path (Triton)：整个路径完全在 GPU 上： rotate + affine + quantise + clamp +
+    bitpack，全部不走 CPU 不做任何 H2D/D2H 往返。
     """
     if input_bf16.dtype != torch.bfloat16:
         raise ValueError(f"input must be bf16, got {input_bf16.dtype}")
@@ -107,32 +161,54 @@ def rotated_store_to_packed(
     nope = input_bf16[:, :_MLA_NOPE_DIM].contiguous()
     rope = input_bf16[:, _MLA_NOPE_DIM:].contiguous()
 
-    # Rotate + affine quantise + clamp on the same device as `input_bf16`.
+    # --- T3: 整个 store 全 GPU 路径
+    #   1) rotate + affine quant + round + clamp 全走 GPU torch
+    #   2) bitpack 走 Triton kernel (向量化位合并)
     R = cfg.R.to(device=input_bf16.device, dtype=torch.float32)
     scale = cfg.scale.to(device=input_bf16.device, dtype=torch.float32).clamp_min(1e-12)
     zero = cfg.zero.to(device=input_bf16.device, dtype=torch.float32)
-    bits = cfg.bits.to(device="cpu", dtype=torch.int32)  # bitpack runs on CPU
-    levels = (1 << bits.to(torch.int64)) - 1  # [D] cpu
+    bits_gpu = cfg.bits.to(device=input_bf16.device, dtype=torch.int32)
+    # levels = 2^bits - 1，用于 quantise 后的饱和值；留在 GPU
+    levels_gpu = (
+        torch.ones_like(bits_gpu, dtype=torch.int64) << bits_gpu.to(torch.int64)
+    ) - 1
 
     K_rot = nope.to(torch.float32) @ R  # [N, 448]
     codes_f = ((K_rot - zero) / scale).round()
     codes_f = torch.clamp(
-        codes_f, min=torch.zeros_like(codes_f), max=levels.to(K_rot.device).to(K_rot.dtype)
+        codes_f, min=torch.zeros_like(codes_f), max=levels_gpu.to(codes_f.dtype)
     )
-    codes_i64 = codes_f.to(torch.int64).cpu()  # [N, 448] cpu
+    codes_i32 = codes_f.to(torch.int32)  # 留在 GPU
 
-    packed = bitpack_rowwise(codes_i64, bits)  # [N, row_bytes_nope] uint8 cpu
-    packed = packed.to(device=input_bf16.device)
+    # --- Triton bitpack（T3）。
+    dim_of_bit, bitpos_in_dim = _get_cached_pack_meta(cfg, input_bf16.device)
+    from sglang.jit_kernel.triton_rotated_quant_dsv4 import triton_bitpack_rowwise
+    packed = triton_bitpack_rowwise(
+        codes_i32, dim_of_bit, bitpos_in_dim, cfg.row_bytes,
+    )
 
-    # Compose the [N, bpt] row by concatenating packed nope + raw rope bytes.
+    # Compose the [N, bpt] row on GPU (纯 view/cat，无 H2D)
     rope_bytes = rope.contiguous().view(torch.uint8).reshape(N, _ROPE_BYTES)
     full_row = torch.cat([packed, rope_bytes], dim=1)  # [N, bpt]
 
-    # Scatter into paged cache: cache.view(-1, bpt)[loc] = full_row.
-    # cache has shape [num_pages, bytes_per_page = bpt * page_size]; the flat
-    # token-level row index is just `indices` (page * page_size + slot).
-    cache_flat = cache.view(-1, bpt)  # [num_pages * page_size, bpt]
-    cache_flat.index_copy_(0, indices_i64.to(cache.device), full_row)
+    # Scatter into paged cache:
+    # 必须过滤 -1 sentinel（translate_loc_from_full_to_swa 对未映射槽返回 -1）
+    cache_flat = cache.view(-1, bpt)
+    idx_gpu = indices_i64.to(cache.device)
+    if idx_gpu.numel() > 0:
+        valid_mask = idx_gpu >= 0
+        max_allowed = cache_flat.shape[0] - 1
+        if not valid_mask.all():
+            # 仅保留合法行再 scatter，避免 index_copy_ 触发设备端断言
+            valid_idx = valid_mask.nonzero(as_tuple=False).squeeze(1)
+            idx_valid = idx_gpu[valid_idx]
+            row_valid = full_row[valid_idx]
+            # 附加安全钳位：如果 idx 中有超范围值（防御性编程）
+            idx_clamped = idx_valid.clamp(min=0, max=max_allowed)
+            cache_flat.index_copy_(0, idx_clamped, row_valid)
+        else:
+            idx_clamped = idx_gpu.clamp(min=0, max=max_allowed)
+            cache_flat.index_copy_(0, idx_clamped, full_row)
 
 
 # ----------------------------------------------------------------------
@@ -185,10 +261,11 @@ def rotated_load_to_fp8_layout(
     packed_nope = rows[:, :row_bytes_nope].contiguous()  # uint8 [M, row_bytes_nope]
     rope_bytes = rows[:, row_bytes_nope:].contiguous()   # uint8 [M, 128]
 
-    # Bit-unpack + inverse affine on CPU (M3.c.1 reference; M3.c.3 -> Triton).
-    bits_cpu = cfg.bits.to(device="cpu", dtype=torch.int32)
-    codes = bitunpack_rowwise(packed_nope.cpu(), bits_cpu, dim=_MLA_NOPE_DIM)
-    codes = codes.to(device=cache.device, dtype=torch.float32)
+    # --- T3: 全 GPU 路径，不走 CPU bitunpack
+    from sglang.jit_kernel.triton_rotated_quant_dsv4 import triton_bitunpack_rowwise
+    # cfg.bits 可能是 CPU tensor；bitunpack kernel 内部会自动移动到 GPU
+    codes_i32 = triton_bitunpack_rowwise(packed_nope, cfg.bits)
+    codes = codes_i32.to(torch.float32)
 
     scale = cfg.scale.to(device=cache.device, dtype=torch.float32)
     zero = cfg.zero.to(device=cache.device, dtype=torch.float32)
@@ -197,8 +274,7 @@ def rotated_load_to_fp8_layout(
     nope_bf16 = (K_rot_hat @ R.t()).to(torch.bfloat16).contiguous()
     rope_bf16 = rope_bytes.view(torch.bfloat16).reshape(M, _MLA_TILE_SIZE).contiguous()
 
-    # Triton import is lazy: CPU-only environments still get the writer +
-    # cpu_ref reader without paying the import cost.
+    # FP8 layout Triton kernel（GPU 端）
     from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
         rotated_dequant_to_fp8_layout,
     )

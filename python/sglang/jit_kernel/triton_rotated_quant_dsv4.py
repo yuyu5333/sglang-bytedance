@@ -199,8 +199,182 @@ def rotated_dequant_to_fp8_layout(
     )
 
 
+# ---------------------------------------------------------------------------
+# T3: Triton bitpack_rowwise — GPU-only, eliminates H2D/D2H round trip.
+# ---------------------------------------------------------------------------
+#
+# Kernel design:
+#   * Grid: (N, row_bytes). One program per (row, output_byte).
+#   * Each program gathers 8 bit-contributions from its row, via
+#     precomputed (dim_of_bit[], bitpos_in_dim[]) metadata.
+#   * bits per dim vary (2/3/4) but are identical across rows, so
+#     metadata is computed once per layer.
+#   * Output byte = sum( (codes[row, dim] >> bitpos_in_dim) & 1 << (bit % 8) ).
+# ---------------------------------------------------------------------------
+@triton.jit
+def _triton_bitpack_kernel(
+    codes_ptr,         # [N, D] int32
+    out_ptr,           # [N, row_bytes] uint8
+    dim_of_bit_ptr,    # [row_bits] int32
+    bitpos_in_dim_ptr, # [row_bits] int32
+    N, D, row_bits, row_bytes,
+):
+    row = tl.program_id(0)
+    byte = tl.program_id(1)
+    if row >= N or byte >= row_bytes:
+        return
+
+    offs = byte * 8 + tl.arange(0, 8)
+    mask = offs < row_bits
+
+    dims = tl.load(dim_of_bit_ptr + offs, mask=mask, other=0)
+    bpos = tl.load(bitpos_in_dim_ptr + offs, mask=mask, other=0)
+
+    # Gather codes: one int32 per contributing dim.
+    codes = tl.load(codes_ptr + row * D + dims, mask=mask, other=0)
+    # Extract the right bit (LSB-first within each dim's value).
+    bits = (codes >> bpos) & 1
+    # Shift each bit to its position within this byte, then OR-reduce.
+    bit_in_byte = tl.arange(0, 8)
+    out = tl.sum(bits.to(tl.int32) << bit_in_byte, axis=0)
+    tl.store(out_ptr + row * row_bytes + byte, out.to(tl.uint8))
+
+
+def triton_bitpack_rowwise(
+    codes: torch.Tensor,       # [N, D] int32 (cuda)
+    dim_of_bit: torch.Tensor,  # [row_bits] int32 (cuda)
+    bitpos_in_dim: torch.Tensor,  # [row_bits] int32 (cuda)
+    row_bytes: int,
+) -> torch.Tensor:
+    """GPU-only bitpack. Returns [N, row_bytes] uint8 on same device."""
+    if not codes.is_cuda:
+        raise RuntimeError("triton_bitpack_rowwise requires CUDA tensors")
+    if codes.dtype != torch.int32:
+        raise ValueError(f"codes dtype must be int32, got {codes.dtype}")
+    if codes.dim() != 2:
+        raise ValueError(f"codes must be 2D, got shape {tuple(codes.shape)}")
+    N, D = codes.shape
+    row_bits = int(dim_of_bit.shape[0])
+    if int(bitpos_in_dim.shape[0]) != row_bits:
+        raise ValueError(
+            f"dim_of_bit/bitpos_in_dim size mismatch: {row_bits} vs "
+            f"{bitpos_in_dim.shape[0]}"
+        )
+    if not codes.is_contiguous():
+        codes = codes.contiguous()
+
+    out = torch.empty((N, row_bytes), dtype=torch.uint8, device=codes.device)
+    if N == 0 or row_bytes == 0:
+        return out
+
+    grid = (N, row_bytes)
+    _triton_bitpack_kernel[grid](
+        codes, out, dim_of_bit, bitpos_in_dim,
+        N, D, row_bits, row_bytes,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# T3: Triton bitunpack_rowwise — GPU-only，消除 D2H/H2D 往返
+# ---------------------------------------------------------------------------
+#
+# pack 语义（与 bitpack_rowwise 一致，LSB-first）：
+#   对每个 dim d，其 bits[d] 个位按低位到高位顺序放入 packed 比特流
+#   bit_start[d] = prefix_sum(bits[:d])
+#   bit_of_dim = bit_start[d] + i，其中 i = 0..bits[d]-1
+#   code[row, d] = Σ (packed_bit(row, bit_of_dim) << i)
+#
+# Kernel 设计：
+#   * Grid: (N, D)，每个 program 负责一个 (row, dim)，通过前缀和查 bit_start
+#   * 利用 Triton 向量化 load（一次 32b）+ shift/mask，避免 CPU 位运算循环
+# ---------------------------------------------------------------------------
+@triton.jit
+def _triton_bitunpack_kernel(
+    packed_ptr,        # [N, row_bytes] uint8
+    codes_ptr,         # [N, D] int32 (output)
+    bits_ptr,          # [D] int32
+    prefix_sum_ptr,    # [D] int32，prefix_sum[d] = Σ bits[:d]
+    N, D, row_bytes,
+):
+    row = tl.program_id(0)
+    dim = tl.program_id(1)
+    if row >= N or dim >= D:
+        return
+
+    bits_d = tl.load(bits_ptr + dim).to(tl.int32)
+    bit_start = tl.load(prefix_sum_ptr + dim).to(tl.int32)
+
+    if bits_d <= 0:
+        tl.store(codes_ptr + row * D + dim, 0)
+        return
+
+    # 该 dim 需要读 bits_d 个位。位位置范围 [bit_start, bit_start + bits_d - 1]
+    # 字节序: packed 是按 LSB-first 打包，每个字节对应 8 个连续 bit
+    result: tl.int32 = 0
+    # loop unroll by 8-bit byte reads; bits_d <= D <= 448 (实际很小: 2/3/4)
+    # 由于 bits_d 是运行时值，用 while 循环（Triton 可展开小范围）
+    bit_idx = 0
+    while bit_idx < bits_d:
+        global_bit = bit_start + bit_idx
+        byte_off = global_bit // 8
+        bit_in_byte = global_bit % 8
+        byte_val = tl.load(packed_ptr + row * row_bytes + byte_off).to(tl.int32)
+        bit_val = (byte_val >> bit_in_byte) & 1
+        result = result | (bit_val << bit_idx)
+        bit_idx += 1
+
+    tl.store(codes_ptr + row * D + dim, result)
+
+
+def triton_bitunpack_rowwise(
+    packed: torch.Tensor,    # [N, row_bytes] uint8 (cuda)
+    bits: torch.Tensor,      # [D] int32 (cuda or cpu)
+) -> torch.Tensor:
+    """GPU-only bitunpack. Returns [N, D] int32 on same device as ``packed``.
+
+    ``bits`` 可以在 CPU 或 GPU；内部会把它 + 构造的前缀和移到 packed.device。
+    """
+    if not packed.is_cuda:
+        raise RuntimeError("triton_bitunpack_rowwise requires CUDA tensors")
+    if packed.dtype != torch.uint8:
+        raise ValueError(f"packed dtype must be uint8, got {packed.dtype}")
+    if packed.dim() != 2:
+        raise ValueError(f"packed must be 2D, got shape {tuple(packed.shape)}")
+    if bits.dtype != torch.int32:
+        bits = bits.to(torch.int32)
+    if bits.dim() != 1:
+        raise ValueError(f"bits must be 1D, got shape {tuple(bits.shape)}")
+
+    N, row_bytes = packed.shape
+    D = int(bits.shape[0])
+    if D == 0 or N == 0:
+        return torch.zeros((N, D), dtype=torch.int32, device=packed.device)
+
+    # bits 可能在 CPU；构造前缀和并移动到 GPU
+    bits_gpu = bits.to(packed.device)
+    # prefix_sum: prefix_sum[d] = Σ bits[:d]
+    prefix_sum = torch.zeros((D + 1,), dtype=torch.int64, device=bits_gpu.device)
+    prefix_sum[1:] = bits_gpu.to(torch.int64).cumsum(0)
+    prefix_sum = prefix_sum[:D].to(torch.int32).contiguous()
+    bits_gpu = bits_gpu.contiguous()
+    if not packed.is_contiguous():
+        packed = packed.contiguous()
+
+    codes = torch.empty((N, D), dtype=torch.int32, device=packed.device)
+
+    grid = (N, D)
+    _triton_bitunpack_kernel[grid](
+        packed, codes, bits_gpu, prefix_sum,
+        N, D, row_bytes,
+    )
+    return codes
+
+
 __all__ = [
     "rotated_dequant_to_fp8_layout",
+    "triton_bitpack_rowwise",
+    "triton_bitunpack_rowwise",
     "_MLA_NOPE_DIM",
     "_MLA_HEAD_DIM",
     "_MLA_TILE_SIZE",
