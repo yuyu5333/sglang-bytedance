@@ -644,9 +644,12 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         device = entry.shadow_buffers[local_layer_id].device
         page_size = entry.page_size
 
-        # Flatten page_indices, drop sentinels (-1).
+        # Flatten page_indices, drop sentinels (-1) AND out-of-range pages
+        # (TP may pass page indices that are valid for the main KV pool
+        # but >= entry.num_pages for the packed sub-buffer).
         flat_pages = page_indices.reshape(-1).to(torch.int64)
-        flat_pages = flat_pages[flat_pages >= 0]
+        max_page = entry.num_pages
+        flat_pages = flat_pages[(flat_pages >= 0) & (flat_pages < max_page)]
         if flat_pages.numel() == 0:
             return
         # Deduplicate to avoid redundant work when the same page is hit

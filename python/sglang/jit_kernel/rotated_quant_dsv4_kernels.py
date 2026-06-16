@@ -264,6 +264,21 @@ def rotated_load_to_fp8_layout(
 
     indices_i64 = indices.to(device=cache.device, dtype=torch.int64)
     cache_flat = cache.view(-1, bpt)  # [num_pages * page_size, bpt] (view, no alloc)
+    max_allowed = cache_flat.shape[0]
+    # 防御性检查：确保所有索引在合法范围内（调用者应该已在 _refresh_shadow_pages
+    # 过滤 page_indices，但在这里再验证一次，避免 device-side assert）
+    min_idx = indices_i64.min().item() if indices_i64.numel() > 0 else 0
+    max_idx = indices_i64.max().item() if indices_i64.numel() > 0 else -1
+    if min_idx < 0 or max_idx >= max_allowed:
+        valid_mask = (indices_i64 >= 0) & (indices_i64 < max_allowed)
+        indices_i64 = indices_i64[valid_mask]
+        M = indices_i64.shape[0]
+        if M == 0:
+            return
+        # 注意：这里不缩小 out_slot/out_scale（它们由调用者分配且与原始 M 对齐）。
+        # 只保证我们只写入前 M 行；调用者 scatter 时也只使用合法 flat_pages。
+        out_slot = out_slot[:M]
+        out_scale = out_scale[:M]
 
     # FP8 layout Triton kernel（GPU 端）
     from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
