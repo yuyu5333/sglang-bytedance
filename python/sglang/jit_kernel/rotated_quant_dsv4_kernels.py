@@ -261,11 +261,12 @@ def rotated_load_to_fp8_layout(
     packed_nope = rows[:, :row_bytes_nope].contiguous()  # uint8 [M, row_bytes_nope]
     rope_bytes = rows[:, row_bytes_nope:].contiguous()   # uint8 [M, 128]
 
-    # --- T3: 全 GPU 路径，不走 CPU bitunpack
-    from sglang.jit_kernel.triton_rotated_quant_dsv4 import triton_bitunpack_rowwise
-    # cfg.bits 可能是 CPU tensor；bitunpack kernel 内部会自动移动到 GPU
-    codes_i32 = triton_bitunpack_rowwise(packed_nope, cfg.bits)
-    codes = codes_i32.to(torch.float32)
+    # --- T3: store 用 Triton bitpack（瓶颈），load 用 CPU bitunpack 缓解 GPU OOM
+    # packed_nope 很小（uint8 [M, ~48]），CPU bitunpack 压力在 CPU RAM，
+    # 刚好避免 GPU 上额外分配 200+ MiB 的 codes/codes_i32 中间张量。
+    bits_cpu = cfg.bits.to(device="cpu", dtype=torch.int32)
+    codes = bitunpack_rowwise(packed_nope.cpu(), bits_cpu, dim=_MLA_NOPE_DIM)
+    codes = codes.to(device=cache.device, dtype=torch.float32)
 
     scale = cfg.scale.to(device=cache.device, dtype=torch.float32)
     zero = cfg.zero.to(device=cache.device, dtype=torch.float32)
