@@ -1,26 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cohere2Moe text config used by the Cohere Command-A Plus checkpoints."""
 
-from transformers.configuration_utils import PretrainedConfig as PreTrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 try:
-    from huggingface_hub.dataclasses import strict as _strict
+    from huggingface_hub.dataclasses import strict
 except ImportError:  # older huggingface_hub
-    _strict = None
 
-
-def strict(cls):  # type: ignore[misc]
-    """Apply huggingface_hub's @strict only when the class is a real
-    dataclass; otherwise no-op. Newer hf_hub raises if not, but
-    transformers <5 declares config classes as plain classes.
-    """
-    if _strict is None:
+    def strict(cls):  # type: ignore[misc]
         return cls
-    import dataclasses
-    if dataclasses.is_dataclass(cls):
-        return _strict(cls)
-    return cls
 
 
 @strict
