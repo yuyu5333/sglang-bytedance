@@ -335,26 +335,29 @@ class ModelRunnerKVCacheMixin:
             is_nsa_model, is_dsv4_model, current_platform
         )
 
-        # 启发三 / M1 + M3.a + M3.b: rotated + non-uniform-bit KV cache.
+        # 启发三 / M1 + M3.a + M3.b + M3.c: rotated + non-uniform-bit KV cache.
         # M1: vanilla MHA (full INT2/3/4 storage replacement).
         # M3.a: standard MLA (latent INT2/3/4 + rope raw).
         # M3.b: DeepSeek-V4 EVALUATION MODE (main FP8 storage unchanged;
         #       per-layer rotated quantizers loaded for offline accuracy
         #       evaluation via simulate_quantize_nope). Wall-storage
         #       replacement of DSv4 nope is M3.c (kernel-side).
-        # Reject paths still unsupported: DSA / hybrid SWA / FP4 outputs.
+        # 注意：DSv4 自身是 hybrid_swa（swa + c4 + c128 三池），其
+        # rotated 路径由下游 RotatedQuantDeepSeekV4TokenToKVPool 接管，
+        # 因此放行 (is_dsv4_model and is_hybrid_swa)。仅在
+        # 非 DSv4 的 hybrid_swa（其它模型）和 NSA / FP4 输出上拒绝。
         if self.server_args.rotated_kv_quant_config:
             is_hybrid_swa = getattr(self, "is_hybrid_swa", False)
             if (
-                is_dsa_model
-                or is_hybrid_swa
+                is_nsa_model
+                or (is_hybrid_swa and not is_dsv4_model)
                 or is_float4_e2m1fn_x2(self.kv_cache_dtype)
             ):
                 raise ValueError(
                     "--rotated-kv-quant-config supports MHA (M1), "
-                    "standard MLA (M3.a), and DeepSeek-V4 in evaluation "
-                    "mode (M3.b). Detected "
-                    f"is_dsa={is_dsa_model}, is_dsv4={is_dsv4_model}, "
+                    "standard MLA (M3.a), and DeepSeek-V4 (M3.b/M3.c). "
+                    "Detected "
+                    f"is_nsa={is_nsa_model}, is_dsv4={is_dsv4_model}, "
                     f"use_mla={self.use_mla_backend}, "
                     f"is_hybrid_swa={is_hybrid_swa}, "
                     f"kv_cache_dtype={self.kv_cache_dtype}. "
