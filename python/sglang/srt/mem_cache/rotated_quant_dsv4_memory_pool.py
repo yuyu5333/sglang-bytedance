@@ -412,6 +412,17 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _swa_local_layer_id(self, layer_id: int) -> int:
+        """Map absolute layer_id to local index of swa_kv_pool.kv_buffer.
+
+        Parent class (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused
+        and ...norm_rope) uses ``self.swa_kv_pool.kv_buffer[layer_id]``
+        directly. ``swa_kv_pool`` is a DeepSeekV4SingleKVPool sized by
+        ``layer_num`` (full layer count), so the absolute layer_id is the
+        correct index. Mirror parent's behavior verbatim.
+        """
+        return layer_id
+
     def _layer_id_for_extra(self, layer_id: int) -> Tuple[str, int]:
         """Map absolute layer_id to (pool_kind in {'c4','c128'}, local_layer)."""
         compress_ratio, compress_layer_id, compress_kv_pool = self.layer_mapping[
