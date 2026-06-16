@@ -74,6 +74,13 @@ TRITON_STORE_CACHE_PATH = os.path.join(
     "jit_kernel",
     "triton_store_cache.py",
 )
+TRITON_RKQ_DSV4_PATH = os.path.join(
+    REPO_ROOT,
+    "python",
+    "sglang",
+    "jit_kernel",
+    "triton_rotated_quant_dsv4.py",
+)
 
 
 def _load_standalone(name: str, path: str):
@@ -325,13 +332,32 @@ class TestRotatedQuantDSv4WallStorage(unittest.TestCase):
         except ImportError:
             self.skipTest("triton not installed")
 
-        from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
-            rotated_dequant_to_fp8_layout,
-            _MLA_NOPE_DIM as TRI_NOPE,
-            _MLA_TILE_SIZE as TRI_TILE,
-            _MLA_SLOT_BYTES as TRI_SLOT,
-            _MLA_SCALES_PER_TOKEN as TRI_SCALES,
-        )
+        # Load triton_rotated_quant_dsv4 standalone to avoid pulling
+        # ``sglang.__init__`` (which on the dev box may resolve to a
+        # different editable install with a strict transformers version).
+        # The triton module imports ``is_fp8_fnuz`` from
+        # ``sglang.srt.layers.quantization.fp8_kernel`` -- we stub that
+        # to a minimal module so we never touch the real sglang import chain.
+        import types as _types
+        if "sglang.srt.layers.quantization.fp8_kernel" not in sys.modules:
+            stub = _types.ModuleType("sglang.srt.layers.quantization.fp8_kernel")
+            # All current Blackwell / Hopper boxes are NV (not AMD ROCm),
+            # so is_fp8_fnuz() returns False. Hard-code that here for the
+            # canary; if the test ever runs on ROCm we just need to flip
+            # this to detect torch.version.hip.
+            stub.is_fp8_fnuz = lambda: bool(getattr(torch.version, "hip", None))
+            sys.modules["sglang.srt.layers.quantization.fp8_kernel"] = stub
+        try:
+            tri = _load_standalone(
+                "_rkq_dsv4_triton_canary", TRITON_RKQ_DSV4_PATH
+            )
+        except Exception as e:  # pragma: no cover - env specific
+            self.skipTest(f"triton_rotated_quant_dsv4 import failed: {e}")
+        rotated_dequant_to_fp8_layout = tri.rotated_dequant_to_fp8_layout
+        TRI_NOPE = tri._MLA_NOPE_DIM
+        TRI_TILE = tri._MLA_TILE_SIZE
+        TRI_SLOT = tri._MLA_SLOT_BYTES
+        TRI_SCALES = tri._MLA_SCALES_PER_TOKEN
 
         # Triton-side constants must match the kernels module (drift check on GPU).
         self.assertEqual(TRI_NOPE, self.kernels._MLA_NOPE_DIM)
