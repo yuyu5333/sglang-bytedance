@@ -514,21 +514,27 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
 
         # Reproduce the fused norm+rope computation in PyTorch; M3.c.3
         # will replace this with a Triton kernel that also writes packed.
-        nope_in = kv[..., :self.qk_nope_head_dim]
-        rope_in = kv[..., self.qk_nope_head_dim:]
-        # RMSNorm with kv_weight on nope.
-        nope_f = nope_in.to(torch.float32)
-        var = nope_f.pow(2).mean(dim=-1, keepdim=True)
-        nope_norm = (nope_f * torch.rsqrt(var + eps)).to(kv.dtype) * kv_weight
+        # NOTE: must mirror jit_kernel/csrc/.../main_norm_rope.cuh exactly:
+        # RMSNorm + kv_weight act on the FULL kHeadDim=512 vector; only the
+        # last kRopeDim=64 lanes get rotated by RoPE afterwards.
+        kv_f = kv.to(torch.float32)
+        var = kv_f.pow(2).mean(dim=-1, keepdim=True)
+        kv_norm = (kv_f * torch.rsqrt(var + eps)).to(kv.dtype) * kv_weight
+        nope_norm = kv_norm[..., : self.qk_nope_head_dim]
+        rope_norm = kv_norm[..., self.qk_nope_head_dim :]
         # Apply RoPE on rope half. freqs_cis is complex64 [max_pos, rope_dim/2];
         # gather per position then compute rotated rope = view_as_real(rope_complex * freqs).
-        rope_dim = rope_in.shape[-1]
-        rope_complex = rope_in.float().reshape(*rope_in.shape[:-1], rope_dim // 2, 2)
+        rope_dim = rope_norm.shape[-1]
+        rope_complex = rope_norm.float().reshape(
+            *rope_norm.shape[:-1], rope_dim // 2, 2
+        )
         rope_complex = torch.view_as_complex(rope_complex.contiguous())
         freqs = freqs_cis.index_select(0, positions.to(torch.long))
-        rope_rotated = torch.view_as_real(rope_complex * freqs).reshape(
-            *rope_in.shape[:-1], rope_dim
-        ).to(kv.dtype)
+        rope_rotated = (
+            torch.view_as_real(rope_complex * freqs)
+            .reshape(*rope_norm.shape[:-1], rope_dim)
+            .to(kv.dtype)
+        )
         cat = torch.cat([nope_norm, rope_rotated], dim=-1)
         rotated_store_to_packed(
             self._wall_kv_input(cat),
