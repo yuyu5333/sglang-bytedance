@@ -255,9 +255,10 @@ def rotated_load_to_fp8_layout(
             f"cache bytes_per_page {cache.shape[1]} != bpt({bpt}) * page_size({page_size})"
         )
 
-    # --- T3: chunked load path. 避免一次性在 GPU 上分配 [M, *] 大中间张量。
-    # store 路径用 Triton bitpack（write 是瓶颈）；load 路径用 CPU bitunpack + 分块。
-    bits_cpu = cfg.bits.to(device="cpu", dtype=torch.int32)
+    # --- T3: chunked GPU load path.
+    #   * 用 Triton GPU bitunpack + chunk=8192，兼顾 GPU 内存和速度。
+    #   * 之前 CPU bitunpack 太慢（448 次 Python 循环，M=10^6 → 300s+）。
+    #   * CUDA OOM 用 PYTORCH_CUDA_ALLOC_CONF=expandable_segments 解决。
     scale = cfg.scale.to(device=cache.device, dtype=torch.float32)
     zero = cfg.zero.to(device=cache.device, dtype=torch.float32)
     R = cfg.R.to(device=cache.device, dtype=torch.float32)
@@ -265,39 +266,35 @@ def rotated_load_to_fp8_layout(
     indices_i64 = indices.to(device=cache.device, dtype=torch.int64)
     cache_flat = cache.view(-1, bpt)  # [num_pages * page_size, bpt] (view, no alloc)
     max_allowed = cache_flat.shape[0]
-    # 防御性检查：确保所有索引在合法范围内（调用者应该已在 _refresh_shadow_pages
-    # 过滤 page_indices，但在这里再验证一次，避免 device-side assert）
-    min_idx = indices_i64.min().item() if indices_i64.numel() > 0 else 0
-    max_idx = indices_i64.max().item() if indices_i64.numel() > 0 else -1
-    if min_idx < 0 or max_idx >= max_allowed:
-        valid_mask = (indices_i64 >= 0) & (indices_i64 < max_allowed)
+
+    # 防御性过滤：跳过越界或负的索引
+    valid_mask = (indices_i64 >= 0) & (indices_i64 < max_allowed)
+    if not valid_mask.all():
         indices_i64 = indices_i64[valid_mask]
         M = indices_i64.shape[0]
         if M == 0:
             return
-        # 注意：这里不缩小 out_slot/out_scale（它们由调用者分配且与原始 M 对齐）。
-        # 只保证我们只写入前 M 行；调用者 scatter 时也只使用合法 flat_pages。
         out_slot = out_slot[:M]
         out_scale = out_scale[:M]
 
-    # FP8 layout Triton kernel（GPU 端）
+    # FP8 layout + GPU Triton kernels
     from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
         rotated_dequant_to_fp8_layout,
+        triton_bitunpack_rowwise,
     )
 
-    CHUNK = 16384  # 每块最多 16K tokens → 峰值 GPU 中间张量 ≤ ~30 MiB
+    CHUNK = 8192  # 每块 ~ 8K tokens → 峰值 ~30 MB → 不会 OOM
     for start in range(0, M, CHUNK):
         end = min(start + CHUNK, M)
         chunk_idx = indices_i64[start:end]
         chunk_rows = cache_flat.index_select(0, chunk_idx)  # [chunk, bpt]
-        chunk_packed = chunk_rows[:, :row_bytes_nope].contiguous()  # [chunk, row_bytes_nope]
-        chunk_rope = chunk_rows[:, row_bytes_nope:].contiguous()  # [chunk, 128]
-        # CPU bitunpack → 减少 GPU 峰值内存（中间 tensor 在 CPU 上）
-        codes_chunk = bitunpack_rowwise(
-            chunk_packed.cpu(), bits_cpu, dim=_MLA_NOPE_DIM,
-        ).to(device=cache.device, dtype=torch.float32)  # [chunk, 448]
-        K_rot_hat = codes_chunk * scale + zero
-        nope_bf16 = (K_rot_hat @ R.t()).to(torch.bfloat16).contiguous()
+        chunk_packed = chunk_rows[:, :row_bytes_nope].contiguous()
+        chunk_rope = chunk_rows[:, row_bytes_nope:].contiguous()
+        # GPU bitunpack → codes_i32 (ch, 448) int32
+        codes_chunk = triton_bitunpack_rowwise(chunk_packed, cfg.bits)
+        # dequant + inverse-rotate → bf16
+        nope_bf16 = (codes_chunk.to(torch.float32) * scale + zero) @ R.t()
+        nope_bf16 = nope_bf16.contiguous()
         rope_bf16 = chunk_rope.view(torch.bfloat16).reshape(
             end - start, _MLA_TILE_SIZE,
         ).contiguous()
@@ -305,7 +302,7 @@ def rotated_load_to_fp8_layout(
             nope_bf16, rope_bf16,
             out_slot[start:end], out_scale[start:end],
         )
-        del chunk_rows, chunk_packed, chunk_rope, codes_chunk, K_rot_hat, nope_bf16, rope_bf16
+        del chunk_rows, chunk_packed, chunk_rope, codes_chunk, nope_bf16, rope_bf16
 
 
 # ----------------------------------------------------------------------
