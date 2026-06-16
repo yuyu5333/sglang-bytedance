@@ -454,7 +454,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             rotated_store_to_packed,
         )
 
-        swa_loc = self.get_cached_swa_loc(raw_loc, layer_id)
+        # Mirror the parent's translation+cache logic
+        # (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused).
+        if self._should_cache_swa:
+            if layer_id == 0:
+                self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+            swa_loc = self.cached_loc
+        else:
+            swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
         rotated_store_to_packed(
@@ -483,7 +490,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             rotated_store_to_packed,
         )
 
-        swa_loc = self.get_cached_swa_loc(raw_loc, layer_id)
+        # Mirror the parent's translation+cache logic
+        # (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused_norm_rope).
+        if self._should_cache_swa:
+            if layer_id == self.start_layer or self.cached_loc is None:
+                self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+            swa_loc = self.cached_loc
+        else:
+            swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
 
