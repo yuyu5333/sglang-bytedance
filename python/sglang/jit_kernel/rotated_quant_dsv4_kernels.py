@@ -293,8 +293,9 @@ def rotated_load_to_fp8_layout(
         # GPU bitunpack → codes_i32 (ch, 448) int32
         codes_chunk = triton_bitunpack_rowwise(chunk_packed, cfg.bits)
         # dequant + inverse-rotate → bf16
-        nope_bf16 = (codes_chunk.to(torch.float32) * scale + zero) @ R.t()
-        nope_bf16 = nope_bf16.contiguous()
+        nope_bf16 = ((codes_chunk.to(torch.float32) * scale + zero) @ R.t()).to(
+            torch.bfloat16
+        ).contiguous()
         rope_bf16 = chunk_rope.view(torch.bfloat16).reshape(
             end - start, _MLA_TILE_SIZE,
         ).contiguous()
