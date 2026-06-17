@@ -603,11 +603,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # invalid (loc<0) 直接 return 零 read 零 write，彻底消除原
         # PyTorch ``gather + where + scatter_`` 在 cudagraph capture/replay
         # 下的 byte-level race（详见 triton_scatter_tokens_to_shadow 注释）。
-        loc_i64 = loc.to(device=device, dtype=torch.int64).reshape(-1)
+        # 关键：直接传原始 loc（int32），避免 ``loc.to(int64)`` 在 cudagraph
+        # capture 期间 alloc 临时 int64 tensor —— 这会让 kernel 在 replay
+        # 时拿到不稳定指针。Triton kernel 内部会 cast 到 int64。
+        loc_flat = loc.reshape(-1)
+        if not loc_flat.is_contiguous():
+            loc_flat = loc_flat.contiguous()
         triton_scatter_tokens_to_shadow(
             out_slot,
             out_scale,
-            loc_i64,
+            loc_flat,
             shadow,
             page_size,
         )

@@ -391,7 +391,7 @@ def triton_bitunpack_rowwise(
 def _scatter_tokens_to_shadow_kernel(
     out_slot_ptr,    # [N, SLOT_BYTES] uint8
     out_scale_ptr,   # [N, SCALES] uint8
-    loc_ptr,         # [N] int64 (token slot ids, -1 for invalid)
+    loc_ptr,         # [N] integer (int32 or int64) (token slot ids, -1 for invalid)
     shadow_ptr,      # [num_pages * bytes_per_page] uint8 flat
     N,
     page_size,
@@ -404,7 +404,7 @@ def _scatter_tokens_to_shadow_kernel(
     tid = tl.program_id(0)
     if tid >= N:
         return
-    loc = tl.load(loc_ptr + tid)
+    loc = tl.load(loc_ptr + tid).to(tl.int64)
     if loc < 0:
         return  # capture-safe: no read, no write for invalid token
 
@@ -445,8 +445,14 @@ def triton_scatter_tokens_to_shadow(
         raise RuntimeError("triton_scatter_tokens_to_shadow requires CUDA tensors")
     if out_slot.dtype != torch.uint8 or out_scale.dtype != torch.uint8 or shadow.dtype != torch.uint8:
         raise ValueError("out_slot/out_scale/shadow must be uint8")
-    if loc.dtype != torch.int64:
-        loc = loc.to(torch.int64)
+    # Capture-stability: do NOT do ``loc.to(int64)`` here — it would alloc
+    # a temporary tensor whose address is unstable across cudagraph
+    # capture/replay. The kernel handles int32/int64 internally via
+    # ``tl.load(...).to(tl.int64)``.
+    if loc.dtype not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"loc must be int32 or int64 for cudagraph stability, got {loc.dtype}"
+        )
     if not out_slot.is_contiguous():
         out_slot = out_slot.contiguous()
     if not out_scale.is_contiguous():
