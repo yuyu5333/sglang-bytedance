@@ -96,21 +96,59 @@ def _get_cached_pack_meta(
     cfg: RotatedQuantizerConfig, device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return cached (dim_of_bit_gpu, bitpos_in_dim_gpu) for this cfg+device."""
+    entry = _get_cached_cfg_gpu(cfg, device)
+    return entry["dim_of_bit"], entry["bitpos_in_dim"]
+
+
+def _get_cached_cfg_gpu(
+    cfg: RotatedQuantizerConfig, device,
+) -> dict:
+    """Return cached GPU copies of {R, scale, zero, bits, levels, dim_of_bit,
+    bitpos_in_dim} for this cfg+device.
+
+    All tensors are copied once at first call and reused for every
+    subsequent ``rotated_store_to_packed``. This is critical for CUDA graph
+    capture: any per-call ``.to(device)`` H2D copy would invalidate the
+    stream capture (cudaErrorStreamCaptureInvalidated).
+    """
     key = id(cfg)
-    entry = _PACK_META_CACHE.get(key)
     dev_key = str(device)
+    entry = _PACK_META_CACHE.get(key)
     if entry is not None and entry.get("device") == dev_key:
-        return entry["dim_of_bit"], entry["bitpos_in_dim"]
+        return entry
     dim_of_bit, bitpos_in_dim, _rb, _rbytes = _build_pack_meta_from_bits(cfg.bits)
-    if device and device.type == "cuda":
+    if device is not None and getattr(device, "type", None) == "cuda":
         dim_of_bit = dim_of_bit.to(device)
         bitpos_in_dim = bitpos_in_dim.to(device)
-    _PACK_META_CACHE[key] = {
+        R_gpu = cfg.R.to(device=device, dtype=torch.float32)
+        scale_gpu = cfg.scale.to(device=device, dtype=torch.float32).clamp_min(1e-12)
+        zero_gpu = cfg.zero.to(device=device, dtype=torch.float32)
+        bits_gpu = cfg.bits.to(device=device, dtype=torch.int32)
+        levels_gpu = (
+            (torch.ones_like(bits_gpu, dtype=torch.int64) << bits_gpu.to(torch.int64))
+            - 1
+        ).to(torch.float32)
+    else:
+        R_gpu = cfg.R.to(torch.float32)
+        scale_gpu = cfg.scale.to(torch.float32).clamp_min(1e-12)
+        zero_gpu = cfg.zero.to(torch.float32)
+        bits_gpu = cfg.bits.to(torch.int32)
+        levels_gpu = (
+            (torch.ones_like(bits_gpu, dtype=torch.int64) << bits_gpu.to(torch.int64))
+            - 1
+        ).to(torch.float32)
+    entry = {
         "device": dev_key,
         "dim_of_bit": dim_of_bit,
         "bitpos_in_dim": bitpos_in_dim,
+        "R": R_gpu,
+        "scale": scale_gpu,
+        "zero": zero_gpu,
+        "bits": bits_gpu,
+        "levels": levels_gpu,
     }
-    return dim_of_bit, bitpos_in_dim
+    _PACK_META_CACHE[key] = entry
+    return entry
 
 
 # ----------------------------------------------------------------------
@@ -164,24 +202,27 @@ def rotated_store_to_packed(
     # --- T3: 整个 store 全 GPU 路径
     #   1) rotate + affine quant + round + clamp 全走 GPU torch
     #   2) bitpack 走 Triton kernel (向量化位合并)
-    R = cfg.R.to(device=input_bf16.device, dtype=torch.float32)
-    scale = cfg.scale.to(device=input_bf16.device, dtype=torch.float32).clamp_min(1e-12)
-    zero = cfg.zero.to(device=input_bf16.device, dtype=torch.float32)
-    bits_gpu = cfg.bits.to(device=input_bf16.device, dtype=torch.int32)
-    # levels = 2^bits - 1，用于 quantise 后的饱和值；留在 GPU
-    levels_gpu = (
-        torch.ones_like(bits_gpu, dtype=torch.int64) << bits_gpu.to(torch.int64)
-    ) - 1
+    #
+    # 关键约束：CUDA graph capture 期间任何 H2D copy 都会触发
+    # cudaErrorStreamCaptureInvalidated，所以 R/scale/zero/levels 必须
+    # 在第一次（capture 前）就缓存到 GPU。_get_cached_cfg_gpu 一次性建好
+    # 所有 GPU constants，后续每次 store 直接复用。
+    cfg_gpu = _get_cached_cfg_gpu(cfg, input_bf16.device)
+    R = cfg_gpu["R"]
+    scale = cfg_gpu["scale"]
+    zero = cfg_gpu["zero"]
+    levels_f = cfg_gpu["levels"]
 
     K_rot = nope.to(torch.float32) @ R  # [N, 448]
     codes_f = ((K_rot - zero) / scale).round()
     codes_f = torch.clamp(
-        codes_f, min=torch.zeros_like(codes_f), max=levels_gpu.to(codes_f.dtype)
+        codes_f, min=torch.zeros_like(codes_f), max=levels_f
     )
     codes_i32 = codes_f.to(torch.int32)  # 留在 GPU
 
     # --- Triton bitpack（T3）。
-    dim_of_bit, bitpos_in_dim = _get_cached_pack_meta(cfg, input_bf16.device)
+    dim_of_bit = cfg_gpu["dim_of_bit"]
+    bitpos_in_dim = cfg_gpu["bitpos_in_dim"]
     from sglang.jit_kernel.triton_rotated_quant_dsv4 import triton_bitpack_rowwise
     packed = triton_bitpack_rowwise(
         codes_i32, dim_of_bit, bitpos_in_dim, cfg.row_bytes,
@@ -259,9 +300,14 @@ def rotated_load_to_fp8_layout(
     #   * 用 Triton GPU bitunpack + chunk=8192，兼顾 GPU 内存和速度。
     #   * 之前 CPU bitunpack 太慢（448 次 Python 循环，M=10^6 → 300s+）。
     #   * CUDA OOM 用 PYTORCH_CUDA_ALLOC_CONF=expandable_segments 解决。
-    scale = cfg.scale.to(device=cache.device, dtype=torch.float32)
-    zero = cfg.zero.to(device=cache.device, dtype=torch.float32)
-    R = cfg.R.to(device=cache.device, dtype=torch.float32)
+    #
+    # 同 store path：cfg constants 必须缓存到 GPU，避免 capture-期 H2D
+    # 触发 cudaErrorStreamCaptureInvalidated。
+    cfg_gpu = _get_cached_cfg_gpu(cfg, cache.device)
+    scale = cfg_gpu["scale"]
+    zero = cfg_gpu["zero"]
+    R = cfg_gpu["R"]
+    bits_gpu = cfg_gpu["bits"]
 
     indices_i64 = indices.to(device=cache.device, dtype=torch.int64)
     cache_flat = cache.view(-1, bpt)  # [num_pages * page_size, bpt] (view, no alloc)
@@ -290,8 +336,8 @@ def rotated_load_to_fp8_layout(
         chunk_rows = cache_flat.index_select(0, chunk_idx)  # [chunk, bpt]
         chunk_packed = chunk_rows[:, :row_bytes_nope].contiguous()
         chunk_rope = chunk_rows[:, row_bytes_nope:].contiguous()
-        # GPU bitunpack → codes_i32 (ch, 448) int32
-        codes_chunk = triton_bitunpack_rowwise(chunk_packed, cfg.bits)
+        # GPU bitunpack → codes_i32 (ch, 448) int32 (bits is GPU-cached)
+        codes_chunk = triton_bitunpack_rowwise(chunk_packed, bits_gpu)
         # dequant + inverse-rotate → bf16
         nope_bf16 = ((codes_chunk.to(torch.float32) * scale + zero) @ R.t()).to(
             torch.bfloat16
