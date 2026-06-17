@@ -210,6 +210,11 @@ class _WallPoolEntry:
         # _refresh_shadow_pages 只对 dirty=True 的页做 bitunpack，
         # 刷完清掉 dirty。store 路径将写入的 page mark dirty=True。
         "dirty_pages",
+        # T_cgraph_safe: 跨 forward 复用的 staging buffer，避免在
+        # cudagraph capture 期间反复 ``torch.empty`` 临时 tensor 导致
+        # replay 时指针不稳定。形状 ``[max_tokens_per_forward, ...]``。
+        "staging_slot",
+        "staging_scale",
     )
 
     def __init__(
@@ -224,6 +229,8 @@ class _WallPoolEntry:
         page_size: int,
         num_pages: int,
         dirty_pages: List[torch.Tensor],
+        staging_slot: torch.Tensor,
+        staging_scale: torch.Tensor,
     ):
         self.kind = kind
         self.pool = pool
@@ -235,6 +242,8 @@ class _WallPoolEntry:
         self.page_size = page_size
         self.num_pages = num_pages
         self.dirty_pages = dirty_pages
+        self.staging_slot = staging_slot
+        self.staging_scale = staging_scale
 
 
 class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
@@ -446,6 +455,21 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 for _ in range(pool.layer_num)
             ]
 
+            # T_cgraph_safe: 跨 forward 复用 staging buffer，避免
+            # _write_tokens_to_shadow 在 cudagraph capture/replay 期间
+            # 反复 ``torch.empty`` 临时 tensor 导致指针不稳定。
+            # 容量上限 = num_pages * page_size = 池中所有 slot 数（一次
+            # forward 写入 token 数不可能超过这个上限）。
+            staging_capacity = num_pages * page_size
+            staging_slot = torch.zeros(
+                staging_capacity, _DSV4_SLOT_BYTES,
+                dtype=torch.uint8, device=device,
+            )
+            staging_scale = torch.zeros(
+                staging_capacity, _DSV4_SCALES_PER_TOKEN,
+                dtype=torch.uint8, device=device,
+            )
+
             # The pool's main kv_buffer is now the PACKED storage. Reading
             # via super().get_swa_key_buffer_radix would return packed bytes
             # to FlashMLA -- our overrides redirect to shadow_buffers.
@@ -467,6 +491,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 page_size=page_size,
                 num_pages=num_pages,
                 dirty_pages=dirty_pages,
+                staging_slot=staging_slot,
+                staging_scale=staging_scale,
             )
             self._wall_pools[kind] = entry
 
@@ -588,12 +614,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         device = kv_bf16_512.device
         nope_bf16 = kv_bf16_512[..., :_MLA_NOPE_DIM].contiguous()
         rope_bf16 = kv_bf16_512[..., _MLA_NOPE_DIM:].contiguous()
-        out_slot = torch.empty(
-            (N, _MLA_SLOT_BYTES), dtype=torch.uint8, device=device
-        )
-        out_scale = torch.empty(
-            (N, _MLA_SCALES_PER_TOKEN), dtype=torch.uint8, device=device
-        )
+        # T_cgraph_safe: 复用 entry 级 staging buffer 而不是 ``torch.empty``，
+        # 避免 cudagraph capture 时分配的临时 tensor 在 replay 阶段被
+        # caching allocator 复用但 graph kernel binding 仍旧指向 capture
+        # 时的地址，导致 replay 时 kernel 写入 stale slot。staging 容量 =
+        # num_pages * page_size，前 N 行对应当前 forward。
+        out_slot = entry.staging_slot[:N]
+        out_scale = entry.staging_scale[:N]
         rotated_dequant_to_fp8_layout(nope_bf16, rope_bf16, out_slot, out_scale)
 
         shadow = entry.shadow_buffers[local_layer_id]
