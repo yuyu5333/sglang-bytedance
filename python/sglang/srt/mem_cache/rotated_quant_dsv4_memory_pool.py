@@ -549,6 +549,52 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return super().set_swa_key_buffer_radix_fused(layer_id, raw_loc, cache_k)
         if "swa" not in self._wall_pools:
             return super().set_swa_key_buffer_radix_fused(layer_id, raw_loc, cache_k)
+        # BYPASS: NSA-CP path. cache_k is already normed+rope-applied BF16
+        # [N, 512]. Quant to FP8+UE8M0 layout via the same path used for
+        # the rotated dequant output, then scatter into shadow_buffer.
+        if os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1":
+            from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+                _MLA_NOPE_DIM, _MLA_TILE_SIZE,
+                _MLA_SLOT_BYTES, _MLA_SCALES_PER_TOKEN,
+            )
+            if self._should_cache_swa:
+                if layer_id == 0:
+                    self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                swa_loc = self.cached_loc
+            else:
+                swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
+            local_layer_id = self._swa_local_layer_id(layer_id)
+            shadow = self._wall_pools["swa"].shadow_buffers[local_layer_id]
+            page_size = self.swa_kv_pool.page_size
+            ck = self._wall_kv_input(cache_k)
+            nope_bf16 = ck[..., :_MLA_NOPE_DIM].contiguous()
+            rope_bf16 = ck[..., _MLA_NOPE_DIM:].contiguous()
+            M = nope_bf16.shape[0]
+            out_slot = torch.empty(
+                (M, _MLA_SLOT_BYTES), dtype=torch.uint8, device=ck.device
+            )
+            out_scale = torch.empty(
+                (M, _MLA_SCALES_PER_TOKEN), dtype=torch.uint8, device=ck.device
+            )
+            from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+                rotated_dequant_to_fp8_layout,
+            )
+            rotated_dequant_to_fp8_layout(nope_bf16, rope_bf16, out_slot, out_scale)
+            # scatter into shadow according to swa_loc
+            page_idx = (swa_loc // page_size).to(torch.long)
+            slot_idx = (swa_loc % page_size).to(torch.long)
+            for i in range(M):
+                pi = int(page_idx[i].item())
+                si = int(slot_idx[i].item())
+                page_buf = shadow[pi]
+                page_buf[si * _MLA_SLOT_BYTES:(si + 1) * _MLA_SLOT_BYTES].copy_(
+                    out_slot[i]
+                )
+                scale_off = page_size * _MLA_SLOT_BYTES + si * _MLA_SCALES_PER_TOKEN
+                page_buf[scale_off:scale_off + _MLA_SCALES_PER_TOKEN].copy_(
+                    out_scale[i]
+                )
+            return
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             rotated_store_to_packed,
         )
@@ -593,6 +639,37 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return super().set_swa_key_buffer_radix_fused_norm_rope(
                 layer_id, raw_loc, kv, kv_weight, eps, freqs_cis, positions
             )
+        # ------------------------------------------------------------------
+        # 诊断开关 SGLANG_RQ_WALL_BYPASS_QUANT=1: 完全绕开 packed/shadow
+        # 的量化数学链路, 直接调 native fused_k_norm_rope_flashmla 把
+        # FP8+UE8M0 写入 shadow_buffer (layout 与原生 FP8 buffer 一致).
+        # 如果此模式下输出通顺 -> 证明 shadow buffer 的字节布局/get 路径/
+        # FlashMLA 消费均正确, 问题一定出在 packed→shadow 的量化数学;
+        # 如果仍 salad -> 问题出在 shadow buffer 的 layout/dtype 或
+        # get_swa_key_buffer_radix 替换破坏了 backend 期待的语义.
+        # ------------------------------------------------------------------
+        if os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1":
+            from sglang.jit_kernel.deepseek_v4 import fused_k_norm_rope_flashmla
+
+            if self._should_cache_swa:
+                if layer_id == self.start_layer or self.cached_loc is None:
+                    self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                swa_loc = self.cached_loc
+            else:
+                swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
+            local_layer_id = self._swa_local_layer_id(layer_id)
+            shadow = self._wall_pools["swa"].shadow_buffers[local_layer_id]
+            fused_k_norm_rope_flashmla(
+                kv=kv,
+                kv_weight=kv_weight,
+                eps=eps,
+                freqs_cis=freqs_cis,
+                positions=positions,
+                out_loc=swa_loc,
+                kvcache=shadow,
+                page_size=self.swa_kv_pool.page_size,
+            )
+            return
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             rotated_store_to_packed,
         )
@@ -872,10 +949,18 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         """
         if self._mode != "wall":
             return
+        # 诊断模式 SGLANG_RQ_WALL_BYPASS_QUANT=1: shadow_buffer 已被 store
+        # 路径用 native FP8 kernel 直接写入真值, refresh 会用 packed (全 0)
+        # 覆盖它 -> 跳过.
+        bypass_quant = os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1"
         cfg = self._nope_cfgs[layer_id]
 
         swa_pages = getattr(core_attn_metadata, "swa_page_indices", None)
-        if swa_pages is not None and "swa" in self._wall_pools:
+        if (
+            swa_pages is not None
+            and "swa" in self._wall_pools
+            and not bypass_quant
+        ):
             entry = self._wall_pools["swa"]
             local_layer_id = self._swa_local_layer_id(layer_id)
             self._refresh_shadow_pages(entry, local_layer_id, cfg, swa_pages)
