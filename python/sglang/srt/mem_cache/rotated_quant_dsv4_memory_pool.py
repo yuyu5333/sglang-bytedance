@@ -164,6 +164,23 @@ _DSV4_ROPE_BF16_BYTES = 128
 _DSV4_SCALES_PER_TOKEN = 8
 
 
+def _wall_token_shadow_enabled() -> bool:
+    """Token-level shadow mirror mode (fix for token salad).
+
+    When ``SGLANG_RQ_WALL_TOKEN_SHADOW=1``, the store path additionally
+    quantizes the BF16 input to FP8+UE8M0 layout and scatters those bytes
+    *per token* into the shadow buffer. The attention prologue then skips
+    the page-level refresh (which used to fill garbage from
+    ``dequant(packed=0) = 0*scale + zero @ R.t() != 0`` into never-written
+    slots, corrupting FlashMLA reads).
+
+    The packed buffer is still maintained (for offline parity / future
+    eviction) but its content is not read back at attention time when this
+    flag is on. BYPASS_QUANT remains an orthogonal diagnostic switch.
+    """
+    return os.environ.get("SGLANG_RQ_WALL_TOKEN_SHADOW", "0") == "1"
+
+
 def _native_bytes_per_page(page_size: int) -> int:
     """DSv4 native paged FP8 layout: ``ceil(584 * P / 576) * 576``."""
     return ((_DSV4_NATIVE_BPT * page_size + _DSV4_SLOT_BYTES - 1) //
@@ -316,13 +333,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         logger.warning(
             "RotatedQuantDeepSeekV4TokenToKVPool active. %s "
             "calib=%s qk_nope_head_dim=%d packed_row_bytes=%d b_mean=%.2f "
-            "wall_pools=%s",
+            "wall_pools=%s token_shadow=%s",
             mode_msg,
             calib_path,
             qk_nope_head_dim,
             self._sim_row_bytes,
             float(sample.bits.float().mean()),
             list(self._wall_pools.keys()),
+            _wall_token_shadow_enabled(),
         )
 
     # ------------------------------------------------------------------
@@ -537,6 +555,96 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         dirty.index_fill_(0, page_idx, True)
 
     # ------------------------------------------------------------------
+    # Token-level shadow write: avoid garbage in unwritten slots.
+    # ------------------------------------------------------------------
+    def _write_tokens_to_shadow(
+        self,
+        entry: _WallPoolEntry,
+        local_layer_id: int,
+        kv_bf16_512: torch.Tensor,  # [N, 512] BF16 (cat(nope, rope))
+        loc: torch.Tensor,           # [N] int32 token slot ids (with -1 sentinels)
+    ) -> None:
+        """Quantize [N, 512] BF16 → DSv4 native FP8 slot bytes, scatter into
+        ``shadow_buffers[local_layer_id]``.
+
+        Why this exists: dequant(packed=0) ≠ 0 because of ``codes*scale +
+        zero`` with non-zero ``zero``. If the prologue refreshes a whole
+        page, slots that were never store()'d get filled with garbage and
+        FlashMLA reads them.  The fix is to keep shadow as the *authoritative
+        per-token mirror*: store path writes a token → shadow gets that
+        token's bytes; unwritten slots stay zero (== FP8 numerical 0,
+        masked out by attention anyway).
+        """
+        from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+            _MLA_NOPE_DIM, _MLA_SLOT_BYTES, _MLA_SCALES_PER_TOKEN,
+        )
+        from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+            rotated_dequant_to_fp8_layout,
+        )
+        N = kv_bf16_512.shape[0]
+        if N == 0:
+            return
+        device = kv_bf16_512.device
+        nope_bf16 = kv_bf16_512[..., :_MLA_NOPE_DIM].contiguous()
+        rope_bf16 = kv_bf16_512[..., _MLA_NOPE_DIM:].contiguous()
+        out_slot = torch.empty(
+            (N, _MLA_SLOT_BYTES), dtype=torch.uint8, device=device
+        )
+        out_scale = torch.empty(
+            (N, _MLA_SCALES_PER_TOKEN), dtype=torch.uint8, device=device
+        )
+        rotated_dequant_to_fp8_layout(nope_bf16, rope_bf16, out_slot, out_scale)
+
+        shadow = entry.shadow_buffers[local_layer_id]
+        page_size = entry.page_size
+        loc_i64 = loc.to(device=device, dtype=torch.int64).reshape(-1)
+        # Clamp -1 sentinels to 0; we will mask their writes by overwriting
+        # with original bytes via a where (capture-safe, no python branch).
+        max_pages = entry.num_pages
+        valid = (loc_i64 >= 0)
+        loc_safe = loc_i64.clamp(min=0, max=max_pages * page_size - 1)
+        page_idx = loc_safe // page_size
+        slot_idx = loc_safe % page_size
+
+        # Scatter values (576 bytes per token).
+        bytes_per_page = entry.shadow_bytes_per_page
+        # shadow viewed as [num_pages, page_size, _MLA_SLOT_BYTES] for the
+        # value region; the rest of the page (scales + pad) follows.
+        # Use absolute byte addressing to be precise.
+        shadow_flat = shadow  # [num_pages, bytes_per_page]
+        # Compute target byte ranges and use index_put_ with advanced indexing.
+        # Use linear byte index to write per-token slot bytes:
+        slot_byte_base = (
+            page_idx * bytes_per_page + slot_idx * _MLA_SLOT_BYTES
+        )  # [N]
+        scale_byte_base = (
+            page_idx * bytes_per_page
+            + page_size * _MLA_SLOT_BYTES
+            + slot_idx * _MLA_SCALES_PER_TOKEN
+        )  # [N]
+
+        # Build flat target indices [N, 576] and [N, 8].
+        slot_offsets = torch.arange(
+            _MLA_SLOT_BYTES, device=device, dtype=torch.int64
+        ).unsqueeze(0)
+        scale_offsets = torch.arange(
+            _MLA_SCALES_PER_TOKEN, device=device, dtype=torch.int64
+        ).unsqueeze(0)
+        slot_target = slot_byte_base.unsqueeze(1) + slot_offsets  # [N, 576]
+        scale_target = scale_byte_base.unsqueeze(1) + scale_offsets  # [N, 8]
+
+        flat = shadow_flat.view(-1)  # uint8 flat
+        # Mask invalid rows (loc < 0) by reading old bytes back.
+        valid_b = valid.unsqueeze(1)  # [N, 1]
+        old_slot = flat[slot_target]
+        old_scale = flat[scale_target]
+        new_slot = torch.where(valid_b, out_slot.to(torch.uint8), old_slot)
+        new_scale = torch.where(valid_b, out_scale.to(torch.uint8), old_scale)
+        flat.scatter_(0, slot_target.reshape(-1), new_slot.reshape(-1))
+        flat.scatter_(0, scale_target.reshape(-1), new_scale.reshape(-1))
+
+
+    # ------------------------------------------------------------------
     # Wall-mode write overrides
     # ------------------------------------------------------------------
     def set_swa_key_buffer_radix_fused(
@@ -616,6 +724,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=self.swa_kv_pool.page_size,
             cfg=cfg,
         )
+        # T3 token-shadow 模式: 同步写一份 token 级 shadow，避免
+        # prologue 整 page refresh 把未写 slot 填成 dequant(0) 的 garbage。
+        if _wall_token_shadow_enabled():
+            self._write_tokens_to_shadow(
+                self._wall_pools["swa"], local_layer_id,
+                self._wall_kv_input(cache_k), swa_loc,
+            )
         # T3: mark dirty pages so prologue 只刷新被本次写过的页
         self._mark_pages_dirty_from_loc(
             self._wall_pools["swa"], local_layer_id, swa_loc,
@@ -720,6 +835,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=self.swa_kv_pool.page_size,
             cfg=cfg,
         )
+        # T3 token-shadow 模式: cat 已经是 norm+rope 后的 BF16 [N, 512]，
+        # 直接量化写 shadow，prologue 跳过 page refresh。
+        if _wall_token_shadow_enabled():
+            self._write_tokens_to_shadow(
+                self._wall_pools["swa"], local_layer_id,
+                self._wall_kv_input(cat), swa_loc,
+            )
         # T3: mark dirty pages so prologue 只刷新被本次写过的页
         self._mark_pages_dirty_from_loc(
             self._wall_pools["swa"], local_layer_id, swa_loc,
@@ -751,6 +873,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=entry.page_size,
             cfg=cfg,
         )
+        # T3 token-shadow 模式: 同步写 shadow，绕开 page-level refresh
+        # 的 dequant(0) garbage 污染。
+        if _wall_token_shadow_enabled():
+            self._write_tokens_to_shadow(
+                entry, local_layer_id,
+                self._wall_kv_input(cache_k), loc,
+            )
         # T3: mark dirty pages
         self._mark_pages_dirty_from_loc(entry, local_layer_id, loc)
 
@@ -951,8 +1080,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return
         # 诊断模式 SGLANG_RQ_WALL_BYPASS_QUANT=1: shadow_buffer 已被 store
         # 路径用 native FP8 kernel 直接写入真值, refresh 会用 packed (全 0)
-        # 覆盖它 -> 跳过.
+        # 覆盖它 -> 跳过 SWA refresh; c4/c128 在 bypass 模式下仍走 packed,
+        # 它们的 shadow 仍由 packed -> dequant 重建.
         bypass_quant = os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1"
+        # token-shadow 模式: store 路径已经把每个 token 的 FP8+UE8M0 字节
+        # 写进 shadow，此时 page-level refresh 反而会把未写 slot 用
+        # dequant(packed=0)=zero@R.t() 的 garbage 覆盖，必须整体跳过
+        # （SWA + c4/c128 全部跳）。
+        token_shadow = _wall_token_shadow_enabled()
+        if token_shadow:
+            return
         cfg = self._nope_cfgs[layer_id]
 
         swa_pages = getattr(core_attn_metadata, "swa_page_indices", None)
