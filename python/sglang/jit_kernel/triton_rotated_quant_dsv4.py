@@ -398,6 +398,8 @@ def _scatter_tokens_to_shadow_kernel(
     bytes_per_page,
     SLOT_BYTES: tl.constexpr,
     SCALES: tl.constexpr,
+    BLOCK_VAL: tl.constexpr,    # >= SLOT_BYTES, power-of-2
+    BLOCK_SCALE: tl.constexpr,  # >= SCALES, power-of-2
 ):
     tid = tl.program_id(0)
     if tid >= N:
@@ -409,17 +411,19 @@ def _scatter_tokens_to_shadow_kernel(
     page = loc // page_size
     slot = loc % page_size
 
-    # Slot bytes: per-page byte offset = page * bytes_per_page + slot * SLOT_BYTES.
-    slot_lane = tl.arange(0, SLOT_BYTES)
-    val = tl.load(out_slot_ptr + tid * SLOT_BYTES + slot_lane)
+    # Slot bytes (576 not power-of-2 → BLOCK_VAL=1024 + mask).
+    slot_lane = tl.arange(0, BLOCK_VAL)
+    slot_mask = slot_lane < SLOT_BYTES
+    val = tl.load(out_slot_ptr + tid * SLOT_BYTES + slot_lane, mask=slot_mask, other=0)
     slot_base = page * bytes_per_page + slot * SLOT_BYTES
-    tl.store(shadow_ptr + slot_base + slot_lane, val)
+    tl.store(shadow_ptr + slot_base + slot_lane, val, mask=slot_mask)
 
     # Scale bytes: scale region starts at page_size * SLOT_BYTES within page.
-    scale_lane = tl.arange(0, SCALES)
-    sval = tl.load(out_scale_ptr + tid * SCALES + scale_lane)
+    scale_lane = tl.arange(0, BLOCK_SCALE)
+    scale_mask = scale_lane < SCALES
+    sval = tl.load(out_scale_ptr + tid * SCALES + scale_lane, mask=scale_mask, other=0)
     scale_base = page * bytes_per_page + page_size * SLOT_BYTES + slot * SCALES
-    tl.store(shadow_ptr + scale_base + scale_lane, sval)
+    tl.store(shadow_ptr + scale_base + scale_lane, sval, mask=scale_mask)
 
 
 def triton_scatter_tokens_to_shadow(
@@ -476,6 +480,8 @@ def triton_scatter_tokens_to_shadow(
         int(bytes_per_page),
         SLOT_BYTES=_MLA_SLOT_BYTES,
         SCALES=_MLA_SCALES_PER_TOKEN,
+        BLOCK_VAL=1024,   # next pow2 >= 576
+        BLOCK_SCALE=8,    # already pow2
     )
 
 
