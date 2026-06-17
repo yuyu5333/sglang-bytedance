@@ -188,6 +188,11 @@ class _WallPoolEntry:
         "shadow_bytes_per_page",
         "page_size",
         "num_pages",
+        # T3 优化: 每个 local-layer 一个 [num_pages] bool tensor，
+        # True 表示该页 packed 已被写过但 shadow 还没刷新；
+        # _refresh_shadow_pages 只对 dirty=True 的页做 bitunpack，
+        # 刷完清掉 dirty。store 路径将写入的 page mark dirty=True。
+        "dirty_pages",
     )
 
     def __init__(
@@ -201,6 +206,7 @@ class _WallPoolEntry:
         shadow_bytes_per_page: int,
         page_size: int,
         num_pages: int,
+        dirty_pages: List[torch.Tensor],
     ):
         self.kind = kind
         self.pool = pool
@@ -211,6 +217,7 @@ class _WallPoolEntry:
         self.shadow_bytes_per_page = shadow_bytes_per_page
         self.page_size = page_size
         self.num_pages = num_pages
+        self.dirty_pages = dirty_pages
 
 
 class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
@@ -380,6 +387,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 for _ in range(pool.layer_num)
             ]
 
+            # T3 优化: dirty_pages mask, 初始全 True 表示首次都要冷启动刷新。
+            # store 路径将写过的 page idx 标 True; refresh 后清零。
+            dirty_pages = [
+                torch.ones(num_pages, dtype=torch.bool, device=device)
+                for _ in range(pool.layer_num)
+            ]
+
             # The pool's main kv_buffer is now the PACKED storage. Reading
             # via super().get_swa_key_buffer_radix would return packed bytes
             # to FlashMLA -- our overrides redirect to shadow_buffers.
@@ -400,6 +414,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 shadow_bytes_per_page=shadow_bytes_per_page,
                 page_size=page_size,
                 num_pages=num_pages,
+                dirty_pages=dirty_pages,
             )
             self._wall_pools[kind] = entry
 
@@ -463,6 +478,31 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         return kv.contiguous()
 
     # ------------------------------------------------------------------
+    # T3 dirty-page tracking
+    # ------------------------------------------------------------------
+    def _mark_pages_dirty_from_loc(
+        self,
+        entry: _WallPoolEntry,
+        local_layer_id: int,
+        loc: torch.Tensor,
+    ) -> None:
+        """根据 store 路径写入的 token-loc，把对应的 page mark dirty=True。
+
+        ``loc`` 是 ``[N]`` int32 token slot 索引，含 -1 sentinel 表示未映射；
+        page_idx = loc // page_size。**完全 GPU 化、无同步**。
+
+        注意: 不预先 mask -1。loc=-1 → page_idx=-1 → 取 abs / clamp_min(0) 落
+        到 page 0（page 0 反正也被冷启动 dirty=True，多刷无损），换取无
+        ``.all().item()`` 同步。
+        """
+        if loc.numel() == 0:
+            return
+        dirty = entry.dirty_pages[local_layer_id]
+        loc_i64 = loc.to(dtype=torch.int64, device=dirty.device).reshape(-1)
+        page_idx = (loc_i64 // entry.page_size).clamp_(0, entry.num_pages - 1)
+        dirty.index_fill_(0, page_idx, True)
+
+    # ------------------------------------------------------------------
     # Wall-mode write overrides
     # ------------------------------------------------------------------
     def set_swa_key_buffer_radix_fused(
@@ -493,6 +533,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             swa_loc,
             page_size=self.swa_kv_pool.page_size,
             cfg=cfg,
+        )
+        # T3: mark dirty pages so prologue 只刷新被本次写过的页
+        self._mark_pages_dirty_from_loc(
+            self._wall_pools["swa"], local_layer_id, swa_loc,
         )
 
     def set_swa_key_buffer_radix_fused_norm_rope(
@@ -555,6 +599,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=self.swa_kv_pool.page_size,
             cfg=cfg,
         )
+        # T3: mark dirty pages so prologue 只刷新被本次写过的页
+        self._mark_pages_dirty_from_loc(
+            self._wall_pools["swa"], local_layer_id, swa_loc,
+        )
 
     def set_extra_key_buffer_fused(
         self,
@@ -578,6 +626,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=entry.page_size,
             cfg=cfg,
         )
+        # T3: mark dirty pages
+        self._mark_pages_dirty_from_loc(entry, local_layer_id, loc)
 
     def set_extra_key_buffer(
         self,
@@ -656,6 +706,20 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # from multiple queries.
         flat_pages = torch.unique(flat_pages)
 
+        # T3 优化: 只刷新 dirty=True 的页。每个 decode step 真正改写
+        # packed buffer 的页只有 1-2 个（新 token 落入的那 1 页），但
+        # page_indices 一般覆盖整个 SWA 区域 (10w+ token / 256 pgsz ≈
+        # 数百页) 。dirty filter 把 refresh 工作量从 O(pages_in_view) 砍
+        # 到 O(pages_written_since_last_refresh)。
+        dirty = entry.dirty_pages[local_layer_id]
+        flat_pages_dev = flat_pages.to(dirty.device)
+        page_is_dirty = dirty.index_select(0, flat_pages_dev)
+        flat_pages_dev = flat_pages_dev[page_is_dirty]
+        if flat_pages_dev.numel() == 0:
+            # 全部命中 cache，无需刷新
+            return
+        flat_pages = flat_pages_dev
+
         # Build the flat token-loc list: for each unique page, all P slots.
         # loc = page * page_size + slot
         slot_range = torch.arange(page_size, device=device, dtype=torch.int64)
@@ -724,6 +788,9 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             ].view(page_size, _MLA_SCALES_PER_TOKEN)
             value_region.copy_(out_slot_view[i])
             scale_region.copy_(out_scale_view[i])
+
+        # T3: clear dirty bits for refreshed pages
+        dirty.index_fill_(0, flat_pages.to(dirty.device), False)
 
     def _rotated_quant_attention_prologue(
         self,
