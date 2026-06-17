@@ -356,15 +356,21 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         self._wall_bpt = bpt_packed
 
         env_kinds = os.environ.get("SGLANG_RQ_WALL_KINDS", "swa,c4,c128")
-        wall_kinds = {
-            k.strip() for k in env_kinds.split(",") if k.strip()
-        }
-        for k in wall_kinds:
-            if k not in ("swa", "c4", "c128"):
-                raise ValueError(
-                    f"SGLANG_RQ_WALL_KINDS contains unknown kind {k!r}; "
-                    f"allowed: swa,c4,c128"
-                )
+        # Special token "none" / empty string => keep ALL pools on native FP8;
+        # used as a clean baseline to verify the wrapper itself doesn't
+        # corrupt parent FP8 storage.
+        if env_kinds.strip().lower() in ("", "none"):
+            wall_kinds: set[str] = set()
+        else:
+            wall_kinds = {
+                k.strip() for k in env_kinds.split(",") if k.strip()
+            }
+            for k in wall_kinds:
+                if k not in ("swa", "c4", "c128"):
+                    raise ValueError(
+                        f"SGLANG_RQ_WALL_KINDS contains unknown kind {k!r}; "
+                        f"allowed: swa,c4,c128 (or 'none' for native FP8)"
+                    )
         logger.warning(
             "wall-storage install scope: SGLANG_RQ_WALL_KINDS=%s",
             sorted(wall_kinds),
