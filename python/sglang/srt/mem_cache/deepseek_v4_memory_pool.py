@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 from contextlib import nullcontext
-from typing import List, Literal, NamedTuple, Optional, Tuple
+from typing import Dict, List, Literal, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -23,6 +25,114 @@ from sglang.srt.utils import ceil_div
 logger = logging.getLogger(__name__)
 
 ONLINE_C128 = envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
+
+
+# ---------------------------------------------------------------------------
+# T1.5: Real-prompt KV dump hook for rotated-quant calibration.
+#
+# When ``SGLANG_DUMP_KV=1`` is set on the *baseline* server, every fused
+# RMSNorm+RoPE store (DSv4's fused write of swa-side BF16 K) triggers a
+# CPU-side capture of the post-RMSNorm BF16 nope segment + raw rope. We
+# replicate the kernel-side compute on a small token slice so we incur no
+# extra GPU memory pressure. Captures are truncated per layer to
+# ``SGLANG_DUMP_KV_MAX_TOKENS`` (default 8192) to keep the dump small enough
+# to ship through ``build_rotated_kv_calib.py --from-kv-dump --dsv4-mode``.
+#
+# Output schema (exactly what build_dsv4_calibration expects):
+#
+#     {layer_id: {"nope": fp32 [N, 1, 448], "rope": fp32 [N, 1, 64]}}
+#
+# Saved on process exit to ``SGLANG_DUMP_KV_PATH`` (default
+# ``/data00/kv_dump_dsv4.pt``). Hook is *strictly* off when env is unset.
+# ---------------------------------------------------------------------------
+_KV_DUMP_BUFFER: Dict[int, Dict[str, List[torch.Tensor]]] = {}
+_KV_DUMP_REGISTERED: bool = False
+
+
+def _kv_dump_enabled() -> bool:
+    return os.environ.get("SGLANG_DUMP_KV", "0") == "1"
+
+
+def _kv_dump_max_tokens() -> int:
+    try:
+        return int(os.environ.get("SGLANG_DUMP_KV_MAX_TOKENS", "8192"))
+    except ValueError:
+        return 8192
+
+
+def _kv_dump_path() -> str:
+    return os.environ.get("SGLANG_DUMP_KV_PATH", "/data00/kv_dump_dsv4.pt")
+
+
+def _kv_dump_register_atexit() -> None:
+    global _KV_DUMP_REGISTERED
+    if _KV_DUMP_REGISTERED:
+        return
+    _KV_DUMP_REGISTERED = True
+
+    def _flush() -> None:
+        if not _KV_DUMP_BUFFER:
+            return
+        path = _kv_dump_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        out: Dict[int, Dict[str, torch.Tensor]] = {}
+        for lid, sides in _KV_DUMP_BUFFER.items():
+            if not sides.get("nope") or not sides.get("rope"):
+                continue
+            nope = torch.cat(sides["nope"], dim=0)
+            rope = torch.cat(sides["rope"], dim=0)
+            out[lid] = {"nope": nope, "rope": rope}
+        if not out:
+            logger.warning("[kv-dump] buffer empty; nothing to write")
+            return
+        torch.save(out, path)
+        logger.warning(
+            "[kv-dump] wrote %d layers to %s, layer-0 nope=%s rope=%s",
+            len(out),
+            path,
+            tuple(out[next(iter(out))]["nope"].shape),
+            tuple(out[next(iter(out))]["rope"].shape),
+        )
+
+    atexit.register(_flush)
+
+
+def _kv_dump_capture(
+    layer_id: int,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+    freqs_cis: torch.Tensor,
+    positions: torch.Tensor,
+    qk_nope_head_dim: int = 448,
+) -> None:
+    """Replicate fused RMSNorm (full 512) + take nope slice + raw rope.
+
+    Stores fp32 CPU copies (untouched rope, post-norm nope) shaped
+    ``[N, 1, D]`` matching ``build_dsv4_calibration`` schema. Truncates each
+    layer's accumulated tokens to ``SGLANG_DUMP_KV_MAX_TOKENS``.
+    """
+    max_tokens = _kv_dump_max_tokens()
+    sides = _KV_DUMP_BUFFER.setdefault(layer_id, {"nope": [], "rope": []})
+    cur = sum(t.shape[0] for t in sides["nope"])
+    if cur >= max_tokens:
+        return
+    take = min(kv.shape[0], max_tokens - cur)
+    if take <= 0:
+        return
+
+    with torch.no_grad():
+        kv_slice = kv[:take]  # [take, 512] bf16
+        kv_f = kv_slice.to(torch.float32)
+        var = kv_f.pow(2).mean(dim=-1, keepdim=True)
+        kv_norm = (kv_f * torch.rsqrt(var + eps)) * kv_weight.to(torch.float32)
+        nope_norm = kv_norm[..., :qk_nope_head_dim].contiguous()
+        rope_raw = kv_slice[..., qk_nope_head_dim:].to(torch.float32).contiguous()
+        # Move to CPU asap so we don't fragment GPU memory.
+        sides["nope"].append(nope_norm.detach().cpu().unsqueeze(1))
+        sides["rope"].append(rope_raw.detach().cpu().unsqueeze(1))
+
+    _kv_dump_register_atexit()
 
 
 def get_compress_state_ring_size(
@@ -735,6 +845,10 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         freqs_cis: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if _kv_dump_enabled():
+            _kv_dump_capture(
+                layer_id, kv, kv_weight, eps, freqs_cis, positions
+            )
         if self._should_cache_swa:
             if layer_id == self.start_layer or self.cached_loc is None:
                 self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
