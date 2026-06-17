@@ -573,6 +573,12 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         到 page 0（page 0 反正也被冷启动 dirty=True，多刷无损），换取无
         ``.all().item()`` 同步。
         """
+        # T_cgraph_safe: token_shadow 模式下 prologue 整体跳过 page-level
+        # refresh，dirty bit 是 dead code。提前 short-circuit 既避免了
+        # 不必要的 ``loc.to(int64)`` 临时 tensor（cudagraph capture/replay
+        # 不稳定），又略提速。
+        if _wall_token_shadow_enabled():
+            return
         if loc.numel() == 0:
             return
         dirty = entry.dirty_pages[local_layer_id]
