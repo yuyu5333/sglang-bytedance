@@ -61,7 +61,29 @@ def _kv_dump_max_tokens() -> int:
 
 
 def _kv_dump_path() -> str:
-    return os.environ.get("SGLANG_DUMP_KV_PATH", "/data00/kv_dump_dsv4.pt")
+    base = os.environ.get("SGLANG_DUMP_KV_PATH", "/data00/kv_dump_dsv4.pt")
+    rank = os.environ.get("RANK") or os.environ.get("LOCAL_RANK") or "0"
+    if "{rank}" in base:
+        return base.format(rank=rank)
+    # Default: insert rank suffix before extension to avoid TP rank overwrite.
+    root, ext = os.path.splitext(base)
+    return f"{root}_rank{rank}{ext}"
+
+
+def _is_cuda_capturing() -> bool:
+    """True iff current CUDA stream is in graph-capture mode.
+
+    During CUDA graph capture sglang feeds *synthetic* warmup inputs and any
+    D2H copy will invalidate the capture. We must skip dump on those steps;
+    real prompts will flow through after capture is done.
+    """
+    try:
+        if not torch.cuda.is_available():
+            return False
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
 
 
 def _kv_dump_register_atexit() -> None:
@@ -119,6 +141,10 @@ def _kv_dump_capture(
         return
     take = min(kv.shape[0], max_tokens - cur)
     if take <= 0:
+        return
+    # Skip during CUDA graph capture: D2H would invalidate the capture, and
+    # warmup tokens are synthetic anyway.
+    if _is_cuda_capturing():
         return
 
     with torch.no_grad():
