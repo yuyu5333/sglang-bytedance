@@ -371,10 +371,119 @@ def triton_bitunpack_rowwise(
     return codes
 
 
+# ---------------------------------------------------------------------------
+# T_cgraph_safe: capture-stable per-token shadow scatter.
+# ---------------------------------------------------------------------------
+#
+# 替代原来 PyTorch 的 gather + where + scatter_ 实现。原实现在 cudagraph
+# capture/replay 下出现 partial corruption，根因：invalid token (loc=-1)
+# 经 ``loc.clamp(min=0)`` 全部映射到 (page=0, slot=0)，与 valid token 在
+# ``flat.scatter_(0, ...)`` 的重复 byte index 上 race；torch.where 只是
+# 把 invalid 的 *值* 替换为 old，但 scatter_ 的重复 index winner 由
+# 调度顺序决定，cudagraph 重放时调度差异导致 valid token 字节被 invalid
+# 路径的 old byte 覆盖 → gsm8k 0.860 partial corruption。
+#
+# 修复策略：每 token 一个 program block，invalid 直接 return（无 read 无
+# write，零 race surface）。valid token 之间天然无 byte 级别重叠
+# （caller 保证每个 valid token 的 slot 唯一）。
+# ---------------------------------------------------------------------------
+@triton.jit
+def _scatter_tokens_to_shadow_kernel(
+    out_slot_ptr,    # [N, SLOT_BYTES] uint8
+    out_scale_ptr,   # [N, SCALES] uint8
+    loc_ptr,         # [N] int64 (token slot ids, -1 for invalid)
+    shadow_ptr,      # [num_pages * bytes_per_page] uint8 flat
+    N,
+    page_size,
+    bytes_per_page,
+    SLOT_BYTES: tl.constexpr,
+    SCALES: tl.constexpr,
+):
+    tid = tl.program_id(0)
+    if tid >= N:
+        return
+    loc = tl.load(loc_ptr + tid)
+    if loc < 0:
+        return  # capture-safe: no read, no write for invalid token
+
+    page = loc // page_size
+    slot = loc % page_size
+
+    # Slot bytes: per-page byte offset = page * bytes_per_page + slot * SLOT_BYTES.
+    slot_lane = tl.arange(0, SLOT_BYTES)
+    val = tl.load(out_slot_ptr + tid * SLOT_BYTES + slot_lane)
+    slot_base = page * bytes_per_page + slot * SLOT_BYTES
+    tl.store(shadow_ptr + slot_base + slot_lane, val)
+
+    # Scale bytes: scale region starts at page_size * SLOT_BYTES within page.
+    scale_lane = tl.arange(0, SCALES)
+    sval = tl.load(out_scale_ptr + tid * SCALES + scale_lane)
+    scale_base = page * bytes_per_page + page_size * SLOT_BYTES + slot * SCALES
+    tl.store(shadow_ptr + scale_base + scale_lane, sval)
+
+
+def triton_scatter_tokens_to_shadow(
+    out_slot: torch.Tensor,    # [N, 576] uint8
+    out_scale: torch.Tensor,   # [N, 8]   uint8
+    loc: torch.Tensor,         # [N]      int64 (with -1 sentinels)
+    shadow: torch.Tensor,      # [num_pages, bytes_per_page] uint8
+    page_size: int,
+) -> None:
+    """Capture-safe per-token shadow scatter.
+
+    - 每 token 一个 program block；
+    - ``loc < 0`` 的 token 整个 program block exit，零 read / 零 write，
+      消除原 ``gather + where + scatter_`` 在 (page=0, slot=0) 上的重复
+      index race；
+    - valid token 之间 byte 不重叠（slot 唯一性由 caller 保证）。
+    """
+    if not (out_slot.is_cuda and out_scale.is_cuda and loc.is_cuda and shadow.is_cuda):
+        raise RuntimeError("triton_scatter_tokens_to_shadow requires CUDA tensors")
+    if out_slot.dtype != torch.uint8 or out_scale.dtype != torch.uint8 or shadow.dtype != torch.uint8:
+        raise ValueError("out_slot/out_scale/shadow must be uint8")
+    if loc.dtype != torch.int64:
+        loc = loc.to(torch.int64)
+    if not out_slot.is_contiguous():
+        out_slot = out_slot.contiguous()
+    if not out_scale.is_contiguous():
+        out_scale = out_scale.contiguous()
+    if not loc.is_contiguous():
+        loc = loc.contiguous()
+
+    N = out_slot.shape[0]
+    if N == 0:
+        return
+    if out_slot.shape[-1] != _MLA_SLOT_BYTES:
+        raise ValueError(
+            f"out_slot last dim {out_slot.shape[-1]} != {_MLA_SLOT_BYTES}"
+        )
+    if out_scale.shape[-1] != _MLA_SCALES_PER_TOKEN:
+        raise ValueError(
+            f"out_scale last dim {out_scale.shape[-1]} != {_MLA_SCALES_PER_TOKEN}"
+        )
+    if shadow.dim() != 2:
+        raise ValueError(f"shadow must be 2D [num_pages, bytes_per_page], got {tuple(shadow.shape)}")
+    bytes_per_page = shadow.shape[1]
+    shadow_flat = shadow.view(-1)
+
+    _scatter_tokens_to_shadow_kernel[(N,)](
+        out_slot,
+        out_scale,
+        loc,
+        shadow_flat,
+        N,
+        int(page_size),
+        int(bytes_per_page),
+        SLOT_BYTES=_MLA_SLOT_BYTES,
+        SCALES=_MLA_SCALES_PER_TOKEN,
+    )
+
+
 __all__ = [
     "rotated_dequant_to_fp8_layout",
     "triton_bitpack_rowwise",
     "triton_bitunpack_rowwise",
+    "triton_scatter_tokens_to_shadow",
     "_MLA_NOPE_DIM",
     "_MLA_HEAD_DIM",
     "_MLA_TILE_SIZE",

@@ -580,6 +580,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         )
         from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
             rotated_dequant_to_fp8_layout,
+            triton_scatter_tokens_to_shadow,
         )
         N = kv_bf16_512.shape[0]
         if N == 0:
@@ -597,51 +598,19 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
 
         shadow = entry.shadow_buffers[local_layer_id]
         page_size = entry.page_size
+
+        # Capture-safe per-token scatter: 每 token 一个 program block，
+        # invalid (loc<0) 直接 return 零 read 零 write，彻底消除原
+        # PyTorch ``gather + where + scatter_`` 在 cudagraph capture/replay
+        # 下的 byte-level race（详见 triton_scatter_tokens_to_shadow 注释）。
         loc_i64 = loc.to(device=device, dtype=torch.int64).reshape(-1)
-        # Clamp -1 sentinels to 0; we will mask their writes by overwriting
-        # with original bytes via a where (capture-safe, no python branch).
-        max_pages = entry.num_pages
-        valid = (loc_i64 >= 0)
-        loc_safe = loc_i64.clamp(min=0, max=max_pages * page_size - 1)
-        page_idx = loc_safe // page_size
-        slot_idx = loc_safe % page_size
-
-        # Scatter values (576 bytes per token).
-        bytes_per_page = entry.shadow_bytes_per_page
-        # shadow viewed as [num_pages, page_size, _MLA_SLOT_BYTES] for the
-        # value region; the rest of the page (scales + pad) follows.
-        # Use absolute byte addressing to be precise.
-        shadow_flat = shadow  # [num_pages, bytes_per_page]
-        # Compute target byte ranges and use index_put_ with advanced indexing.
-        # Use linear byte index to write per-token slot bytes:
-        slot_byte_base = (
-            page_idx * bytes_per_page + slot_idx * _MLA_SLOT_BYTES
-        )  # [N]
-        scale_byte_base = (
-            page_idx * bytes_per_page
-            + page_size * _MLA_SLOT_BYTES
-            + slot_idx * _MLA_SCALES_PER_TOKEN
-        )  # [N]
-
-        # Build flat target indices [N, 576] and [N, 8].
-        slot_offsets = torch.arange(
-            _MLA_SLOT_BYTES, device=device, dtype=torch.int64
-        ).unsqueeze(0)
-        scale_offsets = torch.arange(
-            _MLA_SCALES_PER_TOKEN, device=device, dtype=torch.int64
-        ).unsqueeze(0)
-        slot_target = slot_byte_base.unsqueeze(1) + slot_offsets  # [N, 576]
-        scale_target = scale_byte_base.unsqueeze(1) + scale_offsets  # [N, 8]
-
-        flat = shadow_flat.view(-1)  # uint8 flat
-        # Mask invalid rows (loc < 0) by reading old bytes back.
-        valid_b = valid.unsqueeze(1)  # [N, 1]
-        old_slot = flat[slot_target]
-        old_scale = flat[scale_target]
-        new_slot = torch.where(valid_b, out_slot.to(torch.uint8), old_slot)
-        new_scale = torch.where(valid_b, out_scale.to(torch.uint8), old_scale)
-        flat.scatter_(0, slot_target.reshape(-1), new_slot.reshape(-1))
-        flat.scatter_(0, scale_target.reshape(-1), new_scale.reshape(-1))
+        triton_scatter_tokens_to_shadow(
+            out_slot,
+            out_scale,
+            loc_i64,
+            shadow,
+            page_size,
+        )
 
 
     # ------------------------------------------------------------------
