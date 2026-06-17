@@ -132,6 +132,78 @@ def main():
         "PASS" if rope_diff < 1e-2 else f"FAIL diff={rope_diff:.6f}",
     )
 
+    # ----- 对比纯 reference RotatedQuantizer (CPU/GPU pure pytorch) -----
+    print("\n--- Reference RotatedQuantizer round-trip ---")
+    from sglang.srt.layers.quantization.rotated_kv_quant import RotatedQuantizer
+    ref_q = RotatedQuantizer(cfg)
+    nope_in = nope_src.cpu()
+    packed_ref = ref_q.quantize(nope_in)
+    nope_dq = ref_q.dequantize(packed_ref, dtype=torch.float32)
+    print(f"REF nope cos_sim = {_cos(nope_in.float(), nope_dq):.4f}")
+    print(f"REF nope max|err| = {(nope_in.float() - nope_dq).abs().max().item():.4f}")
+    print(f"REF nope mean|err| = {(nope_in.float() - nope_dq).abs().mean().item():.4f}")
+
+    # ----- 对比 store→[bitunpack on GPU]→ref dequant，定位是 store/bitunpack
+    # 还是 dequant/quant_to_fp8 哪一段出错 -----
+    print("\n--- Diagnose: bitunpack-only check ---")
+    from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+        triton_bitunpack_rowwise,
+    )
+    # gather the first N rows from cache
+    cache_flat = cache.view(-1, bpt)
+    rows = cache_flat[:N]
+    packed_nope = rows[:, :cfg.row_bytes].contiguous()
+    codes_gpu = triton_bitunpack_rowwise(packed_nope, cfg.bits)
+    print(f"codes range: min={codes_gpu.min().item()} max={codes_gpu.max().item()}")
+    # Apply ref dequant: codes * scale + zero, then @ R^T
+    R = cfg.R.to(device=device, dtype=torch.float32)
+    scale = cfg.scale.to(device=device, dtype=torch.float32)
+    zero = cfg.zero.to(device=device, dtype=torch.float32)
+    nope_rot_hat = codes_gpu.to(torch.float32) * scale + zero  # [N, 448]
+    nope_hat = nope_rot_hat @ R.t()                             # [N, 448]
+    print(f"nope_hat cos_sim vs src = "
+          f"{_cos(nope_src, nope_hat):.4f}")
+    print(f"nope_hat mean|err| vs src = "
+          f"{(nope_src - nope_hat).abs().mean().item():.4f}")
+
+    # codes from CPU bitpack reference (round-trip self-consistency)
+    print("\n--- Diagnose: CPU bitpack vs Triton bitpack on identical codes ---")
+    from sglang.srt.layers.quantization.rotated_kv_quant import (
+        bitpack_rowwise as ref_bitpack,
+        bitunpack_rowwise as ref_bitunpack,
+    )
+    # build codes from src using cfg (same recipe as rotated_store_to_packed)
+    K_rot = nope_src.to(torch.float32) @ R
+    levels = (1 << cfg.bits.to(torch.int64).to(device)) - 1
+    codes_recipe = (
+        ((K_rot - zero) / scale.clamp_min(1e-12)).round()
+          .clamp(min=torch.zeros_like(levels).to(torch.float32),
+                 max=levels.to(torch.float32))
+    ).to(torch.int32)
+    print(f"codes_recipe range: {codes_recipe.min().item()} .. "
+          f"{codes_recipe.max().item()}")
+    # Pack via CPU ref vs Triton, byte-compare
+    from sglang.jit_kernel.rotated_quant_dsv4_kernels import _get_cached_pack_meta
+    from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+        triton_bitpack_rowwise,
+    )
+    dim_of_bit, bitpos_in_dim = _get_cached_pack_meta(cfg, device)
+    triton_packed = triton_bitpack_rowwise(
+        codes_recipe, dim_of_bit, bitpos_in_dim, cfg.row_bytes,
+    )
+    cpu_packed = ref_bitpack(codes_recipe.cpu().to(torch.int64), cfg.bits.cpu())
+    diff = (triton_packed.cpu() != cpu_packed).sum().item()
+    print(f"[Triton-vs-CPU bitpack byte diff] {diff} / {cpu_packed.numel()}")
+    # Unpack by Triton vs CPU
+    triton_unpacked = triton_bitunpack_rowwise(triton_packed, cfg.bits.to(device))
+    cpu_unpacked = ref_bitunpack(cpu_packed, cfg.bits.cpu(), _MLA_NOPE_DIM)
+    udiff = (triton_unpacked.cpu() != cpu_unpacked.to(torch.int32)).sum().item()
+    print(f"[Triton-vs-CPU bitunpack diff] {udiff} / {cpu_unpacked.numel()}")
+    # Also: CPU codes_recipe vs Triton bitunpack(triton_packed)
+    rrdiff = (codes_recipe.cpu() != triton_unpacked.cpu()).sum().item()
+    print(f"[recipe -> Triton pack -> Triton unpack -> recipe diff] "
+          f"{rrdiff} / {codes_recipe.numel()}")
+
 
 if __name__ == "__main__":
     main()
