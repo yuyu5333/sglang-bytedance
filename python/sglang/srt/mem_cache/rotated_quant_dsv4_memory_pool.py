@@ -711,14 +711,19 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # page_indices 一般覆盖整个 SWA 区域 (10w+ token / 256 pgsz ≈
         # 数百页) 。dirty filter 把 refresh 工作量从 O(pages_in_view) 砍
         # 到 O(pages_written_since_last_refresh)。
+        #
+        # 启用门槛：env var SGLANG_RQ_DIRTY_FILTER=1 时启用过滤；默认
+        # 关闭以排查 dirty-mask 漏刷导致 KV cache 损坏的根因。mark / clear
+        # 仍始终执行（无副作用），便于打开开关后无需重启。
         dirty = entry.dirty_pages[local_layer_id]
-        flat_pages_dev = flat_pages.to(dirty.device)
-        page_is_dirty = dirty.index_select(0, flat_pages_dev)
-        flat_pages_dev = flat_pages_dev[page_is_dirty]
-        if flat_pages_dev.numel() == 0:
-            # 全部命中 cache，无需刷新
-            return
-        flat_pages = flat_pages_dev
+        if os.environ.get("SGLANG_RQ_DIRTY_FILTER", "0") == "1":
+            flat_pages_dev = flat_pages.to(dirty.device)
+            page_is_dirty = dirty.index_select(0, flat_pages_dev)
+            flat_pages_dev = flat_pages_dev[page_is_dirty]
+            if flat_pages_dev.numel() == 0:
+                # 全部命中 cache，无需刷新
+                return
+            flat_pages = flat_pages_dev
 
         # Build the flat token-loc list: for each unique page, all P slots.
         # loc = page * page_size + slot
