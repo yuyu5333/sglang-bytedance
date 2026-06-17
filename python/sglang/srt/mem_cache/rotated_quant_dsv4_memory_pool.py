@@ -336,6 +336,17 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         Shadow buffers are touched on demand by the attention prologue
         with the M tokens needed by the current batch. No-op if a pool
         has 0 layers (e.g. PP shard without c128 layers).
+
+        Env knob ``SGLANG_RQ_WALL_KINDS`` (comma-separated subset of
+        ``swa,c4,c128``; default ``swa,c4,c128``) controls which sub-pools
+        are placed under wall storage. **Diagnostic use**: c4/c128 store
+        compressor outputs whose distribution differs from the raw
+        post-RMSNorm KV used to build calibration; when calib was built
+        from a SWA-only kv-dump, applying the same per-layer (R,bits,
+        scale,zero) to c4/c128 is statistically wrong. Setting this to
+        ``swa`` keeps SWA on the packed/shadow path while c4/c128 stay on
+        native FP8, isolating SWA pipeline correctness from calib
+        mismatch on the compressor side.
         """
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             packed_bytes_per_token,
@@ -344,11 +355,28 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         bpt_packed = packed_bytes_per_token(self._sim_row_bytes)
         self._wall_bpt = bpt_packed
 
+        env_kinds = os.environ.get("SGLANG_RQ_WALL_KINDS", "swa,c4,c128")
+        wall_kinds = {
+            k.strip() for k in env_kinds.split(",") if k.strip()
+        }
+        for k in wall_kinds:
+            if k not in ("swa", "c4", "c128"):
+                raise ValueError(
+                    f"SGLANG_RQ_WALL_KINDS contains unknown kind {k!r}; "
+                    f"allowed: swa,c4,c128"
+                )
+        logger.warning(
+            "wall-storage install scope: SGLANG_RQ_WALL_KINDS=%s",
+            sorted(wall_kinds),
+        )
+
         for kind, pool in (
             ("swa", self.swa_kv_pool),
             ("c4", self.c4_kv_pool),
             ("c128", self.c128_kv_pool),
         ):
+            if kind not in wall_kinds:
+                continue
             if pool is None or pool.layer_num <= 0:
                 continue
             old_buffers = pool.kv_buffer
@@ -513,6 +541,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     ) -> None:
         if self._mode != "wall":
             return super().set_swa_key_buffer_radix_fused(layer_id, raw_loc, cache_k)
+        if "swa" not in self._wall_pools:
+            return super().set_swa_key_buffer_radix_fused(layer_id, raw_loc, cache_k)
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             rotated_store_to_packed,
         )
@@ -550,6 +580,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         positions: torch.Tensor,
     ) -> None:
         if self._mode != "wall":
+            return super().set_swa_key_buffer_radix_fused_norm_rope(
+                layer_id, raw_loc, kv, kv_weight, eps, freqs_cis, positions
+            )
+        if "swa" not in self._wall_pools:
             return super().set_swa_key_buffer_radix_fused_norm_rope(
                 layer_id, raw_loc, kv, kv_weight, eps, freqs_cis, positions
             )
@@ -616,6 +650,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     ) -> None:
         if self._mode != "wall":
             return super().set_extra_key_buffer_fused(layer_id, loc, cache_k)
+        kind, _ = self._layer_id_for_extra(layer_id)
+        if kind not in self._wall_pools:
+            # SGLANG_RQ_WALL_KINDS excluded this kind; keep native FP8.
+            return super().set_extra_key_buffer_fused(layer_id, loc, cache_k)
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             rotated_store_to_packed,
         )
@@ -657,6 +695,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     def get_swa_key_buffer_radix(self, layer_id: int) -> torch.Tensor:
         if self._mode != "wall":
             return super().get_swa_key_buffer_radix(layer_id)
+        if "swa" not in self._wall_pools:
+            return super().get_swa_key_buffer_radix(layer_id)
         self.wait_layer_transfer(layer_id)
         local_layer_id = self._swa_local_layer_id(layer_id)
         return self._wall_pools["swa"].shadow_buffers[local_layer_id]
@@ -666,6 +706,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return super().get_extra_key_buffer(layer_id)
         self.wait_layer_transfer(layer_id)
         kind, local_layer_id = self._layer_id_for_extra(layer_id)
+        if kind not in self._wall_pools:
+            # SGLANG_RQ_WALL_KINDS excluded this kind; native FP8 buffer
+            # is intact, fall back to parent.
+            return super().get_extra_key_buffer(layer_id)
         return self._wall_pools[kind].shadow_buffers[local_layer_id]
 
     def _refresh_shadow_pages(
@@ -841,8 +885,9 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
 
         if extra_pages is not None and compress_ratio in (4, 128):
             kind, local_layer_id = self._layer_id_for_extra(layer_id)
-            entry = self._wall_pools[kind]
-            self._refresh_shadow_pages(entry, local_layer_id, cfg, extra_pages)
+            if kind in self._wall_pools:
+                entry = self._wall_pools[kind]
+                self._refresh_shadow_pages(entry, local_layer_id, cfg, extra_pages)
 
     # ------------------------------------------------------------------
     # Wall-mode read API (M3.c.1 carry-over for unit tests / debugging)
