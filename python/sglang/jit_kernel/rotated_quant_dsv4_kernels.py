@@ -233,23 +233,20 @@ def rotated_store_to_packed(
     full_row = torch.cat([packed, rope_bytes], dim=1)  # [N, bpt]
 
     # Scatter into paged cache:
-    # 必须过滤 -1 sentinel（translate_loc_from_full_to_swa 对未映射槽返回 -1）
+    # 必须过滤 -1 sentinel（translate_loc_from_full_to_swa 对未映射槽返回 -1）。
+    # 关键：CUDA graph capture 期间任何 .all()/.nonzero()/Python branch
+    # on a GPU bool 都会触发隐式 D2H sync，导致
+    # cudaErrorStreamCaptureInvalidated。所以这里走 unconditional GPU
+    # 路径：把 invalid row 用 "读旧值再写回" 替换成 no-op，整体只有 GPU op。
     cache_flat = cache.view(-1, bpt)
     idx_gpu = indices_i64.to(cache.device)
     if idx_gpu.numel() > 0:
-        valid_mask = idx_gpu >= 0
         max_allowed = cache_flat.shape[0] - 1
-        if not valid_mask.all():
-            # 仅保留合法行再 scatter，避免 index_copy_ 触发设备端断言
-            valid_idx = valid_mask.nonzero(as_tuple=False).squeeze(1)
-            idx_valid = idx_gpu[valid_idx]
-            row_valid = full_row[valid_idx]
-            # 附加安全钳位：如果 idx 中有超范围值（防御性编程）
-            idx_clamped = idx_valid.clamp(min=0, max=max_allowed)
-            cache_flat.index_copy_(0, idx_clamped, row_valid)
-        else:
-            idx_clamped = idx_gpu.clamp(min=0, max=max_allowed)
-            cache_flat.index_copy_(0, idx_clamped, full_row)
+        valid = (idx_gpu >= 0).unsqueeze(-1)  # [N, 1]
+        idx_safe = idx_gpu.clamp(min=0, max=max_allowed)
+        old_rows = cache_flat.index_select(0, idx_safe)
+        new_rows = torch.where(valid, full_row, old_rows)
+        cache_flat.index_copy_(0, idx_safe, new_rows)
 
 
 # ----------------------------------------------------------------------
@@ -313,15 +310,12 @@ def rotated_load_to_fp8_layout(
     cache_flat = cache.view(-1, bpt)  # [num_pages * page_size, bpt] (view, no alloc)
     max_allowed = cache_flat.shape[0]
 
-    # 防御性过滤：跳过越界或负的索引
-    valid_mask = (indices_i64 >= 0) & (indices_i64 < max_allowed)
-    if not valid_mask.all():
-        indices_i64 = indices_i64[valid_mask]
-        M = indices_i64.shape[0]
-        if M == 0:
-            return
-        out_slot = out_slot[:M]
-        out_scale = out_scale[:M]
+    # 防御性钳位：负索引 / 越界索引钳到合法范围。CUDA graph capture
+    # 不允许任何 Python branch on GPU tensor（.all() 会做隐式 D2H sync），
+    # 所以这里走 unconditional GPU clamp 而不是 boolean indexing 后改 M。
+    # 攻击者：若 indices 里真有 -1，会读到 row 0 的内容，被写到 out_slot 的
+    # 对应槽位 — 后续 attention 会用 attention mask 把那些位置忽略。
+    indices_i64 = indices_i64.clamp(min=0, max=max_allowed - 1)
 
     # FP8 layout + GPU Triton kernels
     from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
