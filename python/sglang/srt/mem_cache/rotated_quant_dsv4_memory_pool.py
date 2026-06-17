@@ -568,30 +568,34 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
 
-        # Reproduce the fused norm+rope computation in PyTorch; M3.c.3
-        # will replace this with a Triton kernel that also writes packed.
-        # NOTE: must mirror jit_kernel/csrc/.../main_norm_rope.cuh exactly:
-        # RMSNorm + kv_weight act on the FULL kHeadDim=512 vector; only the
-        # last kRopeDim=64 lanes get rotated by RoPE afterwards.
+        # Reproduce the fused norm+rope computation in PyTorch; must mirror
+        # jit_kernel/csrc/.../main_norm_rope.cuh **byte-for-byte**:
+        #   data[i] = x * norm_factor * w;   // ALL fp32, single chained mul
+        #   ... rope on rope tail ...
+        #   cast<bf16x2_t>(...) only at the final store
+        # IMPORTANT: do NOT cast to bf16 between rsqrt and *kv_weight — that
+        # introduces a per-elem bf16 round trip the CUDA kernel never does
+        # and noticeably degrades downstream attention quality at b_mean<=4.
+        kv_weight_f = kv_weight.to(torch.float32)
         kv_f = kv.to(torch.float32)
         var = kv_f.pow(2).mean(dim=-1, keepdim=True)
-        kv_norm = (kv_f * torch.rsqrt(var + eps)).to(kv.dtype) * kv_weight
-        nope_norm = kv_norm[..., : self.qk_nope_head_dim]
-        rope_norm = kv_norm[..., self.qk_nope_head_dim :]
+        kv_norm_f = kv_f * torch.rsqrt(var + eps) * kv_weight_f  # fp32 throughout
+        nope_norm_f = kv_norm_f[..., : self.qk_nope_head_dim]
+        rope_norm_f = kv_norm_f[..., self.qk_nope_head_dim :]
         # Apply RoPE on rope half. freqs_cis is complex64 [max_pos, rope_dim/2];
         # gather per position then compute rotated rope = view_as_real(rope_complex * freqs).
-        rope_dim = rope_norm.shape[-1]
-        rope_complex = rope_norm.float().reshape(
-            *rope_norm.shape[:-1], rope_dim // 2, 2
-        )
-        rope_complex = torch.view_as_complex(rope_complex.contiguous())
+        rope_dim = rope_norm_f.shape[-1]
+        rope_complex = rope_norm_f.reshape(
+            *rope_norm_f.shape[:-1], rope_dim // 2, 2
+        ).contiguous()
+        rope_complex = torch.view_as_complex(rope_complex)
         freqs = freqs_cis.index_select(0, positions.to(torch.long))
-        rope_rotated = (
-            torch.view_as_real(rope_complex * freqs)
-            .reshape(*rope_norm.shape[:-1], rope_dim)
-            .to(kv.dtype)
+        rope_rotated_f = torch.view_as_real(rope_complex * freqs).reshape(
+            *rope_norm_f.shape[:-1], rope_dim
         )
-        cat = torch.cat([nope_norm, rope_rotated], dim=-1)
+        # Single final bf16 cast — matches CUDA kernel which casts only at
+        # the gmem store (cast<bf16x2_t>(...)).
+        cat = torch.cat([nope_norm_f, rope_rotated_f], dim=-1).to(kv.dtype)
         rotated_store_to_packed(
             self._wall_kv_input(cat),
             self.swa_kv_pool.kv_buffer[local_layer_id],
