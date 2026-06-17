@@ -47,10 +47,24 @@ ONLINE_C128 = envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
 # ---------------------------------------------------------------------------
 _KV_DUMP_BUFFER: Dict[int, Dict[str, List[torch.Tensor]]] = {}
 _KV_DUMP_REGISTERED: bool = False
+_KV_DUMP_FLUSHED: bool = False
 
 
 def _kv_dump_enabled() -> bool:
     return os.environ.get("SGLANG_DUMP_KV", "0") == "1"
+
+
+def _kv_dump_min_layer_tokens() -> int:
+    """All layers must have ≥ this many tokens before atexit auto-flushes.
+
+    Reaching this also triggers an *eager* flush (flush as soon as the
+    smallest-layer count crosses the threshold), so a graceful shutdown is
+    not required.
+    """
+    try:
+        return int(os.environ.get("SGLANG_DUMP_KV_MIN_TOKENS", "4096"))
+    except ValueError:
+        return 4096
 
 
 def _kv_dump_max_tokens() -> int:
@@ -91,32 +105,37 @@ def _kv_dump_register_atexit() -> None:
     if _KV_DUMP_REGISTERED:
         return
     _KV_DUMP_REGISTERED = True
+    atexit.register(_kv_dump_flush)
 
-    def _flush() -> None:
-        if not _KV_DUMP_BUFFER:
-            return
-        path = _kv_dump_path()
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        out: Dict[int, Dict[str, torch.Tensor]] = {}
-        for lid, sides in _KV_DUMP_BUFFER.items():
-            if not sides.get("nope") or not sides.get("rope"):
-                continue
-            nope = torch.cat(sides["nope"], dim=0)
-            rope = torch.cat(sides["rope"], dim=0)
-            out[lid] = {"nope": nope, "rope": rope}
-        if not out:
-            logger.warning("[kv-dump] buffer empty; nothing to write")
-            return
-        torch.save(out, path)
-        logger.warning(
-            "[kv-dump] wrote %d layers to %s, layer-0 nope=%s rope=%s",
-            len(out),
-            path,
-            tuple(out[next(iter(out))]["nope"].shape),
-            tuple(out[next(iter(out))]["rope"].shape),
-        )
 
-    atexit.register(_flush)
+def _kv_dump_flush() -> None:
+    global _KV_DUMP_FLUSHED
+    if _KV_DUMP_FLUSHED:
+        return
+    if not _KV_DUMP_BUFFER:
+        return
+    path = _kv_dump_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    out: Dict[int, Dict[str, torch.Tensor]] = {}
+    for lid, sides in _KV_DUMP_BUFFER.items():
+        if not sides.get("nope") or not sides.get("rope"):
+            continue
+        nope = torch.cat(sides["nope"], dim=0)
+        rope = torch.cat(sides["rope"], dim=0)
+        out[lid] = {"nope": nope, "rope": rope}
+    if not out:
+        logger.warning("[kv-dump] buffer empty; nothing to write")
+        return
+    torch.save(out, path)
+    logger.warning(
+        "[kv-dump] FLUSHED %d layers to %s, layer-0 nope=%s rope=%s",
+        len(out),
+        path,
+        tuple(out[next(iter(out))]["nope"].shape),
+        tuple(out[next(iter(out))]["rope"].shape),
+    )
+    _KV_DUMP_FLUSHED = True
+
 
 
 def _kv_dump_capture(
@@ -159,6 +178,16 @@ def _kv_dump_capture(
         sides["rope"].append(rope_raw.detach().cpu().unsqueeze(1))
 
     _kv_dump_register_atexit()
+
+    # Eager flush: as soon as every layer has >= MAX_TOKENS we drop the
+    # dump file (atexit may not fire under SIGKILL/sigquit).
+    if not _KV_DUMP_FLUSHED and len(_KV_DUMP_BUFFER) > 0:
+        min_count = min(
+            sum(t.shape[0] for t in s["nope"])
+            for s in _KV_DUMP_BUFFER.values()
+        )
+        if min_count >= max_tokens:
+            _kv_dump_flush()
 
 
 def get_compress_state_ring_size(
