@@ -702,6 +702,23 @@ class CompressedTensorsConfig(QuantizationConfig):
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
 
+        # [DEBUG W4A16] dump scheme selection inputs so we can confirm which
+        # branch this MoE layer actually goes through.
+        logger.warning(
+            "[DEBUG W4A16] get_moe_scheme layer_name=%s "
+            "quant_format=%s weight_quant=%s input_quant=%s "
+            "is_wNa16_group_channel=%s is_wint4afp8=%s is_wint4abf16=%s",
+            layer_name,
+            self.quant_format,
+            weight_quant,
+            input_quant,
+            self._is_wNa16_group_channel(weight_quant, input_quant)
+            if weight_quant is not None
+            else None,
+            self._is_wint4afp8(weight_quant, input_quant),
+            self._is_wint4abf16(weight_quant, input_quant),
+        )
+
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if not _is_npu:
                 if (
@@ -823,6 +840,13 @@ class CompressedTensorsConfig(QuantizationConfig):
                 "not supported by Compressed Tensors. "
                 "Falling back to UnquantizedLinearMethod"
             )
+            # [DEBUG W4A16] also log the specific layer that fell back so we
+            # can see if any quantized layer is being treated as unquantized.
+            logger.warning(
+                "[DEBUG W4A16] get_linear_scheme falling back to "
+                "UnquantizedLinearMethod for layer_name=%s",
+                layer_name,
+            )
             return None
 
         else:
@@ -838,6 +862,17 @@ class CompressedTensorsConfig(QuantizationConfig):
         if not _is_npu:
             self._check_scheme_supported(scheme.get_min_capability())
         logger.debug("Using scheme: %s for %s", scheme.__class__.__name__, layer_name)
+        # [DEBUG W4A16] log every linear-layer scheme selection so we can spot
+        # any layer that silently falls back to UnquantizedLinearMethod (which
+        # would mean its checkpoint tensors don't get loaded at all).
+        logger.warning(
+            "[DEBUG W4A16] get_linear_scheme layer_name=%s scheme=%s "
+            "weight_quant=%s input_quant=%s",
+            layer_name,
+            scheme.__class__.__name__,
+            weight_quant,
+            input_quant,
+        )
         return scheme
 
     def get_scheme_dict(

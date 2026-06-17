@@ -1780,6 +1780,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
             num_experts=self.config.num_local_experts + self.num_fused_shared_experts,
         )
 
+        # [DEBUG W4A16] track how each expert-related ckpt key is dispatched.
+        debug_dbg_seen_expert_suffixes: Set[str] = set()
+        debug_dbg_expert_loaded = 0
+        debug_dbg_expert_default_loader = 0
+        debug_dbg_expert_not_in_params = 0
+        debug_dbg_expert_warned = 0
+
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -1837,6 +1844,12 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
                 break
             else:
                 is_expert_weight = False
+                # [DEBUG W4A16] record the ckpt-side suffix for any name that
+                # contains "experts." so we know exactly what keys the loader
+                # is being asked to dispatch.
+                if "experts." in name:
+                    suffix_idx = name.rfind("experts.")
+                    debug_dbg_seen_expert_suffixes.add(name[suffix_idx:])
 
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
@@ -1859,6 +1872,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
+                    debug_dbg_expert_loaded += 1
                     break
                 else:
                     if is_expert_weight:
@@ -1879,14 +1893,48 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
                         weight_loader = getattr(
                             param, "weight_loader", default_weight_loader
                         )
+                        if "experts." in name:
+                            # [DEBUG W4A16] expert key fell through into the
+                            # generic default_weight_loader path. This is the
+                            # canonical sign of a missing expert mapping.
+                            debug_dbg_expert_default_loader += 1
+                            logger.warning(
+                                "[DEBUG W4A16] expert weight fell through to "
+                                "default loader: name=%s shape=%s",
+                                name,
+                                tuple(loaded_weight.shape),
+                            )
                         try:
                             weight_loader(param, loaded_weight)
                         except Exception as e:
                             logger.warning(f"Error loading weight {name}: {e}")
                             continue
                     else:
+                        if "experts." in name:
+                            debug_dbg_expert_not_in_params += 1
+                        else:
+                            debug_dbg_expert_warned += 1
                         logger.warning(f"Parameter {name} not found in params_dict")
             loaded_params.add(name)
+
+        # [DEBUG W4A16] one-shot summary of how expert ckpt keys were dispatched.
+        logger.warning(
+            "[DEBUG W4A16] load_weights summary: "
+            "expert_loaded=%d expert_fell_through_to_default=%d "
+            "expert_not_in_params=%d non_expert_missing=%d "
+            "unique_expert_ckpt_suffixes=%d",
+            debug_dbg_expert_loaded,
+            debug_dbg_expert_default_loader,
+            debug_dbg_expert_not_in_params,
+            debug_dbg_expert_warned,
+            len(debug_dbg_seen_expert_suffixes),
+        )
+        # Print up to 32 distinct expert ckpt suffixes so we can see the
+        # checkpoint's actual naming convention (e.g. ".weight" vs
+        # ".weight_packed" / ".weight_scale" / ".scales").
+        sample_suffixes = sorted(debug_dbg_seen_expert_suffixes)[:32]
+        for s in sample_suffixes:
+            logger.warning("[DEBUG W4A16] expert ckpt suffix sample: %s", s)
 
         # Fuse main qkv_proj + sparse index_qkv_proj into one GEMM. The raw fp8
         # weight + uint8 scale are final at this point (the mxfp8 post-process

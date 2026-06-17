@@ -242,6 +242,47 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
         if getattr(layer, "is_marlin_converted", False):
             return
 
+        # [DEBUG W4A16] dump weight statistics BEFORE marlin repack so we can
+        # see whether the checkpoint actually wrote into the params or whether
+        # they are still at their `torch.empty` init values.
+        try:
+            wp = layer.w13_weight_packed.data
+            ws = layer.w13_weight_scale.data
+            w2p = layer.w2_weight_packed.data
+            w2s = layer.w2_weight_scale.data
+            logger.warning(
+                "[DEBUG W4A16] pre-marlin stats "
+                "w13_weight_packed shape=%s dtype=%s min=%s max=%s nonzero_frac=%.4f "
+                "w13_weight_scale shape=%s dtype=%s min=%s max=%s mean=%s",
+                tuple(wp.shape),
+                wp.dtype,
+                int(wp.min().item()) if wp.numel() else "n/a",
+                int(wp.max().item()) if wp.numel() else "n/a",
+                (wp != 0).float().mean().item() if wp.numel() else 0.0,
+                tuple(ws.shape),
+                ws.dtype,
+                ws.min().item() if ws.numel() else "n/a",
+                ws.max().item() if ws.numel() else "n/a",
+                ws.mean().item() if ws.numel() else "n/a",
+            )
+            logger.warning(
+                "[DEBUG W4A16] pre-marlin stats "
+                "w2_weight_packed shape=%s dtype=%s min=%s max=%s nonzero_frac=%.4f "
+                "w2_weight_scale shape=%s dtype=%s min=%s max=%s mean=%s",
+                tuple(w2p.shape),
+                w2p.dtype,
+                int(w2p.min().item()) if w2p.numel() else "n/a",
+                int(w2p.max().item()) if w2p.numel() else "n/a",
+                (w2p != 0).float().mean().item() if w2p.numel() else 0.0,
+                tuple(w2s.shape),
+                w2s.dtype,
+                w2s.min().item() if w2s.numel() else "n/a",
+                w2s.max().item() if w2s.numel() else "n/a",
+                w2s.mean().item() if w2s.numel() else "n/a",
+            )
+        except Exception as e:
+            logger.warning("[DEBUG W4A16] pre-marlin stats failed: %s", e)
+
         if not hasattr(layer, "_original_shapes"):
             layer._original_shapes = {}
 
