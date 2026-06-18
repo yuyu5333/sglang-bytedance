@@ -260,6 +260,15 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         self._dbg_dense_ckpt_names: set = set()
         self._dbg_dense_loaded_targets: set = set()
         self._dbg_dense_missed: list = []
+        # [DEBUG W4A16-VL2] Capture every ckpt key that mentions "shared" OR
+        # is a top-level "experts.<id>." pattern with id >= num_local_experts
+        # (i.e. >= 128). Also collect a "template" of every ckpt key (with
+        # layer ids and expert ids replaced by "*") to find any unfamiliar
+        # naming hiding the shared-expert weights.
+        self._dbg_total_ckpt_keys = 0
+        self._dbg_any_shared_keys: list = []
+        self._dbg_high_expert_id_keys: list = []
+        self._dbg_key_templates: set = set()
 
         # ``.qkv_proj`` (with the leading dot) prevents matching e.g.
         # ``index_q_proj`` in the sparse-attention branch.
@@ -303,6 +312,26 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            # [DEBUG W4A16-VL2] capture EVERY raw ckpt key (before any rename)
+            # so we can see how shared experts are named in the W4A16 ckpt.
+            self._dbg_total_ckpt_keys += 1
+            if "shared" in name:
+                if len(self._dbg_any_shared_keys) < 64:
+                    self._dbg_any_shared_keys.append(name)
+            # Detect any "experts.<id>." with id >= num_experts (would be a
+            # baked-in shared expert slot in the ckpt itself).
+            import re as _re
+
+            m = _re.search(r"experts\.(\d+)\.", name)
+            if m and num_experts > 0 and int(m.group(1)) >= num_experts:
+                if len(self._dbg_high_expert_id_keys) < 64:
+                    self._dbg_high_expert_id_keys.append(name)
+            # Build a "template" key: replace `.layers.N.` with `.layers.*.`
+            # and `experts.N.` with `experts.*.` so we get a small set.
+            tmpl = _re.sub(r"\.layers\.\d+\.", ".layers.*.", name)
+            tmpl = _re.sub(r"experts\.\d+\.", "experts.*.", tmpl)
+            self._dbg_key_templates.add(tmpl)
 
             if name.startswith("language_model."):
                 self._load_llm_weight(
@@ -362,6 +391,28 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
             logger.warning("[DEBUG W4A16-VL] dense loaded target: %s", s)
         for s in self._dbg_dense_missed[:32]:
             logger.warning("[DEBUG W4A16-VL] dense MISSED: %s", s)
+
+        # [DEBUG W4A16-VL2] dump every "shared" key, every "experts.>=128" key,
+        # total ckpt key count, and a sorted list of all key templates so we
+        # can pinpoint how (or whether) the W4A16 ckpt actually stores the
+        # shared-expert weights.
+        logger.warning(
+            "[DEBUG W4A16-VL2] total_ckpt_keys=%d num_shared_keys=%d "
+            "num_high_expert_id_keys=%d num_key_templates=%d",
+            self._dbg_total_ckpt_keys,
+            len(self._dbg_any_shared_keys),
+            len(self._dbg_high_expert_id_keys),
+            len(self._dbg_key_templates),
+        )
+        for s in self._dbg_any_shared_keys:
+            logger.warning("[DEBUG W4A16-VL2] ckpt key with 'shared': %s", s)
+        for s in self._dbg_high_expert_id_keys:
+            logger.warning(
+                "[DEBUG W4A16-VL2] ckpt key with high expert id (>=num_local_experts): %s",
+                s,
+            )
+        for s in sorted(self._dbg_key_templates):
+            logger.warning("[DEBUG W4A16-VL2] ckpt key template: %s", s)
 
         # Fuse main qkv_proj + sparse index_qkv_proj into one GEMM per sparse
         # attention layer (see MiniMaxM3.load_weights for the rationale).
