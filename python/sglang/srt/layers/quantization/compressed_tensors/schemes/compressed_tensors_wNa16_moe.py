@@ -293,6 +293,25 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
         except Exception as e:
             logger.warning("[DEBUG W4A16] pre-marlin stats failed: %s", e)
 
+        # [DEBUG W4A16] Save original (pack-quantized) tensors for layer 3
+        # expert 0 so we can dequantize them with both interpretations
+        # (compressed-tensors pack-quantized layout vs gptq layout) AFTER the
+        # marlin repack and detect a packing-order mismatch.
+        try:
+            if getattr(layer, "layer_id", -1) == 3:
+                logger.warning(
+                    "[DEBUG W4A16] preserving layer3 expert0 pre-marlin tensors for dequant cross-check"
+                )
+                layer._dbg_pre_w13_packed = layer.w13_weight_packed[0].detach().clone()
+                layer._dbg_pre_w13_scale = layer.w13_weight_scale[0].detach().clone()
+                layer._dbg_pre_w2_packed = layer.w2_weight_packed[0].detach().clone()
+                layer._dbg_pre_w2_scale = layer.w2_weight_scale[0].detach().clone()
+                layer._dbg_pack_factor = self.packed_factor
+                layer._dbg_group_size = self.group_size
+                layer._dbg_num_bits = self.num_bits
+        except Exception as e:
+            logger.warning("[DEBUG W4A16] saving pre-marlin tensors failed: %s", e)
+
         if not hasattr(layer, "_original_shapes"):
             layer._original_shapes = {}
 
@@ -392,6 +411,105 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
 
         layer.workspace = marlin_make_workspace(layer.w13_weight_packed.device, 4)
         layer.is_marlin_converted = True
+
+        # [DEBUG W4A16] Dequant cross-check for layer 3, expert 0. We
+        # interpret the *original* `weight_packed` int32 tensor with two
+        # candidate layouts:
+        #   A) compressed-tensors "pack-quantized": rows are output channels
+        #      of size N, cols are packed input channels (K/pack_factor) where
+        #      each int32 stores 8 contiguous 4-bit signed values along K
+        #      (least-significant nibble = lowest input channel).
+        #   B) GPTQ-style packing: rows are packed input channels
+        #      (K/pack_factor), cols are output channels N. Each int32 stores
+        #      8 contiguous 4-bit signed values along K (LSB = lowest k).
+        # If the ckpt is layout (A) but `gptq_marlin_moe_repack` assumes
+        # layout (B), the dequantized values come out shuffled and the GEMM
+        # output is noise. We dump the dequantized first row of w13.expert0
+        # under both interpretations so we can compare against the pristine
+        # source ckpt offline.
+        try:
+            if hasattr(layer, "_dbg_pre_w13_packed"):
+                pack_factor = layer._dbg_pack_factor
+                group_size = layer._dbg_group_size
+                num_bits = layer._dbg_num_bits
+                pre_q = layer._dbg_pre_w13_packed
+                pre_s = layer._dbg_pre_w13_scale
+                logger.warning(
+                    "[DEBUG W4A16] layer3.expert0 w13 pre-marlin shapes "
+                    "packed=%s dtype=%s scale=%s scale_dtype=%s pack_factor=%d group_size=%d num_bits=%d",
+                    tuple(pre_q.shape), pre_q.dtype,
+                    tuple(pre_s.shape), pre_s.dtype,
+                    pack_factor, group_size, num_bits,
+                )
+
+                def _unpack_int4_lsb_first(t: torch.Tensor) -> torch.Tensor:
+                    # Unpack int32 -> 8 signed 4-bit values along last dim,
+                    # LSB nibble first. Result dtype int8 in [-8, 7].
+                    t32 = t.to(torch.int32)
+                    shifts = torch.arange(0, 32, 4, device=t32.device, dtype=torch.int32)
+                    expanded = t32.unsqueeze(-1) >> shifts
+                    nibbles = expanded & 0xF
+                    nibbles = nibbles.where(nibbles < 8, nibbles - 16)
+                    return nibbles.to(torch.int8).reshape(*t32.shape[:-1], t32.shape[-1] * 8)
+
+                # Layout A: pack-quantized -> packed.shape == (N_outer, K_packed)
+                # so unpack along last dim to get (N_outer, K)
+                unpackedA = _unpack_int4_lsb_first(pre_q)
+                # Layout B: gptq -> packed.shape == (K_packed, N) so unpack
+                # along *first* dim. We emulate by transposing first.
+                unpackedB = _unpack_int4_lsb_first(pre_q.t().contiguous())
+
+                logger.warning(
+                    "[DEBUG W4A16] layer3.expert0 w13 unpacked layoutA shape=%s "
+                    "first8 row0=%s last8 row0=%s minmax=(%d,%d) hist=%s",
+                    tuple(unpackedA.shape),
+                    unpackedA[0, :8].tolist(),
+                    unpackedA[0, -8:].tolist(),
+                    int(unpackedA.min().item()), int(unpackedA.max().item()),
+                    torch.bincount(
+                        (unpackedA[0].to(torch.int32) + 8).clamp(0, 15)
+                    ).tolist(),
+                )
+                logger.warning(
+                    "[DEBUG W4A16] layer3.expert0 w13 unpacked layoutB shape=%s "
+                    "first8 col0=%s last8 col0=%s minmax=(%d,%d) hist=%s",
+                    tuple(unpackedB.shape),
+                    unpackedB[0, :8].tolist(),
+                    unpackedB[0, -8:].tolist(),
+                    int(unpackedB.min().item()), int(unpackedB.max().item()),
+                    torch.bincount(
+                        (unpackedB[0].to(torch.int32) + 8).clamp(0, 15)
+                    ).tolist(),
+                )
+
+                # Multiply by scale[group_0, :] and inspect dequantized values.
+                # In compressed-tensors pack-quantized:
+                #   weight.shape == (N, K), scale.shape == (N, K // group_size)
+                # So pre_s.shape should be (N, num_groups). Verify and dequant
+                # column 0 of group 0 across the first 4 output channels.
+                if pre_s.dim() == 2:
+                    s0 = pre_s[:4, 0].to(torch.float32)  # 4 output rows
+                    # layoutA: (N, K), pick row 0..3, k=0
+                    if unpackedA.shape[0] >= 4 and unpackedA.shape[1] >= 1:
+                        wA = unpackedA[:4, 0].to(torch.float32) * s0
+                        logger.warning(
+                            "[DEBUG W4A16] layer3.expert0 w13 layoutA dequant n=0..3,k=0: %s "
+                            "(scales=%s)", wA.tolist(), s0.tolist(),
+                        )
+                    if unpackedB.shape[0] >= 4 and unpackedB.shape[1] >= 1:
+                        wB = unpackedB[:4, 0].to(torch.float32) * s0
+                        logger.warning(
+                            "[DEBUG W4A16] layer3.expert0 w13 layoutB dequant n=0..3,k=0: %s",
+                            wB.tolist(),
+                        )
+
+                # Free debug copies to release memory before forward.
+                del layer._dbg_pre_w13_packed
+                del layer._dbg_pre_w13_scale
+                del layer._dbg_pre_w2_packed
+                del layer._dbg_pre_w2_scale
+        except Exception as e:
+            logger.warning("[DEBUG W4A16] dequant cross-check failed: %s", e)
 
     def restore_weights_before_loading(self, layer: torch.nn.Module):
         """Forcibly resize parameters back to their original shapes (e.g., GPTQ format) before loading weights."""
