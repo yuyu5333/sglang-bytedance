@@ -242,6 +242,14 @@ class _WallPoolEntry:
         # replay 时指针不稳定。形状 ``[max_tokens_per_forward, ...]``。
         "staging_slot",
         "staging_scale",
+        # T_packed_only: per-(page, slot) 是否被 store 写过的 mask。
+        # _refresh_shadow_pages dequant 之后，invalid slot (False) 的
+        # out_slot / out_scale 字节强置 0，避免 dequant(packed=0) =
+        # zero @ R.t() ≠ 0 的 garbage 写入 shadow 污染 FlashMLA。
+        # 形状: List[Tensor[num_pages, page_size] bool] × layer_num。
+        # 内存开销: num_pages × page_size × 1B × layer_num；DSv4
+        # SWA 池 ≈ 152 MB total（可忽略 vs shadow ≈ 23 GB）。
+        "valid_slots",
     )
 
     def __init__(
@@ -258,6 +266,7 @@ class _WallPoolEntry:
         dirty_pages: List[torch.Tensor],
         staging_slot: torch.Tensor,
         staging_scale: torch.Tensor,
+        valid_slots: List[torch.Tensor],
     ):
         self.kind = kind
         self.pool = pool
@@ -271,6 +280,7 @@ class _WallPoolEntry:
         self.dirty_pages = dirty_pages
         self.staging_slot = staging_slot
         self.staging_scale = staging_scale
+        self.valid_slots = valid_slots
 
 
 class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
@@ -489,6 +499,18 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 for _ in range(pool.layer_num)
             ]
 
+            # T_packed_only: per-(page, slot) valid mask。初始全 False
+            # （所有 slot 未写过）。store 路径调 _mark_slots_valid_from_loc
+            # 标 True；prologue dequant 之后用此 mask 把 invalid slot
+            # 的字节强置 0，与 baseline 未写 FP8 buffer 等价。
+            valid_slots = [
+                torch.zeros(
+                    num_pages, page_size,
+                    dtype=torch.bool, device=device,
+                )
+                for _ in range(pool.layer_num)
+            ]
+
             # T_cgraph_safe: 跨 forward 复用 staging buffer，避免
             # _write_tokens_to_shadow 在 cudagraph capture/replay 期间
             # 反复 ``torch.empty`` 临时 tensor 导致指针不稳定。
@@ -534,6 +556,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 dirty_pages=dirty_pages,
                 staging_slot=staging_slot,
                 staging_scale=staging_scale,
+                valid_slots=valid_slots,
             )
             self._wall_pools[kind] = entry
 
@@ -626,6 +649,41 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         loc_i64 = loc.to(dtype=torch.int64, device=dirty.device).reshape(-1)
         page_idx = (loc_i64 // entry.page_size).clamp_(0, entry.num_pages - 1)
         dirty.index_fill_(0, page_idx, True)
+
+    def _mark_slots_valid_from_loc(
+        self,
+        entry: _WallPoolEntry,
+        local_layer_id: int,
+        loc: torch.Tensor,
+    ) -> None:
+        """T_packed_only: 标记 store 真正写入过的 (page, slot) 为 valid=True。
+
+        prologue dequant 后用 valid_slots mask 把 invalid slot 的字节
+        强置 0，避免 ``dequant(packed=0) = zero @ R.t() ≠ 0`` 的 garbage
+        污染 shadow / FlashMLA 读路径。
+
+        ``loc`` 是 store 的 [N] int32 token slot 索引，含 -1 sentinel；
+        slot 落在 page=loc//P, off=loc%P。-1 sentinel 用 clamp_min(0) 落
+        到 (page=0, slot=0)，被 token_shadow 之外的代码忽略不影响正确性
+        （valid_slots 覆盖范围内的 slot 一定来自有效 loc）。
+
+        TODO(cgraph): 当前用 ``valid_flat[idx] = True`` advanced indexing，
+        在 cuda graph capture 下需要稳定的 idx 指针——Step2 改 Triton
+        kernel 时一并迁移到 capture-safe API。Step1 主要验证量化数学
+        在 ``--disable-cuda-graph`` 下可达 gsm8k ≥ 0.94。
+        """
+        if loc.numel() == 0:
+            return
+        valid = entry.valid_slots[local_layer_id]  # [num_pages, page_size] bool
+        loc_i64 = loc.to(dtype=torch.int64, device=valid.device).reshape(-1)
+        # 把 -1 sentinel 落到 (0, 0)：scatter True 到 page 0 slot 0；
+        # 这个 slot 一旦被真实 token 写过就也是 True（无副作用）。
+        loc_i64 = loc_i64.clamp_min_(0)
+        page_idx = loc_i64 // entry.page_size
+        slot_idx = loc_i64 % entry.page_size
+        flat = valid.reshape(-1)
+        flat_idx = page_idx * entry.page_size + slot_idx
+        flat.index_fill_(0, flat_idx, True)
 
     # ------------------------------------------------------------------
     # Token-level shadow write: avoid garbage in unwritten slots.
@@ -786,6 +844,11 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         self._mark_pages_dirty_from_loc(
             self._wall_pools["swa"], local_layer_id, swa_loc,
         )
+        # T_packed_only (β): mark per-(page, slot) valid so prologue
+        # dequant 后能把 invalid slot 的 garbage 字节清零。
+        self._mark_slots_valid_from_loc(
+            self._wall_pools["swa"], local_layer_id, swa_loc,
+        )
 
     def set_swa_key_buffer_radix_fused_norm_rope(
         self,
@@ -905,6 +968,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         self._mark_pages_dirty_from_loc(
             self._wall_pools["swa"], local_layer_id, swa_loc,
         )
+        # T_packed_only (β)
+        self._mark_slots_valid_from_loc(
+            self._wall_pools["swa"], local_layer_id, swa_loc,
+        )
 
     def set_extra_key_buffer_fused(
         self,
@@ -944,6 +1011,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             )
         # T3: mark dirty pages
         self._mark_pages_dirty_from_loc(entry, local_layer_id, loc)
+        # T_packed_only (β)
+        self._mark_slots_valid_from_loc(entry, local_layer_id, loc)
 
     def set_extra_key_buffer(
         self,
@@ -1086,6 +1155,22 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 cache, loc, page_size=page_size, cfg=cfg,
             )
             out_slot, out_scale = quant_fp8_layout_cpu_ref(nope_bf16, rope_bf16)
+
+        # T_packed_only (β): apply valid_slots mask. dequant(packed=0) =
+        # zero @ R.t() ≠ 0；未被 store 写过的 slot 在 packed_buffer 仍是 0
+        # 但 dequant 出来不是 0，会污染 shadow 让 FlashMLA 读到 garbage
+        # （token salad 根因）。这里 gather 当前 refresh 的 (page, slot)
+        # mask，invalid 行字节清零，等价于 baseline native FP8 buffer 中
+        # 未写 slot 的 0 字节，FlashMLA 读到也只是 numerical 0（被
+        # attention mask 屏蔽），不会污染输出。
+        valid = entry.valid_slots[local_layer_id]  # [num_pages, page_size] bool
+        # gather 同一 flat_pages 顺序的 mask: [P_unique, page_size]
+        valid_rows = valid.index_select(0, flat_pages.to(valid.device))
+        valid_flat = valid_rows.reshape(-1)  # [M]
+        invalid_flat = ~valid_flat
+        if invalid_flat.any():
+            out_slot[invalid_flat] = 0
+            out_scale[invalid_flat] = 0
 
         # Scatter into shadow: for each (page, slot), write 576 value bytes
         # at offset slot * 576 plus 8 scale bytes at (page_size * 576) +
