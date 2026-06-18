@@ -482,26 +482,140 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
                     ).tolist(),
                 )
 
-                # Multiply by scale[group_0, :] and inspect dequantized values.
-                # In compressed-tensors pack-quantized:
-                #   weight.shape == (N, K), scale.shape == (N, K // group_size)
-                # So pre_s.shape should be (N, num_groups). Verify and dequant
-                # column 0 of group 0 across the first 4 output channels.
-                if pre_s.dim() == 2:
-                    s0 = pre_s[:4, 0].to(torch.float32)  # 4 output rows
-                    # layoutA: (N, K), pick row 0..3, k=0
-                    if unpackedA.shape[0] >= 4 and unpackedA.shape[1] >= 1:
-                        wA = unpackedA[:4, 0].to(torch.float32) * s0
+                # After `_weight_loader_impl` already did `loaded_weight.t()`,
+                # the in-memory shapes for w13 are:
+                #   pre_q.shape = (K_packed, 2N)   = (768, 768)
+                #   pre_s.shape = (num_groups, 2N) = (48,  768)
+                # i.e. GPTQ-style storage. So:
+                #   layoutA: unpacked = unpack(pre_q) along *last* dim is WRONG
+                #            (last dim is 2N, no nibble there). Correct is to
+                #            interpret pre_q as (K_packed, N) and unpack along
+                #            *first* dim to get (K, N). We emulate by transpose.
+                #   layoutB: unpack pre_q.t() along last dim => (N, K).
+                # Also the gptq_marlin_repack kernel itself expects the input
+                # layout (K_packed, N) with LSB nibble = lowest k. So the
+                # "correct" interpretation given the storage format is layoutB.
+                # Print dequant values along K for n=0 (4 K positions) under
+                # both interpretations to make it easy to compare with the
+                # original safetensors values offline.
+                if pre_s.dim() == 2 and pre_s.shape[0] >= 1 and pre_s.shape[1] >= 1:
+                    # scale shape (num_groups=48, 2N=768): row 0 is group 0,
+                    # column n is the scale for output-channel n in group 0.
+                    s_g0 = pre_s[0, :4].to(torch.float32)  # group 0, n=0..3
+                    s_n0 = pre_s[:4, 0].to(torch.float32)  # n=0,    g=0..3
+
+                    # ---- LayoutA (pre_q == (N, K_packed) "pack-quantized" raw)
+                    # If raw ckpt was (N, K_packed) and `_weight_loader_impl`
+                    # had NOT transposed, then unpackedA above (last-dim
+                    # unpack of pre_q which is (768,768)) would be (N,K). But
+                    # because `_weight_loader_impl` *did* transpose, our
+                    # unpackedA actually treats pre_q as (K_packed, ?) and
+                    # unpacks along the wrong dim. Re-do correctly here:
+                    # ckpt-raw layoutA: row=N, col=K_packed -> unpacked=(N,K)
+                    # In current memory we have pre_q == (K_packed, N). So
+                    # ckpt_raw_A = pre_q.t() (giving (N, K_packed)) and
+                    # unpack along last dim => (N, K).
+                    unpackedA_correct = _unpack_int4_lsb_first(pre_q.t().contiguous())
+                    # ckpt-raw layoutB: row=K_packed, col=N -> unpacked along
+                    # first dim => (K, N). emulate via transpose then unpack
+                    # last dim then transpose back: easier to keep (N, K) form
+                    # by reading [n, :] of layoutB. Since layoutB's unpacked
+                    # shape would be (K_packed*8, N) = (K, N), to get n=0 K=0..3
+                    # we'd take unpackedB_kn[0:4, 0]. But for an apples-to-apples
+                    # comparison, also build a (N, K) view of layoutB:
+                    unpackedB_kn = _unpack_int4_lsb_first(
+                        pre_q.transpose(0, 1).contiguous().transpose(0, 1).contiguous()
+                    )
+
+                    # Dequant n=0, k=0..3 under layoutA-correct (N, K):
+                    if unpackedA_correct.shape[0] >= 1 and unpackedA_correct.shape[1] >= 4:
+                        nibA_n0 = unpackedA_correct[0, :4].to(torch.float32)
+                        # all k in [0..3] live in group 0 (group_size=128),
+                        # so use s_g0[0] (channel 0 in group 0) for all
+                        wA = nibA_n0 * s_g0[0]
                         logger.warning(
-                            "[DEBUG W4A16] layer3.expert0 w13 layoutA dequant n=0..3,k=0: %s "
-                            "(scales=%s)", wA.tolist(), s0.tolist(),
+                            "[DEBUG W4A16-FIX] layoutA-correct (interpret raw ckpt as (N,K_packed)) "
+                            "n=0,k=0..3 nibbles=%s scale_n0_g0=%.6f dequant=%s",
+                            nibA_n0.tolist(),
+                            float(s_g0[0]),
+                            wA.tolist(),
                         )
-                    if unpackedB.shape[0] >= 4 and unpackedB.shape[1] >= 1:
-                        wB = unpackedB[:4, 0].to(torch.float32) * s0
+                    # Same query, n=0..3, k=0:
+                    if unpackedA_correct.shape[0] >= 4 and unpackedA_correct.shape[1] >= 1:
+                        nibA_k0 = unpackedA_correct[:4, 0].to(torch.float32)
+                        # all n distinct, k=0 -> group 0
+                        wA2 = nibA_k0 * s_g0[:4]
                         logger.warning(
-                            "[DEBUG W4A16] layer3.expert0 w13 layoutB dequant n=0..3,k=0: %s",
+                            "[DEBUG W4A16-FIX] layoutA-correct n=0..3,k=0 nibbles=%s "
+                            "scales_g0_n0..3=%s dequant=%s",
+                            nibA_k0.tolist(),
+                            s_g0[:4].tolist(),
+                            wA2.tolist(),
+                        )
+
+                    # Layout-B (raw ckpt is GPTQ-style (K_packed, N), which is
+                    # what the file currently is in memory). Unpack first dim
+                    # interpreted as K_packed, last dim as N.
+                    # unpackedB_kn shape == (K, N). For n=0 k=0..3:
+                    if unpackedB_kn.shape[0] >= 4 and unpackedB_kn.shape[1] >= 1:
+                        nibB_n0 = unpackedB_kn[:4, 0].to(torch.float32)
+                        wB = nibB_n0 * s_g0[0]
+                        logger.warning(
+                            "[DEBUG W4A16-FIX] layoutB (raw ckpt is (K_packed,N)) "
+                            "n=0,k=0..3 nibbles=%s scale_n0_g0=%.6f dequant=%s",
+                            nibB_n0.tolist(),
+                            float(s_g0[0]),
                             wB.tolist(),
                         )
+                    if unpackedB_kn.shape[0] >= 1 and unpackedB_kn.shape[1] >= 4:
+                        nibB_k0 = unpackedB_kn[0, :4].to(torch.float32)
+                        wB2 = nibB_k0 * s_g0[:4]
+                        logger.warning(
+                            "[DEBUG W4A16-FIX] layoutB n=0..3,k=0 nibbles=%s "
+                            "scales_g0_n0..3=%s dequant=%s",
+                            nibB_k0.tolist(),
+                            s_g0[:4].tolist(),
+                            wB2.tolist(),
+                        )
+
+                    # Global stats of the two reconstructions (use a small
+                    # sample to avoid blowing up bf16 mul).
+                    sample_rows = min(64, unpackedA_correct.shape[0])
+                    sample_cols = min(128, unpackedA_correct.shape[1])
+                    A_sample = unpackedA_correct[:sample_rows, :sample_cols].to(torch.float32)
+                    B_sample = unpackedB_kn[:sample_cols, :sample_rows].to(torch.float32).t()
+                    logger.warning(
+                        "[DEBUG W4A16-FIX] layoutA-correct sample stats min=%.4f "
+                        "max=%.4f mean=%.4f std=%.4f",
+                        float(A_sample.min()),
+                        float(A_sample.max()),
+                        float(A_sample.mean()),
+                        float(A_sample.std()),
+                    )
+                    logger.warning(
+                        "[DEBUG W4A16-FIX] layoutB sample stats min=%.4f "
+                        "max=%.4f mean=%.4f std=%.4f",
+                        float(B_sample.min()),
+                        float(B_sample.max()),
+                        float(B_sample.mean()),
+                        float(B_sample.std()),
+                    )
+
+                # Persist dequanted (N, K) reference so we can compare against
+                # the post-marlin packed weight if needed in apply_weights.
+                # Save a compact (N=8, K=8) numerical reference for layoutB
+                # (since layoutB matches the raw memory format).
+                try:
+                    if pre_s.dim() == 2 and pre_s.shape[1] >= 8:
+                        s_g0_full = pre_s[0, :8].to(torch.float32)
+                        nibB_block = unpackedB_kn[:8, :8].to(torch.float32)  # K=0..7, N=0..7
+                        ref_block = nibB_block * s_g0_full.unsqueeze(0)
+                        logger.warning(
+                            "[DEBUG W4A16-FIX] layoutB ref dequant block N[0:8]xK[0:8] (row=K, col=N):\n%s",
+                            ref_block.tolist(),
+                        )
+                except Exception as e2:
+                    logger.warning("[DEBUG W4A16-FIX] ref block failed: %s", e2)
 
                 # Free debug copies to release memory before forward.
                 del layer._dbg_pre_w13_packed
@@ -576,6 +690,76 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
             if expert_map is not None:
                 global_num_experts = self.moe_runner_config.num_experts
 
+        # [DEBUG W4A16-FWD] Per-layer / per-call counter so we don't flood the
+        # log. Only dump stats for layer 3, first 2 invocations.
+        _dbg_layer_id = getattr(layer, "layer_id", -1)
+        _dbg_count = getattr(layer, "_dbg_fwd_count", 0)
+        _dbg_dump = (_dbg_layer_id == 3) and (_dbg_count < 2)
+        if _dbg_dump:
+            try:
+                xf = x.detach().to(torch.float32)
+                tw = topk_weights.detach().to(torch.float32) if topk_weights is not None else None
+                ti = topk_ids.detach() if topk_ids is not None else None
+                w13p = layer.w13_weight_packed
+                w13s = layer.w13_weight_scale
+                w2p = layer.w2_weight_packed
+                w2s = layer.w2_weight_scale
+                logger.warning(
+                    "[DEBUG W4A16-FWD] layer3 enter#%d x.shape=%s dtype=%s "
+                    "min=%.4f max=%.4f mean=%.4f std=%.4f nan=%d inf=%d",
+                    _dbg_count,
+                    tuple(x.shape), x.dtype,
+                    float(xf.min()), float(xf.max()),
+                    float(xf.mean()), float(xf.std()),
+                    int(torch.isnan(xf).sum().item()),
+                    int(torch.isinf(xf).sum().item()),
+                )
+                if tw is not None:
+                    logger.warning(
+                        "[DEBUG W4A16-FWD] layer3 enter#%d topk_weights shape=%s "
+                        "min=%.4f max=%.4f mean=%.4f sum_per_token_first5=%s",
+                        _dbg_count,
+                        tuple(tw.shape),
+                        float(tw.min()), float(tw.max()), float(tw.mean()),
+                        tw.sum(dim=-1).flatten()[:5].tolist() if tw.numel() else [],
+                    )
+                if ti is not None:
+                    logger.warning(
+                        "[DEBUG W4A16-FWD] layer3 enter#%d topk_ids shape=%s "
+                        "min=%d max=%d unique_first10=%s first_row=%s",
+                        _dbg_count,
+                        tuple(ti.shape),
+                        int(ti.min().item()), int(ti.max().item()),
+                        torch.unique(ti.flatten()[:32]).tolist(),
+                        ti.flatten()[:8].tolist(),
+                    )
+                logger.warning(
+                    "[DEBUG W4A16-FWD] layer3 enter#%d w13p shape=%s dtype=%s "
+                    "nz=%.4f w13s shape=%s dtype=%s min=%.6f max=%.6f mean=%.6f "
+                    "nan=%d inf=%d",
+                    _dbg_count,
+                    tuple(w13p.shape), w13p.dtype,
+                    (w13p != 0).float().mean().item(),
+                    tuple(w13s.shape), w13s.dtype,
+                    float(w13s.min()), float(w13s.max()), float(w13s.mean()),
+                    int(torch.isnan(w13s.to(torch.float32)).sum().item()),
+                    int(torch.isinf(w13s.to(torch.float32)).sum().item()),
+                )
+                logger.warning(
+                    "[DEBUG W4A16-FWD] layer3 enter#%d w2p shape=%s dtype=%s "
+                    "nz=%.4f w2s shape=%s dtype=%s min=%.6f max=%.6f mean=%.6f "
+                    "nan=%d inf=%d",
+                    _dbg_count,
+                    tuple(w2p.shape), w2p.dtype,
+                    (w2p != 0).float().mean().item(),
+                    tuple(w2s.shape), w2s.dtype,
+                    float(w2s.min()), float(w2s.max()), float(w2s.mean()),
+                    int(torch.isnan(w2s.to(torch.float32)).sum().item()),
+                    int(torch.isinf(w2s.to(torch.float32)).sum().item()),
+                )
+            except Exception as e:
+                logger.warning("[DEBUG W4A16-FWD] layer3 pre-marlin dump failed: %s", e)
+
         output = fused_marlin_moe(
             x,
             layer.w13_weight_packed,
@@ -596,6 +780,27 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
             workspace=layer.workspace,
         )
+
+        if _dbg_dump:
+            try:
+                of = output.detach().to(torch.float32)
+                logger.warning(
+                    "[DEBUG W4A16-FWD] layer3 exit#%d output.shape=%s dtype=%s "
+                    "min=%.4f max=%.4f mean=%.4f std=%.4f nan=%d inf=%d "
+                    "all_zero=%s first8=%s",
+                    _dbg_count,
+                    tuple(output.shape), output.dtype,
+                    float(of.min()), float(of.max()),
+                    float(of.mean()), float(of.std()),
+                    int(torch.isnan(of).sum().item()),
+                    int(torch.isinf(of).sum().item()),
+                    bool((of == 0).all().item()),
+                    of.flatten()[:8].tolist(),
+                )
+            except Exception as e:
+                logger.warning("[DEBUG W4A16-FWD] layer3 post-marlin dump failed: %s", e)
+            layer._dbg_fwd_count = _dbg_count + 1
+
         return StandardCombineInput(hidden_states=output)
 
 
