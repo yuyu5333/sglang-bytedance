@@ -1137,10 +1137,25 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             use_triton = False
 
         if use_triton:
+            # T_packed_only (β) byte-layout fix: must be torch.zeros, not
+            # torch.empty. The Triton dequant kernel only writes
+            # out_scale[:, :7] (7 nope tiles) and leaves out_scale[:, 7]
+            # uninitialized. The native CUDA fused_k_norm_rope_flashmla
+            # path leaves shadow's 8th scale byte at its initial value 0
+            # (shadow = torch.zeros at install time). When we scatter
+            # out_scale into shadow we overwrite all 8 bytes, so the
+            # uninitialized 8th byte becomes random garbage in shadow.
+            # FlashMLA may load scales as a vec64 and use any non-zero
+            # 8th byte as an exponent, yielding 2^(garbage-127) ~ 2^128
+            # ⇒ catastrophic numerics ⇒ token salad.
+            # Same logic for out_slot: nope kernel writes [:, :448] and
+            # rope kernel writes [:, 448:576], so all 576 bytes are set.
+            # Keep out_slot = empty for perf; force out_scale = zeros so
+            # the 8th byte stays 0 (parity with native FP8 path).
             out_slot = torch.empty(
                 (M, _MLA_SLOT_BYTES), dtype=torch.uint8, device=device
             )
-            out_scale = torch.empty(
+            out_scale = torch.zeros(
                 (M, _MLA_SCALES_PER_TOKEN), dtype=torch.uint8, device=device
             )
             rotated_load_to_fp8_layout(
@@ -1308,7 +1323,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             out_slot = torch.empty(
                 (M, _MLA_SLOT_BYTES), dtype=torch.uint8, device=cache.device
             )
-            out_scale = torch.empty(
+            # See _refresh_shadow_pages for why this must be torch.zeros.
+            out_scale = torch.zeros(
                 (M, _MLA_SCALES_PER_TOKEN), dtype=torch.uint8, device=cache.device
             )
             rotated_load_to_fp8_layout(
