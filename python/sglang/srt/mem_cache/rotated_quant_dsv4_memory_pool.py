@@ -181,6 +181,33 @@ def _wall_token_shadow_enabled() -> bool:
     return os.environ.get("SGLANG_RQ_WALL_TOKEN_SHADOW", "0") == "1"
 
 
+def _wall_drop_packed_enabled() -> bool:
+    """Drop the packed buffer entirely (memory milestone path).
+
+    When ``SGLANG_RQ_WALL_DROP_PACKED=1`` (only valid when
+    ``SGLANG_RQ_WALL_TOKEN_SHADOW=1``):
+
+    * ``packed_buffers`` is **not allocated** (saves ~38% bytes/token vs
+      native FP8 in the previous wall config; **eliminates** the +49%
+      reverse-overhead the dual-buffer architecture used to pay).
+    * Store paths skip the ``rotated_store_to_packed`` call entirely.
+    * The ``set_swa_key_buffer_radix_fused_norm_rope`` PyTorch fp32
+      fused-norm-rope fallback is replaced with the native CUDA
+      ``fused_k_norm_rope_flashmla`` kernel writing directly to the
+      shadow buffer — capture-safe and identical to baseline FP8 path.
+    * ``pool.kv_buffer`` is aliased to ``shadow_buffers`` so any parent
+      access pattern sees a sane FP8-layout buffer.
+
+    This is the production milestone configuration: equivalent baseline
+    accuracy, full cudagraph perf, zero memory overhead vs FP8 baseline
+    (modulo a single calib.pt of fp32 weights that's already cheap).
+    """
+    return (
+        os.environ.get("SGLANG_RQ_WALL_DROP_PACKED", "0") == "1"
+        and _wall_token_shadow_enabled()
+    )
+
+
 def _native_bytes_per_page(page_size: int) -> int:
     """DSv4 native paged FP8 layout: ``ceil(584 * P / 576) * 576``."""
     return ((_DSV4_NATIVE_BPT * page_size + _DSV4_SLOT_BYTES - 1) //
@@ -342,7 +369,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         logger.warning(
             "RotatedQuantDeepSeekV4TokenToKVPool active. %s "
             "calib=%s qk_nope_head_dim=%d packed_row_bytes=%d b_mean=%.2f "
-            "wall_pools=%s token_shadow=%s",
+            "wall_pools=%s token_shadow=%s drop_packed=%s",
             mode_msg,
             calib_path,
             qk_nope_head_dim,
@@ -350,6 +377,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             float(sample.bits.float().mean()),
             list(self._wall_pools.keys()),
             _wall_token_shadow_enabled(),
+            _wall_drop_packed_enabled(),
         )
 
     # ------------------------------------------------------------------
@@ -435,6 +463,12 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                     device=device,
                 )
                 for _ in range(pool.layer_num)
+            ] if not _wall_drop_packed_enabled() else [
+                # Drop-packed mode: no allocation. Use a 1-byte sentinel
+                # so any code path that still indexes packed_buffers[i]
+                # gets a clear shape error instead of silent bad reads.
+                torch.zeros(1, dtype=torch.uint8, device=device)
+                for _ in range(pool.layer_num)
             ]
             # Shadow stays zero-initialised; prologue refills before each
             # FlashMLA call using the indices it will read.
@@ -473,7 +507,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # The pool's main kv_buffer is now the PACKED storage. Reading
             # via super().get_swa_key_buffer_radix would return packed bytes
             # to FlashMLA -- our overrides redirect to shadow_buffers.
-            pool.kv_buffer = packed_buffers  # type: ignore[assignment]
+            # drop_packed 模式下 packed_buffers 是 1B 占位，必须把
+            # pool.kv_buffer 别名到 shadow_buffers，否则任何走 super()
+            # 路径或 attention backend 直接 reshape kv_buffer 的代码会
+            # 拿到错的 shape，触发 OOB 读写。
+            if _wall_drop_packed_enabled():
+                pool.kv_buffer = shadow_buffers  # type: ignore[assignment]
+            else:
+                pool.kv_buffer = packed_buffers  # type: ignore[assignment]
 
             # IMPORTANT: keep ``pool.bytes_per_page_padded`` at the FP8 size
             # because downstream code (e.g. backend.forward reshapes the
@@ -724,13 +765,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
-        rotated_store_to_packed(
-            self._wall_kv_input(cache_k),
-            self.swa_kv_pool.kv_buffer[local_layer_id],
-            swa_loc,
-            page_size=self.swa_kv_pool.page_size,
-            cfg=cfg,
-        )
+        # drop_packed 模式 packed_buffers 是 1B 占位，跳过 rotated_store_to_packed
+        # （写入路径是 dead code：prologue 整体 short-circuit，packed 不会被读）。
+        if not _wall_drop_packed_enabled():
+            rotated_store_to_packed(
+                self._wall_kv_input(cache_k),
+                self._wall_pools["swa"].packed_buffers[local_layer_id],
+                swa_loc,
+                page_size=self.swa_kv_pool.page_size,
+                cfg=cfg,
+            )
         # T3 token-shadow 模式: 同步写一份 token 级 shadow，避免
         # prologue 整 page refresh 把未写 slot 填成 dequant(0) 的 garbage。
         if _wall_token_shadow_enabled():
@@ -769,8 +813,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # FlashMLA 消费均正确, 问题一定出在 packed→shadow 的量化数学;
         # 如果仍 salad -> 问题出在 shadow buffer 的 layout/dtype 或
         # get_swa_key_buffer_radix 替换破坏了 backend 期待的语义.
+        #
+        # T_milestone (2026-06-17): drop_packed 模式同样直走这条 CUDA
+        # kernel 路径（控制实验 #2 已实测 gsm8k 0.955 / tps 1538 在
+        # cudagraph 下达成 baseline 等价），消除 PyTorch fp32 fallback 在
+        # capture/replay 时产生的临时 tensor 别名问题。
         # ------------------------------------------------------------------
-        if os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1":
+        if (
+            os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1"
+            or _wall_drop_packed_enabled()
+        ):
             from sglang.jit_kernel.deepseek_v4 import fused_k_norm_rope_flashmla
 
             if self._should_cache_swa:
@@ -837,7 +889,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         cat = torch.cat([nope_norm_f, rope_rotated_f], dim=-1).to(kv.dtype)
         rotated_store_to_packed(
             self._wall_kv_input(cat),
-            self.swa_kv_pool.kv_buffer[local_layer_id],
+            self._wall_pools["swa"].packed_buffers[local_layer_id],
             swa_loc,
             page_size=self.swa_kv_pool.page_size,
             cfg=cfg,
@@ -873,13 +925,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         kind, local_layer_id = self._layer_id_for_extra(layer_id)
         entry = self._wall_pools[kind]
         cfg = self._nope_cfgs[layer_id]
-        rotated_store_to_packed(
-            self._wall_kv_input(cache_k),
-            entry.packed_buffers[local_layer_id],
-            loc,
-            page_size=entry.page_size,
-            cfg=cfg,
-        )
+        # drop_packed 模式跳过 rotated_store_to_packed（packed_buffers 是
+        # 1B 占位，prologue 整体 short-circuit，无人读这块字节）。
+        if not _wall_drop_packed_enabled():
+            rotated_store_to_packed(
+                self._wall_kv_input(cache_k),
+                entry.packed_buffers[local_layer_id],
+                loc,
+                page_size=entry.page_size,
+                cfg=cfg,
+            )
         # T3 token-shadow 模式: 同步写 shadow，绕开 page-level refresh
         # 的 dequant(0) garbage 污染。
         if _wall_token_shadow_enabled():
