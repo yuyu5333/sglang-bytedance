@@ -245,40 +245,50 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
         # [DEBUG W4A16] dump weight statistics BEFORE marlin repack so we can
         # see whether the checkpoint actually wrote into the params or whether
         # they are still at their `torch.empty` init values.
+        # Per-expert breakdown: separate routed experts (0..127) from the
+        # fused shared expert at index 128 to confirm shared-expert weights
+        # were actually loaded.
         try:
             wp = layer.w13_weight_packed.data
             ws = layer.w13_weight_scale.data
             w2p = layer.w2_weight_packed.data
             w2s = layer.w2_weight_scale.data
+            num_experts = wp.shape[0]
+            for tag, sl in (
+                ("routed[0:1]", slice(0, 1)),
+                ("routed[mid]", slice(num_experts // 2, num_experts // 2 + 1)),
+                ("last_idx", slice(num_experts - 1, num_experts)),
+            ):
+                wps = wp[sl]
+                wss = ws[sl]
+                w2ps = w2p[sl]
+                w2ss = w2s[sl]
+                logger.warning(
+                    "[DEBUG W4A16] per-expert stats tag=%s "
+                    "w13_packed nz=%.4f scale_min=%s scale_max=%s scale_mean=%s "
+                    "w2_packed nz=%.4f scale_min=%s scale_max=%s scale_mean=%s",
+                    tag,
+                    (wps != 0).float().mean().item(),
+                    wss.min().item(),
+                    wss.max().item(),
+                    wss.mean().item(),
+                    (w2ps != 0).float().mean().item(),
+                    w2ss.min().item(),
+                    w2ss.max().item(),
+                    w2ss.mean().item(),
+                )
             logger.warning(
                 "[DEBUG W4A16] pre-marlin stats "
-                "w13_weight_packed shape=%s dtype=%s min=%s max=%s nonzero_frac=%.4f "
+                "w13_weight_packed shape=%s dtype=%s nonzero_frac=%.4f "
                 "w13_weight_scale shape=%s dtype=%s min=%s max=%s mean=%s",
                 tuple(wp.shape),
                 wp.dtype,
-                int(wp.min().item()) if wp.numel() else "n/a",
-                int(wp.max().item()) if wp.numel() else "n/a",
                 (wp != 0).float().mean().item() if wp.numel() else 0.0,
                 tuple(ws.shape),
                 ws.dtype,
                 ws.min().item() if ws.numel() else "n/a",
                 ws.max().item() if ws.numel() else "n/a",
                 ws.mean().item() if ws.numel() else "n/a",
-            )
-            logger.warning(
-                "[DEBUG W4A16] pre-marlin stats "
-                "w2_weight_packed shape=%s dtype=%s min=%s max=%s nonzero_frac=%.4f "
-                "w2_weight_scale shape=%s dtype=%s min=%s max=%s mean=%s",
-                tuple(w2p.shape),
-                w2p.dtype,
-                int(w2p.min().item()) if w2p.numel() else "n/a",
-                int(w2p.max().item()) if w2p.numel() else "n/a",
-                (w2p != 0).float().mean().item() if w2p.numel() else 0.0,
-                tuple(w2s.shape),
-                w2s.dtype,
-                w2s.min().item() if w2s.numel() else "n/a",
-                w2s.max().item() if w2s.numel() else "n/a",
-                w2s.mean().item() if w2s.numel() else "n/a",
             )
         except Exception as e:
             logger.warning("[DEBUG W4A16] pre-marlin stats failed: %s", e)

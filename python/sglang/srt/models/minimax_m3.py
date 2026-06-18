@@ -1786,6 +1786,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
         debug_dbg_expert_default_loader = 0
         debug_dbg_expert_not_in_params = 0
         debug_dbg_expert_warned = 0
+        # [DEBUG W4A16] collect every ckpt key that belongs to dense layers
+        # (layers.0 / layers.1) so we can see whether the checkpoint stores
+        # them as plain ".weight" (i.e. unquantized) or as packed/scale (i.e.
+        # quantized but compressed_tensors failed to recognise the target).
+        debug_dbg_dense_ckpt_names: Set[str] = set()
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -1795,6 +1800,15 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
                 layer_id < self.model.start_layer or layer_id >= self.model.end_layer
             ):
                 continue
+
+            # [DEBUG W4A16] capture the original ckpt name for dense layers
+            # before any internal renaming so we can see what the checkpoint
+            # really stored for layer 0/1 (the layers that fell back to
+            # UnquantizedLinearMethod in the linear-scheme dispatch log).
+            if ".layers.0." in name or ".layers.1." in name:
+                # store the suffix starting at "layers." for compactness
+                idx = name.find("layers.")
+                debug_dbg_dense_ckpt_names.add(name[idx:])
 
             # MiniMax-M3 checkpoints name MoE blocks "block_sparse_moe", while
             # this implementation exposes the same module as layer.mlp to match
@@ -1935,6 +1949,16 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
         sample_suffixes = sorted(debug_dbg_seen_expert_suffixes)[:32]
         for s in sample_suffixes:
             logger.warning("[DEBUG W4A16] expert ckpt suffix sample: %s", s)
+
+        # [DEBUG W4A16] also print every distinct ckpt name from the dense
+        # layers (layer 0 and 1). This tells us whether the checkpoint stored
+        # them as plain ".weight" (=> compressed_tensors correctly identified
+        # them as unquantized) or as ".weight_packed"/".weight_scale"
+        # (=> compressed_tensors mis-classified them as unquantized while the
+        # checkpoint actually contains quantized data, which would cause the
+        # plain `param.weight` to never get filled).
+        for s in sorted(debug_dbg_dense_ckpt_names):
+            logger.warning("[DEBUG W4A16] dense ckpt name: %s", s)
 
         # Fuse main qkv_proj + sparse index_qkv_proj into one GEMM. The raw fp8
         # weight + uint8 scale are final at this point (the mxfp8 post-process

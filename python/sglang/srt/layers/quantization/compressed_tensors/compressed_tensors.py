@@ -891,16 +891,45 @@ class CompressedTensorsConfig(QuantizationConfig):
         if should_ignore_layer(
             layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
         ):
+            # [DEBUG W4A16] log layers that hit the ignore list. If dense
+            # layers (layers.0 / layers.1) are listed here, that explains why
+            # they fell back to UnquantizedLinearMethod, and the checkpoint
+            # is expected to provide plain fp16/bf16 weights for them.
+            if layer_name and (
+                ".layers.0." in layer_name or ".layers.1." in layer_name
+            ):
+                logger.warning(
+                    "[DEBUG W4A16] get_scheme_dict: layer hit ignore list "
+                    "layer_name=%s ignore=%s",
+                    layer_name,
+                    self.ignore,
+                )
             return None
 
         # Will be empty for models with only sparsity
         if self.target_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping,
-            )
+            try:
+                matched_target = find_matched_target(
+                    layer_name=layer_name,
+                    module=layer,
+                    targets=self.target_scheme_map.keys(),
+                    fused_mapping=self.packed_modules_mapping,
+                )
+            except ValueError as e:
+                # [DEBUG W4A16] a dense layer that doesn't match any target
+                # in target_scheme_map will end up here, causing the linear
+                # scheme dispatch to fall back to UnquantizedLinearMethod.
+                if layer_name and (
+                    ".layers.0." in layer_name or ".layers.1." in layer_name
+                ):
+                    logger.warning(
+                        "[DEBUG W4A16] get_scheme_dict: no matched target "
+                        "for dense layer_name=%s targets=%s err=%s",
+                        layer_name,
+                        list(self.target_scheme_map.keys()),
+                        e,
+                    )
+                raise
 
             return self.target_scheme_map[matched_target]
 
