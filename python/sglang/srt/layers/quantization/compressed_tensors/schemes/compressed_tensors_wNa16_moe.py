@@ -779,6 +779,13 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
             is_k_full=self.is_k_full,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
             workspace=layer.workspace,
+            # Forward the SwiGLU-OAI parameters so MiniMax-M3 ``swigluoai`` is
+            # computed correctly inside the marlin path. ``gemm1_alpha`` toggles
+            # the OAI activation (alpha * sigmoid + (up + 1)) over the default
+            # vanilla ``silu_and_mul``.
+            clamp_limit=self.moe_runner_config.gemm1_clamp_limit,
+            gemm1_alpha=self.moe_runner_config.gemm1_alpha,
+            activation=self.moe_runner_config.activation,
         )
 
         if _dbg_dump:
