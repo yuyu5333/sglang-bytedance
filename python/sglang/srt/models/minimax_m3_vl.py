@@ -244,6 +244,23 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         """
         from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 
+        # [DEBUG W4A16] Tracking counters/sets for end-of-load summary. These
+        # are passed by reference (closure) into _load_llm_weight via attrs.
+        self._dbg_expert_loaded = 0
+        self._dbg_expert_not_in_params = 0
+        self._dbg_expert_fell_through = 0
+        self._dbg_stacked_loaded = 0
+        self._dbg_stacked_not_in_params = 0
+        self._dbg_default_loaded = 0
+        self._dbg_default_missing = 0
+        self._dbg_seen_expert_suffixes: set = set()
+        self._dbg_shared_ckpt_names: set = set()
+        self._dbg_shared_loaded_targets: set = set()
+        self._dbg_shared_missed: list = []
+        self._dbg_dense_ckpt_names: set = set()
+        self._dbg_dense_loaded_targets: set = set()
+        self._dbg_dense_missed: list = []
+
         # ``.qkv_proj`` (with the leading dot) prevents matching e.g.
         # ``index_q_proj`` in the sparse-attention branch.
         llm_stacked_params_mapping = [
@@ -303,6 +320,49 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
 
         merge_vit_qkv_weights(vit_qkv_weights, vit_qkv_biases, params_dict)
 
+        # [DEBUG W4A16] one-shot summary so we can see, in the *real* loader
+        # path used by MiniMaxM3SparseForConditionalGeneration, where every
+        # checkpoint key was dispatched.
+        logger.warning(
+            "[DEBUG W4A16-VL] load_weights summary: "
+            "num_fused_shared_experts=%d "
+            "expert_loaded=%d expert_fell_through=%d expert_not_in_params=%d "
+            "stacked_loaded=%d stacked_not_in_params=%d "
+            "default_loaded=%d default_missing=%d "
+            "unique_expert_ckpt_suffixes=%d "
+            "shared_ckpt_seen=%d shared_loaded_targets=%d shared_missed=%d "
+            "dense_ckpt_seen=%d dense_loaded_targets=%d dense_missed=%d",
+            self.num_fused_shared_experts,
+            self._dbg_expert_loaded,
+            self._dbg_expert_fell_through,
+            self._dbg_expert_not_in_params,
+            self._dbg_stacked_loaded,
+            self._dbg_stacked_not_in_params,
+            self._dbg_default_loaded,
+            self._dbg_default_missing,
+            len(self._dbg_seen_expert_suffixes),
+            len(self._dbg_shared_ckpt_names),
+            len(self._dbg_shared_loaded_targets),
+            len(self._dbg_shared_missed),
+            len(self._dbg_dense_ckpt_names),
+            len(self._dbg_dense_loaded_targets),
+            len(self._dbg_dense_missed),
+        )
+        for s in sorted(self._dbg_seen_expert_suffixes)[:32]:
+            logger.warning("[DEBUG W4A16-VL] expert ckpt suffix sample: %s", s)
+        for s in sorted(self._dbg_shared_ckpt_names):
+            logger.warning("[DEBUG W4A16-VL] shared_experts ckpt name: %s", s)
+        for s in sorted(self._dbg_shared_loaded_targets):
+            logger.warning("[DEBUG W4A16-VL] shared_experts loaded target: %s", s)
+        for s in self._dbg_shared_missed[:32]:
+            logger.warning("[DEBUG W4A16-VL] shared_experts MISSED: %s", s)
+        for s in sorted(self._dbg_dense_ckpt_names):
+            logger.warning("[DEBUG W4A16-VL] dense ckpt name: %s", s)
+        for s in sorted(self._dbg_dense_loaded_targets):
+            logger.warning("[DEBUG W4A16-VL] dense loaded target: %s", s)
+        for s in self._dbg_dense_missed[:32]:
+            logger.warning("[DEBUG W4A16-VL] dense MISSED: %s", s)
+
         # Fuse main qkv_proj + sparse index_qkv_proj into one GEMM per sparse
         # attention layer (see MiniMaxM3.load_weights for the rationale).
         build_minimax_fused_qkv_index(self)
@@ -315,6 +375,16 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         llm_stacked_params_mapping: list,
         expert_params_mapping: list,
     ) -> None:
+        # [DEBUG W4A16-VL] capture original ckpt key for shared_experts and
+        # dense layers 0/1/2 BEFORE any rename so we can see exactly what the
+        # checkpoint stores (.weight vs .weight_packed/.weight_scale).
+        if "mlp.shared_experts" in name:
+            self._dbg_shared_ckpt_names.add(name)
+        if any(f".layers.{i}." in name for i in (0, 1, 2)) and (
+            ".mlp." in name and "experts." not in name
+        ):
+            self._dbg_dense_ckpt_names.add(name)
+
         # Older checkpoints used the M2-style ``block_sparse_moe`` naming.
         if "block_sparse_moe" in name:
             name = name.replace("block_sparse_moe", "mlp")
@@ -324,6 +394,13 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
             layer_id < self.model.start_layer or layer_id >= self.model.end_layer
         ):
             return
+
+        # [DEBUG W4A16-VL] track that the ckpt key reached dispatch (i.e. not
+        # filtered out as out-of-range PP layer).
+        is_shared_orig = "mlp.shared_experts" in name
+        is_dense_orig = any(
+            f".layers.{i}." in name for i in (0, 1, 2)
+        ) and (".mlp." in name and "experts." not in name)
 
         if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
             name = name.replace(
@@ -340,6 +417,13 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         ):
             return
 
+        # [DEBUG W4A16-VL] record any "experts." key (post-rename) so we know
+        # what suffixes the ckpt actually delivers (e.g. ".weight_packed",
+        # ".weight_scale", ".weight").
+        if "experts." in name:
+            tail = name[name.rfind("experts.") :]
+            self._dbg_seen_expert_suffixes.add(tail)
+
         for param_name, weight_name, shard_id in llm_stacked_params_mapping:
             if weight_name not in name:
                 continue
@@ -350,9 +434,23 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
             if new_name.endswith(".bias") and new_name not in params_dict:
                 continue
             if new_name not in params_dict:
+                self._dbg_stacked_not_in_params += 1
+                if is_shared_orig:
+                    self._dbg_shared_missed.append(
+                        f"stacked-not-in-params orig={name} target={new_name}"
+                    )
+                if is_dense_orig:
+                    self._dbg_dense_missed.append(
+                        f"stacked-not-in-params orig={name} target={new_name}"
+                    )
                 continue
             param = params_dict[new_name]
             param.weight_loader(param, loaded_weight, shard_id)
+            self._dbg_stacked_loaded += 1
+            if is_shared_orig:
+                self._dbg_shared_loaded_targets.add(new_name)
+            if is_dense_orig:
+                self._dbg_dense_loaded_targets.add(new_name)
             return
 
         is_expert_weight = False
@@ -363,6 +461,7 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
             is_expert_weight = True
             new_name = name.replace(weight_name, param_name)
             if new_name not in params_dict:
+                self._dbg_expert_not_in_params += 1
                 continue
             param = params_dict[new_name]
             param.weight_loader(
@@ -372,8 +471,10 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
                 shard_id=shard_id,
                 expert_id=expert_id,
             )
+            self._dbg_expert_loaded += 1
             return
         if is_expert_weight:
+            self._dbg_expert_fell_through += 1
             return
 
         if name.endswith(".bias") and name not in params_dict:
@@ -382,12 +483,26 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         if remapped is None:
             return
         if remapped not in params_dict:
+            self._dbg_default_missing += 1
+            if is_shared_orig:
+                self._dbg_shared_missed.append(
+                    f"default-not-in-params orig={name} target={remapped}"
+                )
+            if is_dense_orig:
+                self._dbg_dense_missed.append(
+                    f"default-not-in-params orig={name} target={remapped}"
+                )
             logger.warning(f"Parameter {remapped} not found in params_dict")
             return
         param = params_dict[remapped]
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
         try:
             weight_loader(param, loaded_weight)
+            self._dbg_default_loaded += 1
+            if is_shared_orig:
+                self._dbg_shared_loaded_targets.add(remapped)
+            if is_dense_orig:
+                self._dbg_dense_loaded_targets.add(remapped)
         except Exception as e:
             logger.warning(f"Error loading weight {remapped}: {e}")
 
