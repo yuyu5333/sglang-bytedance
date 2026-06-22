@@ -2,12 +2,14 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# SHA 当前与 sgl-project upstream 同 (`abb54777`)，字节级等价，便于后续按需 cherry-pick
-# packed-entry / fused-dequant 改动而不打扰 build pipeline。
+# 当前 SHA c2693a0 = upstream abb54777 + 1 commit:
+#   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
+# probe header 不参与编译（无 .cu/.cpp include 它），仅做 fork dev loop 连通性验证。
+# 之后改 inner-loop fused dequant 时只需 bump 这里的 GIT_TAG。
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG abb54777d4e08c8054c238f59889b52d4e9f0896
+    GIT_TAG c2693a070cd6a35f894529fdce658210ee70173f
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
