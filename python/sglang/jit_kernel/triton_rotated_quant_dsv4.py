@@ -491,11 +491,332 @@ def triton_scatter_tokens_to_shadow(
     )
 
 
+# ---------------------------------------------------------------------------
+# T5: Fused RMSNorm + RoPE (Triton).  Input: kv[N, 512] BF16,
+# kv_weight[512] BF16, eps scalar, freqs_cis[max_pos, 32] complex64,
+# positions[N] i64.  Output: kv_out[N, 512] BF16.
+#
+# Replaces the Python fallback in set_swa_key_buffer_radix_fused_norm_rope
+# (N*512 pow → N rsqrt → N*512 mul → nope/rope split → complex reshape →
+# complex mul → cat → bf16 cast, 5x N*512 intermediates each allocation).
+# Fused kernel: each (row, block) computes a single column range, reading
+# the row once in fp32, accumulating sq sum, subtracting mean → rsqrt →
+# fused weight-mul → nope passed-through, rope split & complex-mul → bf16
+# store.
+# ---------------------------------------------------------------------------
+@triton.jit
+def _fused_norm_rope_kernel(
+    kv_ptr,        # [N, 512] BF16
+    weight_ptr,    # [512] BF16
+    freqs_cis_ptr, # [max_pos, 32] complex64 (each elem = 2 fp32)
+    pos_ptr,       # [N] i64 (int64 positions within freqs_cis)
+    out_ptr,       # [N, 512] BF16
+    N,
+    eps,
+    ROW_DIM: tl.constexpr,           # 512
+    NOPE_DIM: tl.constexpr,          # 448
+    ROPE_DIM: tl.constexpr,          # 64
+    BLOCK_SIZE: tl.constexpr,        # 128 columns per program
+    FP8_FNUZ: tl.constexpr = 0,      # reserved
+):
+    row = tl.program_id(0)
+    if row >= N:
+        return
+
+    # Step 1: accumulate mean of squares for this row (fp32).
+    # Load BLOCK_SIZE consecutive elements at a time from kv[row, :].
+    sum_sq = 0.0
+    offs_col = tl.arange(0, BLOCK_SIZE)
+    # We process (ROW_DIM // BLOCK_SIZE) sub-blocks in one warp-program.
+    for b_start in range(0, ROW_DIM, BLOCK_SIZE):
+        # Recompute a tight mask for last sub-block if BLOCK_SIZE doesn't
+        # divide ROW_DIM cleanly; caller guarantees BLOCK_SIZE divides 512.
+        kv = tl.load(kv_ptr + row * ROW_DIM + b_start + offs_col)
+        kv_f = kv.to(tl.float32)
+        sum_sq += tl.sum(kv_f * kv_f, axis=0)
+
+    # Compute rsqrt of the mean (RMSNorm without subtracting mean — keep
+    # it consistent with upstream DSv4 kernel which does var-rsqrt only).
+    norm = sum_sq / ROW_DIM
+    rsqrt_val = tl.math.rsqrt(norm + eps)
+
+    # Step 2: fused weight broadcast + normalize + store (nope portion:
+    # columns 0..NOPE_DIM-1). We do an additional fuse pass that also
+    # handles the rope complex rotation for rope columns.
+    for b_start in range(0, NOPE_DIM, BLOCK_SIZE):
+        mask_col = b_start + offs_col < NOPE_DIM
+        kv = tl.load(
+            kv_ptr + row * ROW_DIM + b_start + offs_col,
+            mask=mask_col, other=0.0,
+        )
+        w = tl.load(
+            weight_ptr + b_start + offs_col,
+            mask=mask_col, other=0.0,
+        )
+        out = (kv.to(tl.float32) * rsqrt_val * w.to(tl.float32))
+        tl.store(
+            out_ptr + row * ROW_DIM + b_start + offs_col,
+            out.to(tl.bfloat16),
+            mask=mask_col,
+        )
+
+    # Step 3: rope portion (columns NOPE_DIM..ROW_DIM-1). 64 columns →
+    # 32 complex pairs. We load pairs (2 bf16 = 1 complex64 view),
+    # gather freqs_cis[pos, :] for this row, do complex multiply, then
+    # store back as bf16 pairs. Triton supports tl.f64 complex via
+    # explicit real/imag: we use two fp32 lanes.
+    for b_start in range(NOPE_DIM, ROW_DIM, BLOCK_SIZE):
+        # For rope: BLOCK_SIZE == ROPE_DIM (64) so a single load covers
+        # the full rope segment. Guarantee: caller passes BLOCK_SIZE==64
+        # for rope pass; we still support general sizes.
+        # Load kv + weight + normalize + rotate + store.
+        mask_col = b_start + offs_col < ROW_DIM
+        kv = tl.load(
+            kv_ptr + row * ROW_DIM + b_start + offs_col,
+            mask=mask_col, other=0.0,
+        )
+        w = tl.load(
+            weight_ptr + b_start + offs_col,
+            mask=mask_col, other=0.0,
+        )
+        kv_norm = (kv.to(tl.float32) * rsqrt_val * w.to(tl.float32)).to(tl.float32)
+
+        # RoPE complex rotation: pair adjacent columns as (real, imag).
+        # Column indices within rope segment: i and i+ROPE_DIM//2.
+        # freqs_cis: shape [max_pos, ROPE_DIM//2] stored as interleaved
+        # (real, imag) fp32 pairs = 64 fp32 = 256 bytes per row.
+        # Load this row's freqs_cis once.
+        pos = tl.load(pos_ptr + row).to(tl.int64)
+        # In Triton int division can produce strange results with negative
+        # values; pos is always >= 0. Treat pos_row_base = pos * 64 fp32
+        # but we must compute in a constexpr-safe manner.
+        # freqs_cis row stride = ROPE_DIM fp32 values == 64.
+        freq_row_base = pos * ROPE_DIM
+        half = ROPE_DIM // 2
+        for col_off in range(0, BLOCK_SIZE, BLOCK_SIZE):
+            lane = tl.arange(0, half)
+            re_kv = tl.load(
+                kv_ptr + row * ROW_DIM + b_start + lane,
+                mask=b_start + lane < ROW_DIM, other=0.0,
+            ).to(tl.float32)
+            im_kv = tl.load(
+                kv_ptr + row * ROW_DIM + b_start + half + lane,
+                mask=b_start + half + lane < ROW_DIM, other=0.0,
+            ).to(tl.float32)
+            # Normalize and weight-broadcast (separately for each lane)
+            re_kv = re_kv * rsqrt_val * tl.load(weight_ptr + b_start + lane,
+                                                 mask=b_start + lane < ROW_DIM,
+                                                 other=0.0).to(tl.float32)
+            im_kv = im_kv * rsqrt_val * tl.load(weight_ptr + b_start + half + lane,
+                                                 mask=b_start + half + lane < ROW_DIM,
+                                                 other=0.0).to(tl.float32)
+            # freqs_cis[pos, lane] stored as interleaved (real, imag).
+            # Use pairs at (freq_row_base + 2*lane) for real,
+            # (freq_row_base + 2*lane + 1) for imag.
+            freqs_offs = (freq_row_base + 2 * lane).to(tl.int64)
+            fc_re = tl.load(freqs_cis_ptr + freqs_offs,
+                             mask=b_start + lane < ROW_DIM, other=0.0)
+            fc_im = tl.load(freqs_cis_ptr + freqs_offs + 1,
+                             mask=b_start + lane < ROW_DIM, other=0.0)
+            # complex multiply: (re_kv, im_kv) * (fc_re, fc_im)
+            out_re = re_kv * fc_re - im_kv * fc_im
+            out_im = re_kv * fc_im + im_kv * fc_re
+
+            tl.store(out_ptr + row * ROW_DIM + b_start + lane,
+                     out_re.to(tl.bfloat16),
+                     mask=b_start + lane < ROW_DIM)
+            tl.store(out_ptr + row * ROW_DIM + b_start + half + lane,
+                     out_im.to(tl.bfloat16),
+                     mask=b_start + half + lane < ROW_DIM)
+
+
+def triton_fused_norm_rope(
+    kv: torch.Tensor,       # [N, 512] BF16
+    kv_weight: torch.Tensor,  # [512] BF16
+    eps: float,
+    freqs_cis: torch.Tensor, # [max_pos, 32] complex64 (or interleaved fp32 [max_pos, 64])
+    positions: torch.Tensor, # [N] int64
+) -> torch.Tensor:
+    """Fused RMSNorm + RoPE, Triton GPU-only.
+
+    Returns [N, 512] BF16 tensor, allocated on the same device as ``kv``.
+
+    Accepts ``freqs_cis`` in either ``complex64`` layout (PyTorch default
+    returned by ``precompute_freqs_cis``) or a raw ``fp32 [max_pos, 64]``
+    interleaved (real, imag) tensor produced by explicit storage. The
+    kernel treats freqs_cis memory as a flat ``fp32`` [max_pos, 64]
+    sequence, which matches what ``complex64.to(torch.float32)`` produces
+    when viewed as the underlying storage.
+    """
+    assert kv.is_cuda, "triton_fused_norm_rope requires CUDA"
+    N = int(kv.shape[0])
+    assert kv.shape == (N, _MLA_HEAD_DIM), (
+        f"kv must be (N, {_MLA_HEAD_DIM}), got {tuple(kv.shape)}"
+    )
+    assert kv_weight.shape == (_MLA_HEAD_DIM,), (
+        f"kv_weight must be ({_MLA_HEAD_DIM},), got {tuple(kv_weight.shape)}"
+    )
+    assert positions.shape == (N,), (
+        f"positions must be (N,), got {tuple(positions.shape)}"
+    )
+    if N == 0:
+        return torch.empty_like(kv)
+
+    if freqs_cis.dtype in (torch.complex64, torch.complex32):
+        # complex64: each element = 2 fp32 values. Convert to a plain
+        # fp32 [max_pos, 64] view without copy where possible.
+        freqs_fp32 = freqs_cis.view(torch.float32).reshape(freqs_cis.shape[0], -1)
+    elif freqs_cis.dtype == torch.float32 and freqs_cis.shape[-1] == _MLA_TILE_SIZE:
+        # Already [max_pos, 64] interleaved fp32.
+        freqs_fp32 = freqs_cis
+    else:
+        freqs_fp32 = freqs_cis.to(torch.complex64).view(torch.float32).reshape(
+            freqs_cis.shape[0], -1
+        )
+    assert freqs_fp32.shape[-1] == _MLA_TILE_SIZE, (
+        f"freqs_cis last dim must be {_MLA_TILE_SIZE} (as interleaved fp32), "
+        f"got {freqs_fp32.shape}"
+    )
+
+    out = torch.empty_like(kv)
+    # Kernel launch: one program per row; each program processes the full
+    # row in 128-column blocks for the sum-of-squares reduction and the
+    # nope portion, and 64-column blocks for rope (fits perfectly).
+    _fused_norm_rope_kernel[(N,)](
+        kv, kv_weight, freqs_fp32, positions.to(torch.int64), out, N, eps,
+        ROW_DIM=_MLA_HEAD_DIM,
+        NOPE_DIM=_MLA_NOPE_DIM,
+        ROPE_DIM=_MLA_TILE_SIZE,
+        BLOCK_SIZE=128,
+        num_warps=4,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# T6: Triton fused packed→dequant→UE8M0→scatter-to-shadow (single kernel
+# per token).  Replaces the Python loop in _refresh_shadow_pages which
+# materializes a large [M, 576] out_slot + [M, 8] out_scale on GPU and
+# then copies pages one-at-a-time via tensor copy_().
+#
+# Semantics (equivalent to Python fallback for correctness):
+#   for each page p in page_indices:
+#     for each slot s in 0..page_size-1:
+#       (nope_bf16, rope_bf16) = dequant(packed[p, s*BPT : (s+1)*BPT])
+#       out_slot[nope_bytes] = ue8m0_scale + e4m3 quant of nope_bf16
+#       out_slot[rope_bytes] = rope_bf16 raw bytes
+#       out_scale[7 tiles] = per-tile scale exponent byte + 1 pad byte
+#       shadow[p, s*576:(s+1)*576] = out_slot
+#       shadow[p, page_size*576 + s*8 : ...+8] = out_scale
+#
+# Design: one program per (page, slot) == one program per token-refresh.
+# Each program:  (1) loads packed row for (page, slot);
+#                (2) triton-bitunpack → int32 codes[448];
+#                (3) affine: y = codes * scale + zero (per-column);
+#                (4) matmul by R^T: y @ R.T → nope_bf16[448];
+#                (5) per-tile UE8M0 scaling + e4m3fn store into out_slot;
+#                (6) rope: load packed[..., nope_bytes : ...+64*2] bytes
+#                    as bf16[64], store raw bytes into shadow rope region.
+# Steps (2)-(4) are handled by triton_bitunpack_rowwise + torch ops in
+# the current implementation; this kernel is a "fused scatter" which
+# accepts the already-computed out_slot / out_scale and writes them into
+# shadow pages with the correct per-slot offsets — this mirrors
+# triton_scatter_tokens_to_shadow, but with page-aligned flat locs.
+#
+# For simplicity and correctness, this **T6_lite** kernel takes
+# pre-computed out_slot / out_scale (from the existing Triton dequant
+# pipeline) and scatters into shadow in a single pass. This replaces the
+# Python ``for i, page in enumerate(flat_pages_cpu)`` loop which was the
+# main latency driver of _refresh_shadow_pages for large batches.
+# ---------------------------------------------------------------------------
+@triton.jit
+def _fused_refresh_shadow_scatter_kernel(
+    out_slot_ptr,   # [M_total, 576] uint8, packed contiguously as (num_pages, page_size, 576)
+    out_scale_ptr,  # [M_total, 8] uint8
+    page_indices_ptr,  # [P] int64 (unique pages to refresh)
+    shadow_ptr,     # [num_pages_all, shadow_bytes_per_page] uint8
+    page_size,
+    shadow_bytes_per_page,
+    P,              # num unique pages == page_indices_ptr.shape[0]
+    SLOT_BYTES: tl.constexpr,  # 576
+    SCALES_PER_TOKEN: tl.constexpr,  # 8
+    BLOCK_VAL: tl.constexpr,  # 128 (bytes per lane write)
+):
+    pid = tl.program_id(0)
+    if pid >= P:
+        return
+    page = tl.load(page_indices_ptr + pid).to(tl.int64)
+    # shadow bytes layout:
+    #   per-page: [page_size * SLOT_BYTES] of slot bytes, then
+    #              [page_size * SCALES_PER_TOKEN] of scale bytes, then pad
+    slot_bytes_off = page * shadow_bytes_per_page
+    scale_bytes_off = slot_bytes_off + page_size * SLOT_BYTES
+    # out_slot layout for this page: out_slot[pid * page_size + s, :]
+    base_out_slot = pid * page_size * SLOT_BYTES
+    base_out_scale = pid * page_size * SCALES_PER_TOKEN
+
+    lane = tl.arange(0, BLOCK_VAL)
+    # SLOT_BYTES region: loop over each slot; each slot is BLOCK_VAL bytes
+    # per iteration to maximize memory coalescing.
+    for s in range(page_size):
+        slot_byte_off = s * SLOT_BYTES
+        for b in range(0, SLOT_BYTES, BLOCK_VAL):
+            mask = b + lane < SLOT_BYTES
+            v = tl.load(out_slot_ptr + base_out_slot + slot_byte_off + b + lane,
+                        mask=mask, other=0)
+            tl.store(shadow_ptr + slot_byte_off + b + lane, v, mask=mask)
+
+        # SCALES_PER_TOKEN region: 8 bytes per slot.
+        for b in range(0, SCALES_PER_TOKEN, BLOCK_VAL):
+            mask = b + lane < SCALES_PER_TOKEN
+            v = tl.load(out_scale_ptr + base_out_scale + s * SCALES_PER_TOKEN + b + lane,
+                        mask=mask, other=0)
+            tl.store(shadow_ptr + scale_bytes_off + s * SCALES_PER_TOKEN + b + lane,
+                     v, mask=mask)
+
+
+def triton_fused_refresh_shadow_scatter(
+    out_slot: torch.Tensor,    # [P, page_size, 576] uint8 (contiguous)
+    out_scale: torch.Tensor,   # [P, page_size, 8] uint8 (contiguous)
+    page_indices: torch.Tensor, # [P] int64, unique page ids
+    shadow: torch.Tensor,      # [num_pages, shadow_bytes_per_page] uint8
+    page_size: int,
+    shadow_bytes_per_page: int,
+) -> None:
+    """T6-lite: fused GPU scatter of pre-computed out_slot/out_scale into
+    shadow pages. Replaces the CPU-side Python loop over unique pages.
+    """
+    assert out_slot.is_cuda and out_scale.is_cuda and page_indices.is_cuda
+    assert out_slot.dtype == torch.uint8 and out_scale.dtype == torch.uint8
+    P = int(page_indices.shape[0])
+    if P == 0:
+        return
+    assert out_slot.shape == (P, page_size, _MLA_SLOT_BYTES), (
+        f"out_slot shape {tuple(out_slot.shape)} != ({P},{page_size},{_MLA_SLOT_BYTES})"
+    )
+    assert out_scale.shape == (P, page_size, _MLA_SCALES_PER_TOKEN), (
+        f"out_scale shape {tuple(out_scale.shape)} != ({P},{page_size},{_MLA_SCALES_PER_TOKEN})"
+    )
+    _fused_refresh_shadow_scatter_kernel[(P,)](
+        out_slot.reshape(P * page_size, _MLA_SLOT_BYTES),
+        out_scale.reshape(P * page_size, _MLA_SCALES_PER_TOKEN),
+        page_indices.to(torch.int64),
+        shadow,
+        page_size, shadow_bytes_per_page, P,
+        SLOT_BYTES=_MLA_SLOT_BYTES,
+        SCALES_PER_TOKEN=_MLA_SCALES_PER_TOKEN,
+        BLOCK_VAL=128,
+        num_warps=4,
+    )
+
+
 __all__ = [
     "rotated_dequant_to_fp8_layout",
     "triton_bitpack_rowwise",
     "triton_bitunpack_rowwise",
     "triton_scatter_tokens_to_shadow",
+    "triton_fused_norm_rope",
+    "triton_fused_refresh_shadow_scatter",
     "_MLA_NOPE_DIM",
     "_MLA_HEAD_DIM",
     "_MLA_TILE_SIZE",

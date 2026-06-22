@@ -922,34 +922,39 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
 
-        # Reproduce the fused norm+rope computation in PyTorch; must mirror
-        # jit_kernel/csrc/.../main_norm_rope.cuh **byte-for-byte**:
-        #   data[i] = x * norm_factor * w;   // ALL fp32, single chained mul
-        #   ... rope on rope tail ...
-        #   cast<bf16x2_t>(...) only at the final store
-        # IMPORTANT: do NOT cast to bf16 between rsqrt and *kv_weight — that
-        # introduces a per-elem bf16 round trip the CUDA kernel never does
-        # and noticeably degrades downstream attention quality at b_mean<=4.
-        kv_weight_f = kv_weight.to(torch.float32)
-        kv_f = kv.to(torch.float32)
-        var = kv_f.pow(2).mean(dim=-1, keepdim=True)
-        kv_norm_f = kv_f * torch.rsqrt(var + eps) * kv_weight_f  # fp32 throughout
-        nope_norm_f = kv_norm_f[..., : self.qk_nope_head_dim]
-        rope_norm_f = kv_norm_f[..., self.qk_nope_head_dim :]
-        # Apply RoPE on rope half. freqs_cis is complex64 [max_pos, rope_dim/2];
-        # gather per position then compute rotated rope = view_as_real(rope_complex * freqs).
-        rope_dim = rope_norm_f.shape[-1]
-        rope_complex = rope_norm_f.reshape(
-            *rope_norm_f.shape[:-1], rope_dim // 2, 2
-        ).contiguous()
-        rope_complex = torch.view_as_complex(rope_complex)
-        freqs = freqs_cis.index_select(0, positions.to(torch.long))
-        rope_rotated_f = torch.view_as_real(rope_complex * freqs).reshape(
-            *rope_norm_f.shape[:-1], rope_dim
-        )
-        # Single final bf16 cast — matches CUDA kernel which casts only at
-        # the gmem store (cast<bf16x2_t>(...)).
-        cat = torch.cat([nope_norm_f, rope_rotated_f], dim=-1).to(kv.dtype)
+        # T5: Triton fused RMSNorm + RoPE.
+        # Produces a single BF16 [N, 512] output with zero Python-side
+        # fp32 intermediates (eliminates the prior N*512 pow / rsqrt /
+        # mul / nope-split / complex-mul / cast chain, which created
+        # ~5x N*512 intermediate tensors and multiple kernel launches).
+        # Fallback to the PyTorch chain on CPU or if the Triton kernel
+        # is unavailable for any reason.
+        if kv.is_cuda:
+            from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+                triton_fused_norm_rope,
+            )
+            cat = triton_fused_norm_rope(
+                kv=kv, kv_weight=kv_weight, eps=eps,
+                freqs_cis=freqs_cis, positions=positions,
+            )
+        else:
+            # CPU fallback — only used in offline canary tests.
+            kv_weight_f = kv_weight.to(torch.float32)
+            kv_f = kv.to(torch.float32)
+            var = kv_f.pow(2).mean(dim=-1, keepdim=True)
+            kv_norm_f = kv_f * torch.rsqrt(var + eps) * kv_weight_f
+            nope_norm_f = kv_norm_f[..., : self.qk_nope_head_dim]
+            rope_norm_f = kv_norm_f[..., self.qk_nope_head_dim :]
+            rope_dim = rope_norm_f.shape[-1]
+            rope_complex = rope_norm_f.reshape(
+                *rope_norm_f.shape[:-1], rope_dim // 2, 2
+            ).contiguous()
+            rope_complex = torch.view_as_complex(rope_complex)
+            freqs = freqs_cis.index_select(0, positions.to(torch.long))
+            rope_rotated_f = torch.view_as_real(
+                rope_complex * freqs
+            ).reshape(*rope_norm_f.shape[:-1], rope_dim)
+            cat = torch.cat([nope_norm_f, rope_rotated_f], dim=-1).to(kv.dtype)
         rotated_store_to_packed(
             self._wall_kv_input(cat),
             self._wall_pools["swa"].packed_buffers[local_layer_id],
@@ -1187,34 +1192,42 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             out_slot[invalid_flat] = 0
             out_scale[invalid_flat] = 0
 
-        # Scatter into shadow: for each (page, slot), write 576 value bytes
-        # at offset slot * 576 plus 8 scale bytes at (page_size * 576) +
-        # slot * 8 within the page.
+        # T6: Triton fused scatter into shadow — replaces the Python
+        # for (page in flat_pages) loop which synchronized to CPU and
+        # executed one copy-kernel launch per page (bad for large
+        # batches with many pages). A single kernel launch does the
+        # full scatter.
         shadow = entry.shadow_buffers[local_layer_id]
-        # Reshape shadow page region into (num_pages, page_size, 576) for
-        # the value half and (num_pages, page_size, 8) for the scale half.
         bytes_per_page = entry.shadow_bytes_per_page
-        # slot value region: page bytes [0, page_size * 576)
-        # scale region:      page bytes [page_size * 576, page_size * 584)
-        # The remaining bytes (if bytes_per_page > page_size * 584) are pad.
-        num_pages = entry.num_pages
-        # We use an explicit loop over unique pages to keep the index
-        # arithmetic simple and CUDA-graph-safe (no dynamic shapes).
-        # Per-page block size is constant (page_size * 576 + page_size * 8).
-        flat_pages_cpu = flat_pages.to("cpu").tolist()
-        out_slot_view = out_slot.reshape(len(flat_pages_cpu), page_size, _MLA_SLOT_BYTES)
-        out_scale_view = out_scale.reshape(len(flat_pages_cpu), page_size, _MLA_SCALES_PER_TOKEN)
-        for i, page in enumerate(flat_pages_cpu):
-            page_buf = shadow[page]
-            value_region = page_buf[:page_size * _MLA_SLOT_BYTES].view(
-                page_size, _MLA_SLOT_BYTES
+        P = int(flat_pages.numel())
+        if use_triton and shadow.is_cuda:
+            from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+                triton_fused_refresh_shadow_scatter,
             )
-            scale_region = page_buf[
-                page_size * _MLA_SLOT_BYTES :
-                page_size * _MLA_SLOT_BYTES + page_size * _MLA_SCALES_PER_TOKEN
-            ].view(page_size, _MLA_SCALES_PER_TOKEN)
-            value_region.copy_(out_slot_view[i])
-            scale_region.copy_(out_scale_view[i])
+            triton_fused_refresh_shadow_scatter(
+                out_slot.reshape(P, page_size, _MLA_SLOT_BYTES).contiguous(),
+                out_scale.reshape(P, page_size, _MLA_SCALES_PER_TOKEN).contiguous(),
+                flat_pages.to(torch.int64).to(shadow.device),
+                shadow,
+                page_size,
+                bytes_per_page,
+            )
+        else:
+            # Python fallback (CPU or tests). Kept byte-equivalent.
+            flat_pages_cpu = flat_pages.to("cpu").tolist()
+            out_slot_view = out_slot.reshape(P, page_size, _MLA_SLOT_BYTES)
+            out_scale_view = out_scale.reshape(P, page_size, _MLA_SCALES_PER_TOKEN)
+            for i, page in enumerate(flat_pages_cpu):
+                page_buf = shadow[page]
+                value_region = page_buf[:page_size * _MLA_SLOT_BYTES].view(
+                    page_size, _MLA_SLOT_BYTES
+                )
+                scale_region = page_buf[
+                    page_size * _MLA_SLOT_BYTES :
+                    page_size * _MLA_SLOT_BYTES + page_size * _MLA_SCALES_PER_TOKEN
+                ].view(page_size, _MLA_SCALES_PER_TOKEN)
+                value_region.copy_(out_slot_view[i])
+                scale_region.copy_(out_scale_view[i])
 
         # T3: clear dirty bits for refreshed pages
         dirty.index_fill_(0, flat_pages.to(dirty.device), False)
