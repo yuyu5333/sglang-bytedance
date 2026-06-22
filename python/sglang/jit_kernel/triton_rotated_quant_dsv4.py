@@ -492,17 +492,14 @@ def triton_scatter_tokens_to_shadow(
 
 
 # ---------------------------------------------------------------------------
-# T5: Fused RMSNorm + RoPE (Triton).  Input: kv[N, 512] BF16,
-# kv_weight[512] BF16, eps scalar, freqs_cis[max_pos, 32] complex64,
-# positions[N] i64.  Output: kv_out[N, 512] BF16.
-#
+# T5: Fused RMSNorm + RoPE (Triton).
 # Replaces the Python fallback in set_swa_key_buffer_radix_fused_norm_rope
-# (N*512 pow → N rsqrt → N*512 mul → nope/rope split → complex reshape →
-# complex mul → cat → bf16 cast, 5x N*512 intermediates each allocation).
-# Fused kernel: each (row, block) computes a single column range, reading
-# the row once in fp32, accumulating sq sum, subtracting mean → rsqrt →
-# fused weight-mul → nope passed-through, rope split & complex-mul → bf16
-# store.
+# (N*512 pow → N rsqrt → N*512 mul → nope/rope split → complex
+# reshape → complex mul → cat → bf16, which allocates ~5x N*512
+# intermediate tensors).  Fused kernel: one program per row, single kernel
+# launch for the whole 512-dim vector, reading the row once in fp32,
+# accumulating sq sum → rsqrt → fused weight-mul → nope passthrough +
+# rope complex rotation → bf16 store.
 # ---------------------------------------------------------------------------
 @triton.jit
 def _fused_norm_rope_kernel(
@@ -525,12 +522,12 @@ def _fused_norm_rope_kernel(
 
     # Step 1: accumulate mean of squares
     sum_sq = 0.0
-    offs_col = tl.arange(0, BLOCK_SIZE)
     for b_start in range(0, ROW_DIM, BLOCK_SIZE):
-        kv = tl.load(kv_ptr + row * ROW_DIM + b_start + offs_col)
+        offs = b_start + tl.arange(0, BLOCK_SIZE)
+        mask = offs < ROW_DIM
+        kv = tl.load(kv_ptr + row * ROW_DIM + offs, mask=mask, other=0.0)
         kv_f = kv.to(tl.float32)
         sum_sq += tl.sum(kv_f * kv_f, axis=0)
-
     norm = sum_sq / ROW_DIM
     rsqrt_val = tl.math.rsqrt(norm + eps)
 
@@ -543,44 +540,28 @@ def _fused_norm_rope_kernel(
         out = kv.to(tl.float32) * rsqrt_val * w.to(tl.float32)
         tl.store(out_ptr + row * ROW_DIM + offs, out.to(tl.bfloat16), mask=mask)
 
-    # Step 3: RoPE portion: columns [NOPE_DIM, ROW_DIM), 64 columns total
-    # Each row of freqs_cis stores 32 complex pairs as 64 fp32 values:
-    # [0], [1] = (real_0, imag_0) ... [62], [63] = (real_31, imag_31)
-    # Load pos once for this row.
+    # Step 3: RoPE portion: columns [NOPE_DIM, ROW_DIM).
+    # kv rope layout: [re_0, im_0, re_1, im_1, ...] (interleaved).
+    # freqs_cis layout: [re_0, im_0, re_1, im_1, ...] (interleaved).
     pos = tl.load(pos_ptr + row).to(tl.int64)
-    rope_lane = tl.arange(0, ROPE_DIM)
-    rope_mask = rope_lane < ROPE_DIM
-    kv_rope = tl.load(kv_ptr + row * ROW_DIM + NOPE_DIM + rope_lane,
-                       mask=rope_mask, other=0.0)
-    w_rope = tl.load(weight_ptr + NOPE_DIM + rope_lane,
-                      mask=rope_mask, other=0.0)
-    kv_norm = kv_rope.to(tl.float32) * rsqrt_val * w_rope.to(tl.float32)
-
-    # Pair (re, im) for each complex half: first 32 values are re, next 32 im
-    re_lane = tl.arange(0, ROPE_HALF)
-    re_mask = re_lane < ROPE_HALF
-    re_kv = tl.load(kv_ptr + row * ROW_DIM + NOPE_DIM + re_lane,
-                       mask=re_mask, other=0.0).to(tl.float32)
-    im_kv = tl.load(kv_ptr + row * ROW_DIM + NOPE_DIM + ROPE_HALF + re_lane,
-                       mask=re_mask, other=0.0).to(tl.float32)
-    re_w = tl.load(weight_ptr + NOPE_DIM + re_lane,
-                      mask=re_mask, other=0.0).to(tl.float32)
-    im_w = tl.load(weight_ptr + NOPE_DIM + ROPE_HALF + re_lane,
-                        mask=re_mask, other=0.0).to(tl.float32)
+    i = tl.arange(0, ROPE_HALF)
+    mask = i < ROPE_HALF
+    re_offs = NOPE_DIM + 2 * i
+    im_offs = re_offs + 1
+    # Normalize + weight for each complex pair.
+    re_kv = tl.load(kv_ptr + row * ROW_DIM + re_offs, mask=mask, other=0.0).to(tl.float32)
+    im_kv = tl.load(kv_ptr + row * ROW_DIM + im_offs, mask=mask, other=0.0).to(tl.float32)
+    re_w = tl.load(weight_ptr + re_offs, mask=mask, other=0.0).to(tl.float32)
+    im_w = tl.load(weight_ptr + im_offs, mask=mask, other=0.0).to(tl.float32)
     re_kv = re_kv * rsqrt_val * re_w
     im_kv = im_kv * rsqrt_val * im_w
-
-    # freqs_cis[pos, :] stored interleaved (re, im)
-    fc_re = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * re_lane,
-                       mask=re_mask, other=0.0)
-    fc_im = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * re_lane + 1,
-                        mask=re_mask, other=0.0)
+    # Apply RoPE rotation.
+    fc_re = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * i, mask=mask, other=0.0)
+    fc_im = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * i + 1, mask=mask, other=0.0)
     out_re = re_kv * fc_re - im_kv * fc_im
     out_im = re_kv * fc_im + im_kv * fc_re
-    tl.store(out_ptr + row * ROW_DIM + NOPE_DIM + re_lane,
-             out_re.to(tl.bfloat16), mask=re_mask)
-    tl.store(out_ptr + row * ROW_DIM + NOPE_DIM + ROPE_HALF + re_lane,
-             out_im.to(tl.bfloat16), mask=re_mask)
+    tl.store(out_ptr + row * ROW_DIM + re_offs, out_re.to(tl.bfloat16), mask=mask)
+    tl.store(out_ptr + row * ROW_DIM + im_offs, out_im.to(tl.bfloat16), mask=mask)
 
 
 def triton_fused_norm_rope(
