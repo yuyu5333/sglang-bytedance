@@ -1,9 +1,12 @@
 include(FetchContent)
 
 # flash_mla
+# 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
+# SHA 当前与 sgl-project upstream 同 (`abb54777`)，字节级等价，便于后续按需 cherry-pick
+# packed-entry / fused-dequant 改动而不打扰 build pipeline。
 FetchContent_Declare(
     repo-flashmla
-    GIT_REPOSITORY https://github.com/sgl-project/FlashMLA
+    GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
     GIT_TAG abb54777d4e08c8054c238f59889b52d4e9f0896
     GIT_SHALLOW OFF
 )
