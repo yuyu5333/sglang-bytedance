@@ -508,126 +508,79 @@ def triton_scatter_tokens_to_shadow(
 def _fused_norm_rope_kernel(
     kv_ptr,        # [N, 512] BF16
     weight_ptr,    # [512] BF16
-    freqs_cis_ptr, # [max_pos, 32] complex64 (each elem = 2 fp32)
-    pos_ptr,       # [N] i64 (int64 positions within freqs_cis)
-    out_ptr,       # [N, 512] BF16
+    freqs_cis_ptr, # [max_pos, 32] complex64 -> fp32 interleaved [max_pos, 64]
+    pos_ptr,       # [N] i64
+    out_ptr,        # [N, 512] BF16
     N,
     eps,
-    ROW_DIM: tl.constexpr,           # 512
-    NOPE_DIM: tl.constexpr,          # 448
-    ROPE_DIM: tl.constexpr,          # 64
-    BLOCK_SIZE: tl.constexpr,        # 128 columns per program
-    FP8_FNUZ: tl.constexpr = 0,      # reserved
+    ROW_DIM: tl.constexpr,
+    NOPE_DIM: tl.constexpr,
+    ROPE_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    ROPE_HALF: tl.constexpr,  # ROPE_DIM // 2
 ):
     row = tl.program_id(0)
     if row >= N:
         return
 
-    # Step 1: accumulate mean of squares for this row (fp32).
-    # Load BLOCK_SIZE consecutive elements at a time from kv[row, :].
+    # Step 1: accumulate mean of squares
     sum_sq = 0.0
     offs_col = tl.arange(0, BLOCK_SIZE)
-    # We process (ROW_DIM // BLOCK_SIZE) sub-blocks in one warp-program.
     for b_start in range(0, ROW_DIM, BLOCK_SIZE):
-        # Recompute a tight mask for last sub-block if BLOCK_SIZE doesn't
-        # divide ROW_DIM cleanly; caller guarantees BLOCK_SIZE divides 512.
         kv = tl.load(kv_ptr + row * ROW_DIM + b_start + offs_col)
         kv_f = kv.to(tl.float32)
         sum_sq += tl.sum(kv_f * kv_f, axis=0)
 
-    # Compute rsqrt of the mean (RMSNorm without subtracting mean — keep
-    # it consistent with upstream DSv4 kernel which does var-rsqrt only).
     norm = sum_sq / ROW_DIM
     rsqrt_val = tl.math.rsqrt(norm + eps)
 
-    # Step 2: fused weight broadcast + normalize + store (nope portion:
-    # columns 0..NOPE_DIM-1). We do an additional fuse pass that also
-    # handles the rope complex rotation for rope columns.
+    # Step 2: NOPE portion: columns [0, NOPE_DIM)
     for b_start in range(0, NOPE_DIM, BLOCK_SIZE):
-        mask_col = b_start + offs_col < NOPE_DIM
-        kv = tl.load(
-            kv_ptr + row * ROW_DIM + b_start + offs_col,
-            mask=mask_col, other=0.0,
-        )
-        w = tl.load(
-            weight_ptr + b_start + offs_col,
-            mask=mask_col, other=0.0,
-        )
-        out = (kv.to(tl.float32) * rsqrt_val * w.to(tl.float32))
-        tl.store(
-            out_ptr + row * ROW_DIM + b_start + offs_col,
-            out.to(tl.bfloat16),
-            mask=mask_col,
-        )
+        offs = b_start + tl.arange(0, BLOCK_SIZE)
+        mask = offs < NOPE_DIM
+        kv = tl.load(kv_ptr + row * ROW_DIM + offs, mask=mask, other=0.0)
+        w = tl.load(weight_ptr + offs, mask=mask, other=0.0)
+        out = kv.to(tl.float32) * rsqrt_val * w.to(tl.float32)
+        tl.store(out_ptr + row * ROW_DIM + offs, out.to(tl.bfloat16), mask=mask)
 
-    # Step 3: rope portion (columns NOPE_DIM..ROW_DIM-1). 64 columns →
-    # 32 complex pairs. We load pairs (2 bf16 = 1 complex64 view),
-    # gather freqs_cis[pos, :] for this row, do complex multiply, then
-    # store back as bf16 pairs. Triton supports tl.f64 complex via
-    # explicit real/imag: we use two fp32 lanes.
-    for b_start in range(NOPE_DIM, ROW_DIM, BLOCK_SIZE):
-        # For rope: BLOCK_SIZE == ROPE_DIM (64) so a single load covers
-        # the full rope segment. Guarantee: caller passes BLOCK_SIZE==64
-        # for rope pass; we still support general sizes.
-        # Load kv + weight + normalize + rotate + store.
-        mask_col = b_start + offs_col < ROW_DIM
-        kv = tl.load(
-            kv_ptr + row * ROW_DIM + b_start + offs_col,
-            mask=mask_col, other=0.0,
-        )
-        w = tl.load(
-            weight_ptr + b_start + offs_col,
-            mask=mask_col, other=0.0,
-        )
-        kv_norm = (kv.to(tl.float32) * rsqrt_val * w.to(tl.float32)).to(tl.float32)
+    # Step 3: RoPE portion: columns [NOPE_DIM, ROW_DIM), 64 columns total
+    # Each row of freqs_cis stores 32 complex pairs as 64 fp32 values:
+    # [0], [1] = (real_0, imag_0) ... [62], [63] = (real_31, imag_31)
+    # Load pos once for this row.
+    pos = tl.load(pos_ptr + row).to(tl.int64)
+    rope_lane = tl.arange(0, ROPE_DIM)
+    rope_mask = rope_lane < ROPE_DIM
+    kv_rope = tl.load(kv_ptr + row * ROW_DIM + NOPE_DIM + rope_lane,
+                       mask=rope_mask, other=0.0)
+    w_rope = tl.load(weight_ptr + NOPE_DIM + rope_lane,
+                      mask=rope_mask, other=0.0)
+    kv_norm = kv_rope.to(tl.float32) * rsqrt_val * w_rope.to(tl.float32)
 
-        # RoPE complex rotation: pair adjacent columns as (real, imag).
-        # Column indices within rope segment: i and i+ROPE_DIM//2.
-        # freqs_cis: shape [max_pos, ROPE_DIM//2] stored as interleaved
-        # (real, imag) fp32 pairs = 64 fp32 = 256 bytes per row.
-        # Load this row's freqs_cis once.
-        pos = tl.load(pos_ptr + row).to(tl.int64)
-        # In Triton int division can produce strange results with negative
-        # values; pos is always >= 0. Treat pos_row_base = pos * 64 fp32
-        # but we must compute in a constexpr-safe manner.
-        # freqs_cis row stride = ROPE_DIM fp32 values == 64.
-        freq_row_base = pos * ROPE_DIM
-        half = ROPE_DIM // 2
-        for col_off in range(0, BLOCK_SIZE, BLOCK_SIZE):
-            lane = tl.arange(0, half)
-            re_kv = tl.load(
-                kv_ptr + row * ROW_DIM + b_start + lane,
-                mask=b_start + lane < ROW_DIM, other=0.0,
-            ).to(tl.float32)
-            im_kv = tl.load(
-                kv_ptr + row * ROW_DIM + b_start + half + lane,
-                mask=b_start + half + lane < ROW_DIM, other=0.0,
-            ).to(tl.float32)
-            # Normalize and weight-broadcast (separately for each lane)
-            re_kv = re_kv * rsqrt_val * tl.load(weight_ptr + b_start + lane,
-                                                 mask=b_start + lane < ROW_DIM,
-                                                 other=0.0).to(tl.float32)
-            im_kv = im_kv * rsqrt_val * tl.load(weight_ptr + b_start + half + lane,
-                                                 mask=b_start + half + lane < ROW_DIM,
-                                                 other=0.0).to(tl.float32)
-            # freqs_cis[pos, lane] stored as interleaved (real, imag).
-            # Use pairs at (freq_row_base + 2*lane) for real,
-            # (freq_row_base + 2*lane + 1) for imag.
-            freqs_offs = (freq_row_base + 2 * lane).to(tl.int64)
-            fc_re = tl.load(freqs_cis_ptr + freqs_offs,
-                             mask=b_start + lane < ROW_DIM, other=0.0)
-            fc_im = tl.load(freqs_cis_ptr + freqs_offs + 1,
-                             mask=b_start + lane < ROW_DIM, other=0.0)
-            # complex multiply: (re_kv, im_kv) * (fc_re, fc_im)
-            out_re = re_kv * fc_re - im_kv * fc_im
-            out_im = re_kv * fc_im + im_kv * fc_re
+    # Pair (re, im) for each complex half: first 32 values are re, next 32 im
+    re_lane = tl.arange(0, ROPE_HALF)
+    re_mask = re_lane < ROPE_HALF
+    re_kv = tl.load(kv_ptr + row * ROW_DIM + NOPE_DIM + re_lane,
+                       mask=re_mask, other=0.0).to(tl.float32)
+    im_kv = tl.load(kv_ptr + row * ROW_DIM + NOPE_DIM + ROPE_HALF + re_lane,
+                       mask=re_mask, other=0.0).to(tl.float32)
+    re_w = tl.load(weight_ptr + NOPE_DIM + re_lane,
+                      mask=re_mask, other=0.0).to(tl.float32)
+    im_w = tl.load(weight_ptr + NOPE_DIM + ROPE_HALF + re_lane,
+                        mask=re_mask, other=0.0).to(tl.float32)
+    re_kv = re_kv * rsqrt_val * re_w
+    im_kv = im_kv * rsqrt_val * im_w
 
-            tl.store(out_ptr + row * ROW_DIM + b_start + lane,
-                     out_re.to(tl.bfloat16),
-                     mask=b_start + lane < ROW_DIM)
-            tl.store(out_ptr + row * ROW_DIM + b_start + half + lane,
-                     out_im.to(tl.bfloat16),
-                     mask=b_start + half + lane < ROW_DIM)
+    # freqs_cis[pos, :] stored interleaved (re, im)
+    fc_re = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * re_lane,
+                       mask=re_mask, other=0.0)
+    fc_im = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * re_lane + 1,
+                        mask=re_mask, other=0.0)
+    out_re = re_kv * fc_re - im_kv * fc_im
+    out_im = re_kv * fc_im + im_kv * fc_re
+    tl.store(out_ptr + row * ROW_DIM + NOPE_DIM + re_lane,
+             out_re.to(tl.bfloat16), mask=re_mask)
+    tl.store(out_ptr + row * ROW_DIM + NOPE_DIM + ROPE_HALF + re_lane,
+             out_im.to(tl.bfloat16), mask=re_mask)
 
 
 def triton_fused_norm_rope(
@@ -681,13 +634,14 @@ def triton_fused_norm_rope(
     out = torch.empty_like(kv)
     # Kernel launch: one program per row; each program processes the full
     # row in 128-column blocks for the sum-of-squares reduction and the
-    # nope portion, and 64-column blocks for rope (fits perfectly).
+    # nope portion, and a single 64-wide load for rope.
     _fused_norm_rope_kernel[(N,)](
         kv, kv_weight, freqs_fp32, positions.to(torch.int64), out, N, eps,
         ROW_DIM=_MLA_HEAD_DIM,
         NOPE_DIM=_MLA_NOPE_DIM,
         ROPE_DIM=_MLA_TILE_SIZE,
         BLOCK_SIZE=128,
+        ROPE_HALF=_MLA_TILE_SIZE // 2,
         num_warps=4,
     )
     return out
