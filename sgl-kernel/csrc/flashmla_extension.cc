@@ -60,7 +60,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   // op takes no tensor args, so PyTorch's BackendSelect dispatcher can't
   // route it to a CPU/CUDA backend impl.
   m.def("flashmla_fork_probe() -> int");
-  m.impl("flashmla_fork_probe", torch::kCompositeExplicitAutograd, &flashmla_fork_probe);
+  m.impl("flashmla_fork_probe", c10::DispatchKey::CompositeExplicitAutograd, &flashmla_fork_probe);
 
   // M3.c.4 stage-1 packed_fp8 entry scaffold. nullptr fallback (4 占位 tensor
   // 全为 None) 直通 dense_fp8 kernel，保证 bit-exact；任一非 None 报错保留给
