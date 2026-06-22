@@ -699,7 +699,7 @@ def _fused_refresh_shadow_scatter_kernel(
             mask = b + lane < SLOT_BYTES
             v = tl.load(out_slot_ptr + base_out_slot + slot_byte_off + b + lane,
                         mask=mask, other=0)
-            tl.store(shadow_ptr + slot_byte_off + b + lane, v, mask=mask)
+            tl.store(shadow_ptr + slot_bytes_off + slot_byte_off + b + lane, v, mask=mask)
 
         # SCALES_PER_TOKEN region: 8 bytes per slot.
         for b in range(0, SCALES_PER_TOKEN, BLOCK_VAL):
