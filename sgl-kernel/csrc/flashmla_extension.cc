@@ -56,8 +56,11 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   // (currently 20260622). Used by Python regression tests to assert that
   // cmake FetchContent pulled the fork SHA we expect and the new TU was
   // linked into flashmla_ops.
+  // Registered as CompositeExplicitAutograd (backend-agnostic) because the
+  // op takes no tensor args, so PyTorch's BackendSelect dispatcher can't
+  // route it to a CPU/CUDA backend impl.
   m.def("flashmla_fork_probe() -> int");
-  m.impl("flashmla_fork_probe", torch::kCPU, &flashmla_fork_probe);
+  m.impl("flashmla_fork_probe", torch::kCompositeExplicitAutograd, &flashmla_fork_probe);
 }
 
 REGISTER_EXTENSION(flashmla_ops)
