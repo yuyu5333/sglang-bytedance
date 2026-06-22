@@ -50,6 +50,14 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "softmax_scale, bool is_causal, Tensor tile_scheduler_metadata, Tensor num_splits, Tensor? descale_q, Tensor? "
       "descale_k) -> Tensor[]");
   m.impl("fwd_kvcache_mla_fp8", torch::kCUDA, &fwd_kvcache_mla_fp8);
+
+  // FlashMLA fork (kv2bit-dev) end-to-end dev loop probe.
+  // Returns the constexpr int64 banner baked into the fork side _fork_banner.h
+  // (currently 20260622). Used by Python regression tests to assert that
+  // cmake FetchContent pulled the fork SHA we expect and the new TU was
+  // linked into flashmla_ops.
+  m.def("flashmla_fork_probe() -> int");
+  m.impl("flashmla_fork_probe", torch::kCPU, &flashmla_fork_probe);
 }
 
 REGISTER_EXTENSION(flashmla_ops)

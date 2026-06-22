@@ -2,14 +2,18 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA c2693a0 = upstream abb54777 + 1 commit:
+# 当前 SHA b8a02f0 = upstream abb54777 + 2 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
-# probe header 不参与编译（无 .cu/.cpp include 它），仅做 fork dev loop 连通性验证。
-# 之后改 inner-loop fused dequant 时只需 bump 这里的 GIT_TAG。
+#   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
+# 第二个 commit 真正引入翻译单元 dense_fp8_fork_probe.cpp，下面 FlashMLA_SOURCES
+# 把它加进 flashmla_ops MODULE 编译；ops.h / extension.cc 注册 op
+# `flashmla_fork_probe() -> int`，Python 端可断言返回 20260622，
+# 用以验证 fork dev loop (edit fork -> push -> bump GIT_TAG -> 容器 rebuild)
+# 真的端到端通了；下一刀（packed_fp8 fused dequant inner-loop）复用同一条链路。
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG c2693a070cd6a35f894529fdce658210ee70173f
+    GIT_TAG b8a02f00504e0e23f45ee3c6ba6e0d967e53d56d
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
@@ -137,6 +141,9 @@ set(FlashMLA_SOURCES
     ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/dense_fp8_python_api.cpp
     ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/flash_fwd_mla_fp8_sm90.cu
     ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/flash_fwd_mla_metadata.cu
+
+    # Fork dev loop probe TU (kv2bit-dev): exports flashmla_fork_probe() -> int64.
+    ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/dense_fp8_fork_probe.cpp
 )
 
 Python_add_library(flashmla_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${FlashMLA_SOURCES})

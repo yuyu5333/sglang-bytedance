@@ -849,3 +849,7 @@ std::vector<at::Tensor> fwd_kvcache_mla_fp8(
 
 std::vector<at::Tensor> get_mla_decoding_metadata_dense_fp8(
     at::Tensor& seqlens_k, const int64_t num_heads_per_head_k, const int64_t num_heads_k);
+
+// FlashMLA fork (yuyu5333/FlashMLA @ kv2bit-dev) link probe.
+// Implemented in csrc/extension/sm90/dense_fp8/dense_fp8_fork_probe.cpp inside fork.
+int64_t flashmla_fork_probe();
