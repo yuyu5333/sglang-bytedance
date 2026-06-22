@@ -61,6 +61,16 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   // route it to a CPU/CUDA backend impl.
   m.def("flashmla_fork_probe() -> int");
   m.impl("flashmla_fork_probe", torch::kCompositeExplicitAutograd, &flashmla_fork_probe);
+
+  // M3.c.4 stage-1 packed_fp8 entry scaffold. nullptr fallback (4 占位 tensor
+  // 全为 None) 直通 dense_fp8 kernel，保证 bit-exact；任一非 None 报错保留给
+  // 下一刀 fused-dequant inner-loop。
+  m.def(
+      "fwd_kvcache_mla_packed_fp8(Tensor q, Tensor kcache, int head_size_v, Tensor seqlens_k, Tensor block_table, "
+      "float softmax_scale, bool is_causal, Tensor tile_scheduler_metadata, Tensor num_splits, "
+      "Tensor? descale_q, Tensor? descale_k, "
+      "Tensor? packed_kcache, Tensor? scale_kcache, Tensor? R_matrix, Tensor? zero_point) -> Tensor[]");
+  m.impl("fwd_kvcache_mla_packed_fp8", torch::kCUDA, &fwd_kvcache_mla_packed_fp8);
 }
 
 REGISTER_EXTENSION(flashmla_ops)

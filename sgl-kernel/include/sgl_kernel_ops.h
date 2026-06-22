@@ -853,3 +853,24 @@ std::vector<at::Tensor> get_mla_decoding_metadata_dense_fp8(
 // FlashMLA fork (yuyu5333/FlashMLA @ kv2bit-dev) link probe.
 // Implemented in csrc/extension/sm90/dense_fp8/dense_fp8_fork_probe.cpp inside fork.
 int64_t flashmla_fork_probe();
+
+// FlashMLA fork packed_fp8 entry scaffold (M3.c.4 stage-1).
+// Implemented in csrc/extension/sm90/dense_fp8/dense_fp8_packed_entry.cpp inside fork.
+// 4 占位 tensor (packed_kcache / scale_kcache / R_matrix / zero_point) 全为 None
+// 时 nullptr fallback 直通 dense_fp8 kernel，保证 bit-exact；任一非 None 报错。
+std::vector<at::Tensor> fwd_kvcache_mla_packed_fp8(
+    at::Tensor& q,
+    const at::Tensor& kcache,
+    const int64_t head_size_v,
+    const at::Tensor& seqlens_k,
+    const at::Tensor& block_table,
+    const double softmax_scale,
+    bool is_causal,
+    const at::Tensor& tile_scheduler_metadata,
+    const at::Tensor& num_splits,
+    const std::optional<at::Tensor>& descale_q,
+    const std::optional<at::Tensor>& descale_k,
+    const std::optional<at::Tensor>& packed_kcache,
+    const std::optional<at::Tensor>& scale_kcache,
+    const std::optional<at::Tensor>& R_matrix,
+    const std::optional<at::Tensor>& zero_point);

@@ -2,18 +2,21 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA b8a02f0 = upstream abb54777 + 2 commits:
+# 当前 SHA a121479 = upstream abb54777 + 3 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
-# 第二个 commit 真正引入翻译单元 dense_fp8_fork_probe.cpp，下面 FlashMLA_SOURCES
-# 把它加进 flashmla_ops MODULE 编译；ops.h / extension.cc 注册 op
-# `flashmla_fork_probe() -> int`，Python 端可断言返回 20260622，
-# 用以验证 fork dev loop (edit fork -> push -> bump GIT_TAG -> 容器 rebuild)
-# 真的端到端通了；下一刀（packed_fp8 fused dequant inner-loop）复用同一条链路。
+#   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
+# 第 2 个 commit 引入 probe TU；第 3 个 commit 引入 packed_fp8 entry scaffold
+# fwd_kvcache_mla_packed_fp8（4 占位 tensor 全 None -> 直通 dense_fp8 kernel）。
+# 下面 FlashMLA_SOURCES 把它们都加进 flashmla_ops MODULE 编译；
+# ops.h / extension.cc 注册对应 op，Python 端可断言：
+#   * flashmla_fork_probe() -> 20260622  (fork dev loop 通)
+#   * fwd_kvcache_mla_packed_fp8(..., None×4) bit-exact == fwd_kvcache_mla_fp8(...)
+# 下一刀（fused-dequant inner-loop）复用同一条链路。
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG b8a02f00504e0e23f45ee3c6ba6e0d967e53d56d
+    GIT_TAG a12147925defb50d13321d898d4a5b9171cd5180
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
@@ -144,6 +147,10 @@ set(FlashMLA_SOURCES
 
     # Fork dev loop probe TU (kv2bit-dev): exports flashmla_fork_probe() -> int64.
     ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/dense_fp8_fork_probe.cpp
+
+    # Packed_fp8 entry scaffold (kv2bit-dev): exports fwd_kvcache_mla_packed_fp8.
+    # nullptr fallback (4 占位 tensor 全 None) 直通 dense_fp8 kernel (bit-exact).
+    ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/dense_fp8_packed_entry.cpp
 )
 
 Python_add_library(flashmla_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${FlashMLA_SOURCES})
