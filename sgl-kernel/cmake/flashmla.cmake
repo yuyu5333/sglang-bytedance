@@ -10,6 +10,7 @@ include(FetchContent)
 #   d5e7b73 [flashmla-kv2bit] M3.c.4 stage-2 contract: kernel-side insertion-point doc + banner bump
 #   d3bd701 [flashmla-kv2bit] fix TypeMeta build error in packed entry + extend params to 6 args
 #   2956de8 [flashmla-kv2bit] S2-S2: real fused dequant in warp group 1
+#   e98e0da [flashmla-kv2bit] fix: bpd.data() -> bpd.data_ptr() in packed entry
 # S2-S2 delta:
 #   * flash_fwd_mla_kernel.h: warp group 1 KV-load path replaced with real
 #     fused dequant — bit-unpack (atomicOr) + affine + R@x + FP8 convert
@@ -23,7 +24,7 @@ include(FetchContent)
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 2956de8d566536dec912e209add57f807b409cde
+    GIT_TAG e98e0da8803c416c17cfa9a4f439c419963c6223
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
