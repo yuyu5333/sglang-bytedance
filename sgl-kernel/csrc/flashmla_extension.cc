@@ -69,7 +69,8 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "fwd_kvcache_mla_packed_fp8(Tensor q, Tensor kcache, int head_size_v, Tensor seqlens_k, Tensor block_table, "
       "float softmax_scale, bool is_causal, Tensor tile_scheduler_metadata, Tensor num_splits, "
       "Tensor? descale_q, Tensor? descale_k, "
-      "Tensor? packed_kcache, Tensor? scale_kcache, Tensor? R_matrix, Tensor? zero_point) -> Tensor[]");
+      "Tensor? packed_kcache, Tensor? scale_kcache, Tensor? R_matrix, Tensor? zero_point, "
+      "Tensor? dim_of_bit, Tensor? bitpos_in_dim) -> Tensor[]");
   m.impl("fwd_kvcache_mla_packed_fp8", torch::kCUDA, &fwd_kvcache_mla_packed_fp8);
 }
 

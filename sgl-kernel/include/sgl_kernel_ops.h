@@ -854,10 +854,9 @@ std::vector<at::Tensor> get_mla_decoding_metadata_dense_fp8(
 // Implemented in csrc/extension/sm90/dense_fp8/dense_fp8_fork_probe.cpp inside fork.
 int64_t flashmla_fork_probe();
 
-// FlashMLA fork packed_fp8 entry scaffold (M3.c.4 stage-1).
+// FlashMLA fork packed_fp8 entry (M3.c.4).
 // Implemented in csrc/extension/sm90/dense_fp8/dense_fp8_packed_entry.cpp inside fork.
-// 4 占位 tensor (packed_kcache / scale_kcache / R_matrix / zero_point) 全为 None
-// 时 nullptr fallback 直通 dense_fp8 kernel，保证 bit-exact；任一非 None 报错。
+// 6 占位 tensor 全为 None 时 nullptr fallback 直通 dense_fp8 kernel，保证 bit-exact。
 std::vector<at::Tensor> fwd_kvcache_mla_packed_fp8(
     at::Tensor& q,
     const at::Tensor& kcache,
@@ -873,4 +872,6 @@ std::vector<at::Tensor> fwd_kvcache_mla_packed_fp8(
     const std::optional<at::Tensor>& packed_kcache,
     const std::optional<at::Tensor>& scale_kcache,
     const std::optional<at::Tensor>& R_matrix,
-    const std::optional<at::Tensor>& zero_point);
+    const std::optional<at::Tensor>& zero_point,
+    const std::optional<at::Tensor>& dim_of_bit,
+    const std::optional<at::Tensor>& bitpos_in_dim);
