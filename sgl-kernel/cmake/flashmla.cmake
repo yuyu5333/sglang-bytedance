@@ -2,12 +2,13 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA 6003f52 = upstream abb54777 + 4 commits:
+# 当前 SHA d5e7b73 = upstream abb54777 + 5 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
 #   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
 #   6003f52 [flashmla-kv2bit] M3.c.4 stage-1: wire 4 packed tensors into DecodingParams_fp8
-# stage-1 commit:
+#   d5e7b73 [flashmla-kv2bit] M3.c.4 stage-2 contract: kernel-side insertion-point doc + banner bump
+# stage-1 + stage-2-contract delta:
 #   * flash_mla.h: extend DecodingParams_fp8 with packed_kcache_ptr /
 #     scale_kcache_ptr / R_matrix_ptr / zero_point_ptr (+ stride / meta)
 #     all defaulting to nullptr / 0 so the pre-stage-1 dense_fp8 path is
@@ -17,17 +18,22 @@ include(FetchContent)
 #     dtype / contiguity, installs ptrs into params, then launches the
 #     same dense_fp8 kernel (kernel does NOT yet read packed_* fields,
 #     so bit-exact == dense_fp8); mixed input is a hard TORCH_CHECK fail.
-#   * _fork_banner.h: kForkBanner bumped 20260622 -> 20260623.
+#   * flash_fwd_mla_kernel.h: in-kernel Stage-2 INSERTION CONTRACT
+#     comment block (~70 lines) at the warp-group-1 KV-load path,
+#     defining exactly what the next device-side commit must do (INT-N
+#     unpack + R@x + ×scale+zero + FP8 + concat rope). Zero runtime
+#     change — kernel still reads dense gK unconditionally.
+#   * _fork_banner.h: kForkBanner 20260623 -> 20260624.
 # Python regression tests should assert:
-#   * flashmla_fork_probe() == 20260623            (fork dev loop 通)
+#   * flashmla_fork_probe() == 20260624            (fork dev loop 通)
 #   * fwd_kvcache_mla_packed_fp8(..., None×4)      bit-exact == fwd_kvcache_mla_fp8
 #   * fwd_kvcache_mla_packed_fp8(..., tensors×4)   bit-exact == fwd_kvcache_mla_fp8
-# 下一刀（fused-dequant inner-loop）复用同一条链路：只需改 kernel 端读
-# DecodingParams_fp8 的 packed_* 字段，host 端 wiring 已就绪。
+# 下一刀（fused-dequant inner-loop）替换 INSERTION CONTRACT 注释块为真实
+# CuTe device code；host 端 wiring 已就绪，无需再改 host entry。
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 6003f52142cf54a33cd57bca0a39bc154b82194c
+    GIT_TAG d5e7b734c00879a3933cc60e4ec4cf323bb240c2
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
