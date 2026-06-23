@@ -2,21 +2,32 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA a121479 = upstream abb54777 + 3 commits:
+# 当前 SHA 6003f52 = upstream abb54777 + 4 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
 #   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
-# 第 2 个 commit 引入 probe TU；第 3 个 commit 引入 packed_fp8 entry scaffold
-# fwd_kvcache_mla_packed_fp8（4 占位 tensor 全 None -> 直通 dense_fp8 kernel）。
-# 下面 FlashMLA_SOURCES 把它们都加进 flashmla_ops MODULE 编译；
-# ops.h / extension.cc 注册对应 op，Python 端可断言：
-#   * flashmla_fork_probe() -> 20260622  (fork dev loop 通)
-#   * fwd_kvcache_mla_packed_fp8(..., None×4) bit-exact == fwd_kvcache_mla_fp8(...)
-# 下一刀（fused-dequant inner-loop）复用同一条链路。
+#   6003f52 [flashmla-kv2bit] M3.c.4 stage-1: wire 4 packed tensors into DecodingParams_fp8
+# stage-1 commit:
+#   * flash_mla.h: extend DecodingParams_fp8 with packed_kcache_ptr /
+#     scale_kcache_ptr / R_matrix_ptr / zero_point_ptr (+ stride / meta)
+#     all defaulting to nullptr / 0 so the pre-stage-1 dense_fp8 path is
+#     byte-identical.
+#   * dense_fp8_packed_entry.cpp: full host wiring — all-4-None directly
+#     calls dense_fp8 (legacy fallback); all-4 non-None validates shape /
+#     dtype / contiguity, installs ptrs into params, then launches the
+#     same dense_fp8 kernel (kernel does NOT yet read packed_* fields,
+#     so bit-exact == dense_fp8); mixed input is a hard TORCH_CHECK fail.
+#   * _fork_banner.h: kForkBanner bumped 20260622 -> 20260623.
+# Python regression tests should assert:
+#   * flashmla_fork_probe() == 20260623            (fork dev loop 通)
+#   * fwd_kvcache_mla_packed_fp8(..., None×4)      bit-exact == fwd_kvcache_mla_fp8
+#   * fwd_kvcache_mla_packed_fp8(..., tensors×4)   bit-exact == fwd_kvcache_mla_fp8
+# 下一刀（fused-dequant inner-loop）复用同一条链路：只需改 kernel 端读
+# DecodingParams_fp8 的 packed_* 字段，host 端 wiring 已就绪。
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG a12147925defb50d13321d898d4a5b9171cd5180
+    GIT_TAG 6003f52142cf54a33cd57bca0a39bc154b82194c
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
