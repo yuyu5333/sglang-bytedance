@@ -2,38 +2,28 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA d5e7b73 = upstream abb54777 + 5 commits:
+# 当前 SHA 2956de8 = upstream abb54777 + 7 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
 #   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
 #   6003f52 [flashmla-kv2bit] M3.c.4 stage-1: wire 4 packed tensors into DecodingParams_fp8
 #   d5e7b73 [flashmla-kv2bit] M3.c.4 stage-2 contract: kernel-side insertion-point doc + banner bump
-# stage-1 + stage-2-contract delta:
-#   * flash_mla.h: extend DecodingParams_fp8 with packed_kcache_ptr /
-#     scale_kcache_ptr / R_matrix_ptr / zero_point_ptr (+ stride / meta)
-#     all defaulting to nullptr / 0 so the pre-stage-1 dense_fp8 path is
-#     byte-identical.
-#   * dense_fp8_packed_entry.cpp: full host wiring — all-4-None directly
-#     calls dense_fp8 (legacy fallback); all-4 non-None validates shape /
-#     dtype / contiguity, installs ptrs into params, then launches the
-#     same dense_fp8 kernel (kernel does NOT yet read packed_* fields,
-#     so bit-exact == dense_fp8); mixed input is a hard TORCH_CHECK fail.
-#   * flash_fwd_mla_kernel.h: in-kernel Stage-2 INSERTION CONTRACT
-#     comment block (~70 lines) at the warp-group-1 KV-load path,
-#     defining exactly what the next device-side commit must do (INT-N
-#     unpack + R@x + ×scale+zero + FP8 + concat rope). Zero runtime
-#     change — kernel still reads dense gK unconditionally.
-#   * _fork_banner.h: kForkBanner 20260623 -> 20260624.
-# Python regression tests should assert:
-#   * flashmla_fork_probe() == 20260624            (fork dev loop 通)
-#   * fwd_kvcache_mla_packed_fp8(..., None×4)      bit-exact == fwd_kvcache_mla_fp8
-#   * fwd_kvcache_mla_packed_fp8(..., tensors×4)   bit-exact == fwd_kvcache_mla_fp8
-# 下一刀（fused-dequant inner-loop）替换 INSERTION CONTRACT 注释块为真实
-# CuTe device code；host 端 wiring 已就绪，无需再改 host entry。
+#   d3bd701 [flashmla-kv2bit] fix TypeMeta build error in packed entry + extend params to 6 args
+#   2956de8 [flashmla-kv2bit] S2-S2: real fused dequant in warp group 1
+# S2-S2 delta:
+#   * flash_fwd_mla_kernel.h: warp group 1 KV-load path replaced with real
+#     fused dequant — bit-unpack (atomicOr) + affine + R@x + FP8 convert
+#     + rope BF16→FP8, written to sK via dense smem staging buffer
+#   * flash_mla.h: DecodingParams_fp8 extended with dim_of_bit_ptr /
+#     bitpos_in_dim_ptr / row_bits
+#   * dense_fp8_packed_entry.cpp: host entry extended to 6 packed args
+#   * SharedStorageMLA: added smem_k_dense_nope (64 x 512 FP8 staging)
+#   * _fork_banner.h: kForkBanner 20260624 -> 20260625
+# Dense path unchanged (bit-exact).
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG d3bd701b418eb9c6b7bc9b86937ec54f57d0e446
+    GIT_TAG 2956de8d566536dec912e209add57f807b409cde
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
