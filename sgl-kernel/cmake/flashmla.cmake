@@ -2,7 +2,7 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA e207047 = upstream abb54777 + 9 commits:
+# 当前 SHA 8f33b14 = upstream abb54777 + 12 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
 #   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
@@ -13,6 +13,9 @@ include(FetchContent)
 #   e98e0da [flashmla-kv2bit] fix: bpd.data() -> bpd.data_ptr() in packed entry
 #   f1c8e0d [flashmla-kv2bit] (prior baseline)
 #   e207047 [flashmla-kv2bit] sparse_attn_decode_interface Stage-1a: 6 packed-FP8 optional args wiring
+#   3d1126d [flashmla-kv2bit] (rolled back)
+#   996c900 [flashmla-kv2bit] (rolled back)
+#   8f33b14 [flashmla-kv2bit] sparse_decode_fwd: const-ref + py::arg/py::none() defaults
 # Stage-1a delta (sparse-path counterpart of dense_fp8 path):
 #   * csrc/params.h: SparseAttnDecodeParams extended with 6 packed
 #     pointer fields (default nullptr) + packed_kv_block_stride /
@@ -22,6 +25,12 @@ include(FetchContent)
 #     all-non-None mode select; shape/dtype validation; params field
 #     write-back before impl->run(). sparse sm90/sm100 kernels still
 #     ignore packed fields → all-None is byte-identical to before.
+#     8f33b14 fix: tile_scheduler_metadata/num_splits switched to
+#     const-ref + local mutable copy so pybind11 std::optional caster
+#     correctly accepts Python None on torch 2.9.1+cu129.
+#   * csrc/api/api.cpp: m.def(sparse_decode_fwd) annotated with
+#     py::arg + py::none() defaults for all 13 optional kwargs to
+#     make None-acceptance contract explicit at registration time.
 #   * flash_mla/flash_mla_interface.py: flash_mla_with_kvcache adds 6
 #     kwargs (default None), sparse branch passes them through to
 #     flash_mla_cuda.sparse_decode_fwd.
@@ -30,7 +39,7 @@ include(FetchContent)
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG e207047bb4eb59edbe7f14071d223580569e3c83
+    GIT_TAG 8f33b145b92fb0cd06bf848869ea560d1cf7a668
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
