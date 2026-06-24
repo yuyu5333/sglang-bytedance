@@ -2,7 +2,7 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA 2956de8 = upstream abb54777 + 7 commits:
+# 当前 SHA e207047 = upstream abb54777 + 9 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
 #   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
@@ -11,20 +11,26 @@ include(FetchContent)
 #   d3bd701 [flashmla-kv2bit] fix TypeMeta build error in packed entry + extend params to 6 args
 #   2956de8 [flashmla-kv2bit] S2-S2: real fused dequant in warp group 1
 #   e98e0da [flashmla-kv2bit] fix: bpd.data() -> bpd.data_ptr() in packed entry
-# S2-S2 delta:
-#   * flash_fwd_mla_kernel.h: warp group 1 KV-load path replaced with real
-#     fused dequant — bit-unpack (atomicOr) + affine + R@x + FP8 convert
-#     + rope BF16→FP8, written to sK via dense smem staging buffer
-#   * flash_mla.h: DecodingParams_fp8 extended with dim_of_bit_ptr /
-#     bitpos_in_dim_ptr / row_bits
-#   * dense_fp8_packed_entry.cpp: host entry extended to 6 packed args
-#   * SharedStorageMLA: added smem_k_dense_nope (64 x 512 FP8 staging)
-#   * _fork_banner.h: kForkBanner 20260624 -> 20260625
-# Dense path unchanged (bit-exact).
+#   f1c8e0d [flashmla-kv2bit] (prior baseline)
+#   e207047 [flashmla-kv2bit] sparse_attn_decode_interface Stage-1a: 6 packed-FP8 optional args wiring
+# Stage-1a delta (sparse-path counterpart of dense_fp8 path):
+#   * csrc/params.h: SparseAttnDecodeParams extended with 6 packed
+#     pointer fields (default nullptr) + packed_kv_block_stride /
+#     packed_row_bytes / qk_nope_head_dim / row_bits meta.
+#   * csrc/api/sparse_decode.h: sparse_attn_decode_interface adds 6
+#     std::optional<at::Tensor> formals (default nullopt). All-None vs
+#     all-non-None mode select; shape/dtype validation; params field
+#     write-back before impl->run(). sparse sm90/sm100 kernels still
+#     ignore packed fields → all-None is byte-identical to before.
+#   * flash_mla/flash_mla_interface.py: flash_mla_with_kvcache adds 6
+#     kwargs (default None), sparse branch passes them through to
+#     flash_mla_cuda.sparse_decode_fwd.
+# Stage-2 (next): swap K-tile cp.async with fused INT-N unpack + R@x +
+# FP8 convert; sparse_fp8 splitkv_mla.cuh starts consuming packed_*.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG f1c8e0d77ee2d22bf357f9cfb27c2503401a7473
+    GIT_TAG e207047cf94a0eaaf6c25c1d2c81feb19e51e58a
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
