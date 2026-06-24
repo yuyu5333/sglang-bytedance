@@ -30,7 +30,7 @@ include(FetchContent)
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG e207047cf94a0eaaf6c25c1d2c81feb19e51e58a
+    GIT_TAG e207047bb4eb59edbe7f14071d223580569e3c83
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
