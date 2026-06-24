@@ -2,7 +2,7 @@ include(FetchContent)
 
 # flash_mla
 # 指向项目自有 fork (`yuyu5333/FlashMLA`)，工作分支 `kv2bit-dev`。
-# 当前 SHA 8f33b14 = upstream abb54777 + 12 commits:
+# 当前 SHA 1db1482 = upstream abb54777 + 13 commits:
 #   c2693a0 [flashmla-kv2bit] add fork-link probe header _fork_banner.h
 #   b8a02f0 [flashmla-kv2bit] add dense_fp8_fork_probe.cpp host TU exporting flashmla_fork_probe()
 #   a121479 [flashmla-kv2bit] add dense_fp8_packed_entry.cpp scaffold (nullptr fallback bit-exact)
@@ -16,6 +16,9 @@ include(FetchContent)
 #   3d1126d [flashmla-kv2bit] (rolled back)
 #   996c900 [flashmla-kv2bit] (rolled back)
 #   8f33b14 [flashmla-kv2bit] sparse_decode_fwd: const-ref + py::arg/py::none() defaults
+#   01a9a93 [flashmla-kv2bit] sparse_decode_fwd: stl.h + py::arg names + py::none() on trailing 6 packed args
+#   1db1482 [flashmla-kv2bit] api.cpp: include <torch/extension.h> for torch's specialized optional<at::Tensor> caster
+# Stage-1a status: smoke verified (12-arg / 18-arg all-None / kwargs all-None all PASS, byte-identical).
 # Stage-1a delta (sparse-path counterpart of dense_fp8 path):
 #   * csrc/params.h: SparseAttnDecodeParams extended with 6 packed
 #     pointer fields (default nullptr) + packed_kv_block_stride /
@@ -39,7 +42,7 @@ include(FetchContent)
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 8f33b145b92fb0cd06bf848869ea560d1cf7a668
+    GIT_TAG 1db148261d6d15afa05d61fb16c2a78f8a549c8e
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
