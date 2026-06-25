@@ -55,10 +55,15 @@ include(FetchContent)
 #   3374633: [M3.c.4 Stage-5b] relax MODEL1 stride_kv_row kernel-level assert
 #     when packed_kcache_ptr is non-null. Required to actually launch the
 #     sm90 sparse_fp8 kernel with packed 268 B/tok kv tensors.
+#   e1f6037: [flashmla-kv2bit] relax extra_kv bpt check (accept any positive).
+#   dc6e30b: [flashmla-kv2bit] sparse_fp8 use_packed: implement R @ x dequant.
+#     Bug 2 root-cause fix for M3.c.4 Stage-5 wall+drop_shadow token salad.
+#     Per-token full unpack + affine + R @ x in producer warpgroup, matching
+#     calibration math nope = (codes*scale + zero) @ R.t().
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 3374633
+    GIT_TAG dc6e30b
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
