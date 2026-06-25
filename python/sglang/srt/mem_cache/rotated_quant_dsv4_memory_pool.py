@@ -1363,6 +1363,86 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         return getattr(self, "_wall_bytes_per_page", None)
 
     # ------------------------------------------------------------------
+    # [M3.c.4 Stage-3] FlashMLA sparse-path packed-FP8 kwargs.
+    # ------------------------------------------------------------------
+    def get_rotated_packed_kwargs(
+        self, layer_id: int, kind: str = "swa"
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Return a dict suitable for ``flash_mla.flash_mla_with_kvcache``'s
+        six packed kwargs, or ``None`` if this pool is not in wall mode /
+        ``kind`` is not under wall storage / drop_packed is active (no
+        packed buffer to expose).
+
+        Returned dict keys (match the kernel kwargs verbatim)::
+
+            {
+                "packed_kcache": uint8[num_rows, packed_row_bytes],
+                "scale_kcache":  float32[qk_nope],
+                "R_matrix":      float32[qk_nope, qk_nope],
+                "zero_point":    float32[qk_nope],
+                "dim_of_bit":    int32[row_bits],
+                "bitpos_in_dim": int32[row_bits],
+            }
+
+        ``packed_kcache`` is a *view* over the layer's packed buffer
+        reshaped from ``[num_pages, packed_bytes_per_page]`` to
+        ``[num_pages * page_size, packed_row_bytes]``. The kernel reads
+        token ``t`` at row ``page_index(t) * page_size + slot(t)`` which
+        matches our store layout exactly.
+        """
+        if self._mode != "wall":
+            return None
+        if kind not in self._wall_pools:
+            return None
+        if _wall_drop_packed_enabled():
+            # No packed buffer to expose; sparse-path falls back to the
+            # shadow FP8 path (kernel runs the all-None branch).
+            return None
+        entry = self._wall_pools[kind]
+        if kind == "swa":
+            local_layer_id = self._swa_local_layer_id(layer_id)
+        else:
+            _kind, local_layer_id = self._layer_id_for_extra(layer_id)
+            assert _kind == kind, (
+                f"layer_id={layer_id} maps to kind {_kind!r}, "
+                f"requested {kind!r}"
+            )
+        if layer_id not in self._nope_cfgs:
+            return None
+        cfg = self._nope_cfgs[layer_id]
+        packed_page_buf = entry.packed_buffers[local_layer_id]
+        device = packed_page_buf.device
+        page_size = entry.page_size
+        num_pages = entry.num_pages
+        num_rows = num_pages * page_size
+        # ``packed_row_bytes`` includes the rope BF16 tail; kernel walks
+        # the same stride for both nope/rope reads (rope read uses
+        # ``pk_row + nope_bytes``).
+        packed_row_bytes = entry.packed_bpt
+        # Sanity (cheap, no copy).
+        assert packed_page_buf.numel() == num_rows * packed_row_bytes, (
+            f"packed buffer numel {packed_page_buf.numel()} != "
+            f"num_rows({num_rows}) * packed_row_bytes({packed_row_bytes})"
+        )
+        packed_rows = packed_page_buf.view(num_rows, packed_row_bytes)
+
+        # Pull cached GPU-resident calib tensors. _get_cached_cfg_gpu
+        # populates these on first call (capture-safe).
+        from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+            _get_cached_cfg_gpu,
+        )
+
+        cfg_gpu = _get_cached_cfg_gpu(cfg, device)
+        return {
+            "packed_kcache": packed_rows,
+            "scale_kcache": cfg_gpu["scale"],
+            "R_matrix": cfg_gpu["R"],
+            "zero_point": cfg_gpu["zero"],
+            "dim_of_bit": cfg_gpu["dim_of_bit"],
+            "bitpos_in_dim": cfg_gpu["bitpos_in_dim"],
+        }
+
+    # ------------------------------------------------------------------
     # Eval-mode interface (M3.b)
     # ------------------------------------------------------------------
     def simulate_quantize_nope(

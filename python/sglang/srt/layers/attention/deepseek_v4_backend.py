@@ -1042,6 +1042,20 @@ class DeepseekV4AttnBackend(
 
             import flash_mla
 
+            # [M3.c.4 Stage-3] Wire RotatedQuant pool's packed buffer into
+            # sparse-path. Pool returns None when not in wall mode / kind
+            # excluded by SGLANG_RQ_WALL_KINDS / drop_packed enabled — in
+            # those cases the kwargs stay None and the kernel runs the
+            # all-None bit-exact branch.
+            _packed_getter = getattr(
+                token_to_kv_pool, "get_rotated_packed_kwargs", None
+            )
+            packed_kwargs = (
+                _packed_getter(layer_id, "swa")
+                if _packed_getter is not None
+                else None
+            ) or {}
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
@@ -1057,6 +1071,7 @@ class DeepseekV4AttnBackend(
                 extra_k_cache=extra_k_cache,
                 extra_indices_in_kvcache=extra_indices,
                 extra_topk_length=extra_topk_lengths,
+                **packed_kwargs,
             )[0]
 
             o = o.squeeze(1)

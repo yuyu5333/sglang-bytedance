@@ -45,10 +45,13 @@ include(FetchContent)
 #     code accumulates code = sum_{i:dob[i]==d} bit_i << bpd[i] for variable
 #     bit-width layouts; identity-calib case (dob[i]=i, bpd[i]=0) reduces to
 #     the previous hardcoded 1-bit/dim path (byte-identical, still PASS).
+#   * d21761c: switch kernel to per-dim scale (sk_base[d_global]) to match
+#     M3.c.* calib layout; relax C++ validator to accept rank-1 scale_kcache
+#     [qk_nope] and packed_row_bytes up to 2*qk_nope (rope tail).
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 7b4cdf3
+    GIT_TAG d21761c
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
