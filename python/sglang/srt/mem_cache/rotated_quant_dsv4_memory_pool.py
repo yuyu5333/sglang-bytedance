@@ -1253,6 +1253,27 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         """
         if self._mode != "wall":
             return
+        # [M3.c.4 Stage-4] cudagraph-safe short-circuit.
+        #
+        # 当 sparse-path 把 packed_kwargs (packed_kcache + scale + R + zero +
+        # dim_of_bit + bitpos_in_dim) 全部传给 FlashMLA 时，kernel 内部走
+        # fused bit-unpack + per-dim dequant from packed_kcache (commit
+        # d21761c sm90/decode/sparse_fp8/splitkv_mla.cuh use_packed=true
+        # 分支)，**完全不读** swa_k_cache / shadow_buffer。此时 prologue
+        # 的 page-level shadow refresh 是 dead work：
+        #   * _refresh_shadow_pages 含 boolean indexing
+        #     (`flat_pages[(flat_pages >= 0) & (flat_pages < max_page)]`),
+        #     torch.unique(flat_pages), invalid_flat.any() 三处 capture-
+        #     fatal op，是当前必须 `--disable-cuda-graph` 的唯一原因；
+        #   * shadow 即使被刷新也无人消费 (sparse_decode.h validator 见 6
+        #     个 packed kwargs 全非 None 即 use_packed=true，绕过 shadow)。
+        # → 默认整体跳过 prologue (env=1)，捎带把整条 capture-unsafe 链
+        #   一并扫掉，让 server 可以去掉 `--disable-cuda-graph` 跑 graph。
+        #
+        # 退路：SGLANG_RQ_SKIP_SHADOW_REFRESH=0 时退回原 shadow refresh
+        # 行为，用于 dense-path 调试 / 回归对照。
+        if os.environ.get("SGLANG_RQ_SKIP_SHADOW_REFRESH", "1") == "1":
+            return
         # 诊断模式 SGLANG_RQ_WALL_BYPASS_QUANT=1: shadow_buffer 已被 store
         # 路径用 native FP8 kernel 直接写入真值, refresh 会用 packed (全 0)
         # 覆盖它 -> 跳过 SWA refresh; c4/c128 在 bypass 模式下仍走 packed,
