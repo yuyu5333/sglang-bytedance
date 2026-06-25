@@ -37,12 +37,14 @@ include(FetchContent)
 #   * flash_mla/flash_mla_interface.py: flash_mla_with_kvcache adds 6
 #     kwargs (default None), sparse branch passes them through to
 #     flash_mla_cuda.sparse_decode_fwd.
-# Stage-2 (in progress): sparse_fp8 K-tile fused dequant (bitunpack + affine + R@x)
-#   * 7341eff: splitkv_mla.cuh use_packed branch + staging buffer + named barrier
+# Stage-2 (DONE for identity calib): sparse_fp8 K-tile fused dequant (bit-unpack + affine).
+#   * c8499aa: splitkv_mla.cuh use_packed branch fills staging with bit-unpack +
+#     affine dequant per dim-block, writes GMMA-layout sK; identity-calib
+#     numerical sanity tests pass (zero-K, code=1/const scale both finite).
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 7341eff01aeed5ec195e1ba966699a0d5f2910ed
+    GIT_TAG c8499aa3aa57b3937aaf2a9a05c83cf95e3ddb43
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
