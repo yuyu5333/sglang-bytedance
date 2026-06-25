@@ -48,10 +48,14 @@ include(FetchContent)
 #   * d21761c: switch kernel to per-dim scale (sk_base[d_global]) to match
 #     M3.c.* calib layout; relax C++ validator to accept rank-1 scale_kcache
 #     [qk_nope] and packed_row_bytes up to 2*qk_nope (rope tail).
+#   * fc7a138: [M3.c.4 Stage-5] relax KU_CHECK_SHAPE on `kv` last dim so the
+#     packed-FP8 path accepts kv tensors whose bytes_per_token is the packed
+#     row layout (e.g. 268 B/tok for DSv4 b=2.5) instead of the native 584.
+#     Required for drop_shadow=1 wall-storage (true 2.18x KV compression).
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG d21761c
+    GIT_TAG fc7a138
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)

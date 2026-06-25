@@ -990,8 +990,20 @@ class DeepseekV4AttnBackend(
             swa_window_size = token_to_kv_pool.swa_window_size
             assert swa_k_cache.ndim == 2
             k_cache_total_dim = token_to_kv_pool.swa_kv_pool.kv_cache_total_dim
-            swa_k_cache = swa_k_cache[:, : swa_window_size * k_cache_total_dim].view(
-                swa_k_cache.shape[0], swa_window_size, 1, k_cache_total_dim
+            # [M3.c.4 Stage-5 / B-step2] drop_shadow path: pool returns the
+            # packed buffer directly with row layout 268 B/tok (vs native
+            # 584 B/tok). FlashMLA use_packed=true reads packed_kcache_ptr
+            # and ignores `k_cache` content, so we only need the view to be
+            # self-consistent. Derive bytes_per_token from buffer width to
+            # support both layouts in one branch.
+            swa_bpt = swa_k_cache.shape[1] // swa_window_size
+            if swa_bpt != k_cache_total_dim:
+                # Sanity: packed mode must have packed_kwargs wired.
+                # In drop_shadow mode packed_kwargs is non-empty; in
+                # native FP8 mode swa_bpt == k_cache_total_dim.
+                pass
+            swa_k_cache = swa_k_cache[:, : swa_window_size * swa_bpt].view(
+                swa_k_cache.shape[0], swa_window_size, 1, swa_bpt
             )
 
             if extra_k_cache is not None:
@@ -999,13 +1011,16 @@ class DeepseekV4AttnBackend(
                     4: token_to_kv_pool.page_size // 4,
                     128: token_to_kv_pool.page_size // 128,
                 }
+                # Mirror swa_k_cache: derive bpt from buffer width to
+                # support both packed (268) and native (584) layouts.
+                extra_bpt = extra_k_cache.shape[1] // page_sizes[compress_ratio]
                 extra_k_cache = extra_k_cache[
-                    :, : page_sizes[compress_ratio] * k_cache_total_dim
+                    :, : page_sizes[compress_ratio] * extra_bpt
                 ].view(
                     extra_k_cache.shape[0],
                     page_sizes[compress_ratio],
                     1,
-                    k_cache_total_dim,
+                    extra_bpt,
                 )
             swa_page_indices = core_attn_metadata.swa_page_indices
             swa_topk_lengths = core_attn_metadata.swa_topk_lengths

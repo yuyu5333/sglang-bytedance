@@ -208,6 +208,34 @@ def _wall_drop_packed_enabled() -> bool:
     )
 
 
+def _wall_drop_shadow_enabled() -> bool:
+    """[M3.c.4 Stage-5 / B-step3] Drop the shadow FP8 buffer entirely.
+
+    When ``SGLANG_RQ_WALL_DROP_SHADOW=1``:
+
+    * ``shadow_buffers`` is **not allocated** (saves the full native FP8
+      DSv4 layout cost: 584 B/tok across swa+c4+c128 pools).
+    * ``pool.kv_buffer`` is aliased to ``packed_buffers`` so that any
+      consumer that still does ``token_to_kv_pool.get_swa_key_buffer_radix
+      (layer_id)`` receives the packed paged bytes. Stage-4 sparse path
+      (``flash_mla.flash_mla_with_kvcache`` with all 6 packed kwargs)
+      forwards the kernel to ``use_packed=true`` branch which reads
+      packed_kcache directly and **ignores** the ``k_cache`` argument —
+      so handing it a packed-layout tensor is byte-safe for that branch.
+    * dense-path (k_cache view as ``[num_pages, P, 1, 584]``) WILL BREAK
+      because packed layout's bytes_per_page (268*P) != FP8 (584*P) and
+      the dense kernel would dereference invalid memory. Therefore this
+      flag is **only safe** when the entire forward route goes through
+      sparse-path with packed kwargs wired (Stage-3+).
+
+    This is the **only** configuration that delivers real GB-scale
+    HBM savings over native FP8 baseline (~18.7 GB/GPU on DSv4 H20 TP8).
+    Without this flag, wall mode pays both packed + shadow and is
+    strictly worse than FP8 baseline.
+    """
+    return os.environ.get("SGLANG_RQ_WALL_DROP_SHADOW", "0") == "1"
+
+
 def _native_bytes_per_page(page_size: int) -> int:
     """DSv4 native paged FP8 layout: ``ceil(584 * P / 576) * 576``."""
     return ((_DSV4_NATIVE_BPT * page_size + _DSV4_SLOT_BYTES - 1) //
@@ -482,15 +510,25 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             ]
             # Shadow stays zero-initialised; prologue refills before each
             # FlashMLA call using the indices it will read.
-            shadow_buffers = [
-                torch.zeros(
-                    num_pages,
-                    shadow_bytes_per_page,
-                    dtype=torch.uint8,
-                    device=device,
-                )
-                for _ in range(pool.layer_num)
-            ]
+            # [M3.c.4 Stage-5 / B-step3] drop_shadow knob: when sparse-
+            # path forwards all 6 packed_kwargs to FlashMLA use_packed=
+            # true branch, shadow is dead memory. Replace with 1-byte
+            # sentinels to recover the full FP8-layout HBM cost.
+            if _wall_drop_shadow_enabled():
+                shadow_buffers = [
+                    torch.zeros(1, dtype=torch.uint8, device=device)
+                    for _ in range(pool.layer_num)
+                ]
+            else:
+                shadow_buffers = [
+                    torch.zeros(
+                        num_pages,
+                        shadow_bytes_per_page,
+                        dtype=torch.uint8,
+                        device=device,
+                    )
+                    for _ in range(pool.layer_num)
+                ]
 
             # T3 优化: dirty_pages mask, 初始全 True 表示首次都要冷启动刷新。
             # store 路径将写过的 page idx 标 True; refresh 后清零。
@@ -533,7 +571,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # pool.kv_buffer 别名到 shadow_buffers，否则任何走 super()
             # 路径或 attention backend 直接 reshape kv_buffer 的代码会
             # 拿到错的 shape，触发 OOB 读写。
-            if _wall_drop_packed_enabled():
+            # [M3.c.4 Stage-5] drop_shadow 模式下 shadow=1B 占位，主存储
+            # 必须是 packed_buffers；attention backend 的 view 现在按
+            # 实际 row width 推导 bpt（268 vs 584），无需 bytes_per_page_padded
+            # 配合，所以这里安全。
+            if _wall_drop_shadow_enabled():
+                pool.kv_buffer = packed_buffers  # type: ignore[assignment]
+            elif _wall_drop_packed_enabled():
                 pool.kv_buffer = shadow_buffers  # type: ignore[assignment]
             else:
                 pool.kv_buffer = packed_buffers  # type: ignore[assignment]
@@ -1047,6 +1091,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return super().get_swa_key_buffer_radix(layer_id)
         self.wait_layer_transfer(layer_id)
         local_layer_id = self._swa_local_layer_id(layer_id)
+        # [M3.c.4 Stage-5 / B-step3] In drop_shadow mode, shadow_buffers
+        # is a 1-byte sentinel; return the packed_buffer instead so that
+        # the FlashMLA sparse-path use_packed=true branch (which ignores
+        # k_cache content but still reads its layout) sees the real
+        # packed paged bytes.
+        if _wall_drop_shadow_enabled():
+            return self._wall_pools["swa"].packed_buffers[local_layer_id]
         return self._wall_pools["swa"].shadow_buffers[local_layer_id]
 
     def get_extra_key_buffer(self, layer_id: int):
@@ -1058,6 +1109,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # SGLANG_RQ_WALL_KINDS excluded this kind; native FP8 buffer
             # is intact, fall back to parent.
             return super().get_extra_key_buffer(layer_id)
+        if _wall_drop_shadow_enabled():
+            return self._wall_pools[kind].packed_buffers[local_layer_id]
         return self._wall_pools[kind].shadow_buffers[local_layer_id]
 
     def _refresh_shadow_pages(
