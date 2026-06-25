@@ -514,7 +514,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # path forwards all 6 packed_kwargs to FlashMLA use_packed=
             # true branch, shadow is dead memory. Replace with 1-byte
             # sentinels to recover the full FP8-layout HBM cost.
-            if _wall_drop_shadow_enabled():
+            # IMPORTANT: drop_shadow is only safe on the swa pool. c4/c128
+            # pools still feed the compressor_v2 store kernel which writes
+            # FP8 strides directly into kv_buffer; aliasing those to packed
+            # layout breaks compress_norm_rope_store stride checks. Keep
+            # c4/c128 shadow + native pool.kv_buffer.
+            drop_shadow_for_kind = _wall_drop_shadow_enabled() and kind == "swa"
+            if drop_shadow_for_kind:
                 shadow_buffers = [
                     torch.zeros(1, dtype=torch.uint8, device=device)
                     for _ in range(pool.layer_num)
@@ -575,7 +581,11 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # 必须是 packed_buffers；attention backend 的 view 现在按
             # 实际 row width 推导 bpt（268 vs 584），无需 bytes_per_page_padded
             # 配合，所以这里安全。
-            if _wall_drop_shadow_enabled():
+            # [M3.c.4 Stage-5] drop_shadow 模式（仅 swa）：shadow=1B 占位，
+            # 主存储必须是 packed_buffers；attention backend 的 view 按实际
+            # row width 推 bpt（268 vs 584）。c4/c128 池保持 shadow alias，
+            # 与 compressor_v2 store kernel 的 FP8 stride 写路径兼容。
+            if drop_shadow_for_kind:
                 pool.kv_buffer = packed_buffers  # type: ignore[assignment]
             elif _wall_drop_packed_enabled():
                 pool.kv_buffer = shadow_buffers  # type: ignore[assignment]
@@ -1109,7 +1119,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # SGLANG_RQ_WALL_KINDS excluded this kind; native FP8 buffer
             # is intact, fall back to parent.
             return super().get_extra_key_buffer(layer_id)
-        if _wall_drop_shadow_enabled():
+        # [M3.c.4 Stage-5] drop_shadow only applies to swa pool. c4/c128
+        # keep shadow allocated so this read returns the FP8-layout buffer
+        # that FlashMLA dense-path expects.
+        if _wall_drop_shadow_enabled() and kind == "swa":
             return self._wall_pools[kind].packed_buffers[local_layer_id]
         return self._wall_pools[kind].shadow_buffers[local_layer_id]
 
