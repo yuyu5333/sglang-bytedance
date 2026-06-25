@@ -996,12 +996,22 @@ class DeepseekV4AttnBackend(
             # and ignores `k_cache` content, so we only need the view to be
             # self-consistent. Derive bytes_per_token from buffer width to
             # support both layouts in one branch.
-            swa_bpt = swa_k_cache.shape[1] // swa_window_size
-            if swa_bpt != k_cache_total_dim:
-                # Sanity: packed mode must have packed_kwargs wired.
-                # In drop_shadow mode packed_kwargs is non-empty; in
-                # native FP8 mode swa_bpt == k_cache_total_dim.
-                pass
+            #
+            # When drop_shadow is *off* in wall mode, the pool exposes the
+            # SHADOW buffer whose row width is bytes_per_page_padded (e.g.
+            # ceil(64*584/576)*576 / 64 = 585 for page_size=64). FlashMLA
+            # only accepts bpt in (0, native]=(0, 584], so we must prefer
+            # the native bpt when the buffer is wide enough. Mirror the
+            # extra_k branch ladder below.
+            swa_bpt_native = k_cache_total_dim
+            if swa_k_cache.shape[1] >= swa_window_size * swa_bpt_native:
+                # Buffer is wide enough for native bpt (covers both native
+                # FP8 baseline and wall+shadow with 576-padded layout).
+                swa_bpt = swa_bpt_native
+            else:
+                # drop_shadow path: packed row width < native; trust the
+                # actual buffer width.
+                swa_bpt = swa_k_cache.shape[1] // swa_window_size
             swa_k_cache = swa_k_cache[:, : swa_window_size * swa_bpt].view(
                 swa_k_cache.shape[0], swa_window_size, 1, swa_bpt
             )
