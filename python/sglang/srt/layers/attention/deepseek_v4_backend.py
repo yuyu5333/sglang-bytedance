@@ -1011,14 +1011,23 @@ class DeepseekV4AttnBackend(
                     4: token_to_kv_pool.page_size // 4,
                     128: token_to_kv_pool.page_size // 128,
                 }
-                # Mirror swa_k_cache: derive bpt from buffer width to
-                # support both packed (268) and native (584) layouts.
-                extra_bpt = extra_k_cache.shape[1] // page_sizes[compress_ratio]
+                # c4/c128 sink keeps native FP8 layout (drop_shadow only
+                # applies to swa). Slice off any 576-byte page padding so
+                # extra_bpt matches the kernel's native bytes_per_token
+                # (584). Mirror swa logic only when buffer width is exactly
+                # divisible by num_slots into 584 -- otherwise we'd be
+                # passing padded byte_per_token (e.g. 585) to FlashMLA.
+                num_slots = page_sizes[compress_ratio]
+                extra_bpt_native = k_cache_total_dim
+                if extra_k_cache.shape[1] >= num_slots * extra_bpt_native:
+                    extra_bpt = extra_bpt_native
+                else:
+                    extra_bpt = extra_k_cache.shape[1] // num_slots
                 extra_k_cache = extra_k_cache[
-                    :, : page_sizes[compress_ratio] * extra_bpt
+                    :, : num_slots * extra_bpt
                 ].view(
                     extra_k_cache.shape[0],
-                    page_sizes[compress_ratio],
+                    num_slots,
                     1,
                     extra_bpt,
                 )
