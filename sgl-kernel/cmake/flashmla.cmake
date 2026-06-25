@@ -41,10 +41,14 @@ include(FetchContent)
 #   * c8499aa: splitkv_mla.cuh use_packed branch fills staging with bit-unpack +
 #     affine dequant per dim-block, writes GMMA-layout sK; identity-calib
 #     numerical sanity tests pass (zero-K, code=1/const scale both finite).
+#   * 7b4cdf3: generalize bit-unpack to row_bits/dob/bpd table-driven. Inner
+#     code accumulates code = sum_{i:dob[i]==d} bit_i << bpd[i] for variable
+#     bit-width layouts; identity-calib case (dob[i]=i, bpd[i]=0) reduces to
+#     the previous hardcoded 1-bit/dim path (byte-identical, still PASS).
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG c8499aa3aa57b3937aaf2a9a05c83cf95e3ddb43
+    GIT_TAG 7b4cdf3
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
