@@ -69,10 +69,17 @@ include(FetchContent)
 #     (init/atomicOr/affine/R@x); invalid loads s_x=0 so R@x naturally
 #     collapses to staging[t]=0. Mirrors dense_fp8 fork single-branch
 #     prologue+prefetch pattern.
+#   2ac14f3: [flashmla-kv2bit] sparse_fp8 use_packed: KDUMP diagnostic printf.
+#     Temporary instrumentation to localize Stage-5 swa packed token salad:
+#     one-shot dump of codes/s_x/staging/sk/zp/R first 4 entries plus
+#     pk_block_stride at producer thread (batch_idx=begin, block=start,
+#     buf=0, t=0, dim_block=0, idx_in_wg=0, warpgroup_idx=2, blockIdx=0).
+#     NamedBarrier::sync added before printf so neighbor staging writes are
+#     visible. Will revert after root cause is fixed.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 71e17cb
+    GIT_TAG 2ac14f3
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
