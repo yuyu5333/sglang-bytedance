@@ -82,10 +82,19 @@ include(FetchContent)
 #     row-major stride verification, and staging[4..15]. Used to localize
 #     whether R@x diverges in a specific dim band (orientation/stride bug)
 #     vs the staging->sK GMMA-swizzle write being incorrect.
+#   f8bfb84: [flashmla-kv2bit] KDUMP3 per-slot staging vs s_sum_dbg + split
+#     KDUMP2. Prior KDUMP2 single 41-arg printf produced bogus 1e+143 /
+#     1e+218 readbacks for staging[4..15] which were CUDA device-printf
+#     varargs overrun artifacts, not real data. KDUMP2 split into <=4-arg
+#     chunked printfs (KDUMP2a-h). KDUMP3 adds s_sum_dbg[64] smem capture:
+#     every producer thread iwg=0..63 writes its R@x partial sum, then
+#     [KDUMP] thread sweeps all 64 (sum, staging) pairs in groups of 4
+#     after producer-sync. Discriminates coverage bug (NaN in sum) vs
+#     staging clobber (sum != bf16(staging)) vs R@x math bug.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 460dbd0
+    GIT_TAG f8bfb84
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
