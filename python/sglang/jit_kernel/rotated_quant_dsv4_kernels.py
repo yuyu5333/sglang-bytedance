@@ -262,6 +262,30 @@ def rotated_store_to_packed(
     rope_bytes = rope.contiguous().view(torch.uint8).reshape(N, _ROPE_BYTES)
     full_row = torch.cat([packed, rope_bytes], dim=1)  # [N, bpt]
 
+    # KDUMP6-store-rope: dump first token's rope half (BF16 values + raw
+    # uint8 bytes) so we can cross-check that the kernel's
+    # `rope_bf16 = (bf16*)(pk_row + nope_bytes)` indexing reads the exact
+    # same 8 BF16 elements (= 16 raw bytes) that we wrote here. Gated by
+    # the same env + once-per-cfg key as KDUMP5-store to avoid log spam.
+    if _os.environ.get("SGLANG_RQ_PYDUMP", "0") == "1":
+        _rope_key = ("rope", id(cfg))
+        if _rope_key not in _PYDUMP_SEEN_CFGS:
+            _PYDUMP_SEEN_CFGS.add(_rope_key)
+            try:
+                _rope0 = rope[0, :8].detach().to(torch.float32).cpu().tolist()
+                _ropeb0 = rope_bytes[0, :16].detach().cpu().tolist()
+                _idx0 = int(indices_i64[0].detach().cpu().item()) if N > 0 else -1
+                _bpt = full_row.shape[1]
+                _row_bytes_nope = packed.shape[1]
+                print(
+                    f"[KDUMP6-store-rope] cfg_id%1000={id(cfg) % 1000} "
+                    f"N={N} idx[0]={_idx0} bpt={_bpt} row_bytes_nope={_row_bytes_nope} "
+                    f"rope[0,0:8]={_rope0} rope_bytes[0,0:16]={_ropeb0}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[KDUMP6-store-rope] dump failed: {_e}", flush=True)
+
     # Scatter into paged cache:
     # 必须过滤 -1 sentinel（translate_loc_from_full_to_swa 对未映射槽返回 -1）。
     # 关键：CUDA graph capture 期间任何 .all()/.nonzero()/Python branch
