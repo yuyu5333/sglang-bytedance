@@ -260,6 +260,7 @@ def rotated_store_to_packed(
                 print(
                     f"[KDUMP7-store-dims] cfg_id%1000={id(cfg) % 1000} "
                     f"N={N} idx[0]={_idx0} "
+                    f"nope[16:20]={nope[0, 16:20].detach().to(torch.float32).cpu().tolist()} "
                     f"codes[16:20]={codes_i32[0, 16:20].detach().cpu().tolist()} "
                     f"s_x[16:20]={_x_hat[0, 16:20].detach().cpu().tolist()} "
                     f"sk[16:20]={scale[16:20].detach().cpu().tolist()} "
@@ -269,11 +270,25 @@ def rotated_store_to_packed(
                 )
                 print(
                     f"[KDUMP7-store-dims] cfg_id%1000={id(cfg) % 1000} "
+                    f"nope[432:436]={nope[0, 432:436].detach().to(torch.float32).cpu().tolist()} "
                     f"codes[432:436]={codes_i32[0, 432:436].detach().cpu().tolist()} "
                     f"s_x[432:436]={_x_hat[0, 432:436].detach().cpu().tolist()} "
                     f"sk[432:436]={scale[432:436].detach().cpu().tolist()} "
                     f"zp[432:436]={zero[432:436].detach().cpu().tolist()} "
                     f"recon[432:436]={_recon[0, 432:436].detach().cpu().tolist()}",
+                    flush=True,
+                )
+                _nope0 = nope[0].detach().to(torch.float32)
+                _recon0 = _recon[0].detach().to(torch.float32)
+                _cos = torch.nn.functional.cosine_similarity(
+                    _nope0.unsqueeze(0), _recon0.unsqueeze(0), dim=-1
+                ).item()
+                _max_abs = (_nope0 - _recon0).abs().max().item()
+                _rmse = torch.sqrt(torch.mean((_nope0 - _recon0) ** 2)).item()
+                print(
+                    f"[KDUMP8-store-error] cfg_id%1000={id(cfg) % 1000} "
+                    f"idx[0]={_idx0} nope_vs_recon_cos={_cos:.8f} "
+                    f"rmse={_rmse:.8f} max_abs={_max_abs:.8f}",
                     flush=True,
                 )
             except Exception as _e:
