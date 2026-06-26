@@ -60,10 +60,19 @@ include(FetchContent)
 #     Bug 2 root-cause fix for M3.c.4 Stage-5 wall+drop_shadow token salad.
 #     Per-token full unpack + affine + R @ x in producer warpgroup, matching
 #     calibration math nope = (codes*scale + zero) @ R.t().
+#   71e17cb: [flashmla-kv2bit] sparse_fp8 use_packed: unified barrier seq for
+#     invalid tok. Bug-3 root-cause for Stage-5 token salad after dc6e30b:
+#     the invalid-token branch was skipping all 4 NamedBarriers in the
+#     per-token loop while valid path went through them. Mixed-topology
+#     iterations are fragile w.r.t. consumer wait on bar_k_local_ready.
+#     Fix unifies both branches through the same 4-barrier sequence
+#     (init/atomicOr/affine/R@x); invalid loads s_x=0 so R@x naturally
+#     collapses to staging[t]=0. Mirrors dense_fp8 fork single-branch
+#     prologue+prefetch pattern.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG dc6e30b
+    GIT_TAG 71e17cb
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
