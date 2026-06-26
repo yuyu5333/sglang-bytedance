@@ -1520,6 +1520,34 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         )
 
         cfg_gpu = _get_cached_cfg_gpu(cfg, device)
+
+        # KDUMP5: reader-side one-shot dump (env-gated). Cross-checks the
+        # R/sk/zp the kernel sees against the writer-side KDUMP5-store and
+        # the kernel KDUMP4 printout. Keyed by (cfg id, layer_id, kind) so
+        # each layer prints exactly once per process.
+        import os as _os
+        if _os.environ.get("SGLANG_RQ_PYDUMP", "0") == "1":
+            from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+                _PYDUMP_SEEN_CFGS,
+            )
+            _cfg_key = (id(cfg), int(layer_id), str(kind))
+            if _cfg_key not in _PYDUMP_SEEN_CFGS:
+                _PYDUMP_SEEN_CFGS.add(_cfg_key)
+                try:
+                    _r0 = cfg_gpu["R"][0, :4].detach().to("cpu").tolist()
+                    _sk0 = cfg_gpu["scale"][:4].detach().to("cpu").tolist()
+                    _zp0 = cfg_gpu["zero"][:4].detach().to("cpu").tolist()
+                    print(
+                        f"[KDUMP5-read] cfg_id%1000={id(cfg) % 1000} "
+                        f"layer_id={layer_id} kind={kind} "
+                        f"local_layer_id={local_layer_id} "
+                        f"num_rows={num_rows} packed_row_bytes={packed_row_bytes} "
+                        f"R[0,0:4]={_r0} sk[0:4]={_sk0} zp[0:4]={_zp0}",
+                        flush=True,
+                    )
+                except Exception as _e:
+                    print(f"[KDUMP5-read] dump failed: {_e}", flush=True)
+
         return {
             "packed_kcache": packed_rows,
             "scale_kcache": cfg_gpu["scale"],

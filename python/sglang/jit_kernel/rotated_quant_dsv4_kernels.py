@@ -91,6 +91,9 @@ def _build_pack_meta_from_bits(
 # Per-config pack-meta cache keyed by device (small: ~448 int32 per dim).
 _PACK_META_CACHE: dict[int, dict[str, object]] = {}
 
+# KDUMP5: per-process one-shot guard for env-gated writer/reader dumps.
+_PYDUMP_SEEN_CFGS: set = set()
+
 
 def _get_cached_pack_meta(
     cfg: RotatedQuantizerConfig, device,
@@ -219,6 +222,33 @@ def rotated_store_to_packed(
         codes_f, min=torch.zeros_like(codes_f), max=levels_f
     )
     codes_i32 = codes_f.to(torch.int32)  # 留在 GPU
+
+    # KDUMP5: writer-side one-shot dump (env-gated). Cross-checks the
+    # codes/sk/zp/R the writer hands to bitpack against the kernel KDUMP4
+    # printout. One line per unique cfg object to keep stdout sane.
+    import os as _os
+    if _os.environ.get("SGLANG_RQ_PYDUMP", "0") == "1":
+        _cfg_key = id(cfg)
+        if _cfg_key not in _PYDUMP_SEEN_CFGS:
+            _PYDUMP_SEEN_CFGS.add(_cfg_key)
+            try:
+                _r0 = R[0, :4].detach().to("cpu").tolist()
+                _sk0 = scale[:4].detach().to("cpu").tolist()
+                _zp0 = zero[:4].detach().to("cpu").tolist()
+                _nope0 = nope[0, :4].detach().to(torch.float32).cpu().tolist()
+                _krot0 = K_rot[0, :4].detach().cpu().tolist()
+                _codes0 = codes_i32[0, :4].detach().cpu().tolist()
+                _idx0 = int(indices_i64[0].detach().cpu().item()) if N > 0 else -1
+                print(
+                    f"[KDUMP5-store] cfg_id%1000={_cfg_key % 1000} "
+                    f"N={N} idx[0]={_idx0} "
+                    f"R[0,0:4]={_r0} sk[0:4]={_sk0} zp[0:4]={_zp0} "
+                    f"nope[0,0:4]={_nope0} K_rot[0,0:4]={_krot0} "
+                    f"codes[0,0:4]={_codes0}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[KDUMP5-store] dump failed: {_e}", flush=True)
 
     # --- Triton bitpack（T3）。
     dim_of_bit = cfg_gpu["dim_of_bit"]
