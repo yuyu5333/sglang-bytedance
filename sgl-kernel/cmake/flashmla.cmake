@@ -91,10 +91,22 @@ include(FetchContent)
 #     [KDUMP] thread sweeps all 64 (sum, staging) pairs in groups of 4
 #     after producer-sync. Discriminates coverage bug (NaN in sum) vs
 #     staging clobber (sum != bf16(staging)) vs R@x math bug.
+#     KDUMP3 result: R@x is fully correct (full 64-slot coverage, all
+#     staging[d] == bf16(s_sum_dbg[d]) within 1 ULP, sum_hi=0 confirms R
+#     identity tail). Bug relocated to staging->sK transport.
+#   67b3cd7: [flashmla-kv2bit] KDUMP4 staging->sK transport instrumentation.
+#     KDUMP4a (single thread abs_token=0/dim_in_block=0/wg=2): dumps
+#     staging readback (stg_lo[0..7], stg_hi[0..7]), register readback
+#     (val_lo[0..7], val_hi[0..7]), sK readback after store
+#     (sK_lo[0..7], sK_hi[0..7]), and absolute smem offsets. Triangulates
+#     read-side (staging->reg) vs write-side (reg->sK) vs base offset
+#     bugs. KDUMP4b (first 16 producer-wg threads): dumps (idx_in_wg,
+#     warp, lane, my_token, abs_token, dim_in_block, idx_in_cluster) to
+#     verify the producer tiling bijectively covers expected sK layout.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG f8bfb84
+    GIT_TAG 67b3cd7
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
