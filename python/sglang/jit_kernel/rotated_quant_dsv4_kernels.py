@@ -250,6 +250,35 @@ def rotated_store_to_packed(
             except Exception as _e:
                 print(f"[KDUMP5-store] dump failed: {_e}", flush=True)
 
+        _dim_key = ("dims16_432", id(cfg))
+        if _dim_key not in _PYDUMP_SEEN_CFGS:
+            _PYDUMP_SEEN_CFGS.add(_dim_key)
+            try:
+                _x_hat = codes_i32.to(torch.float32) * scale + zero
+                _recon = (_x_hat @ R.t()).to(torch.float32)
+                _idx0 = int(indices_i64[0].detach().cpu().item()) if N > 0 else -1
+                print(
+                    f"[KDUMP7-store-dims] cfg_id%1000={id(cfg) % 1000} "
+                    f"N={N} idx[0]={_idx0} "
+                    f"codes[16:20]={codes_i32[0, 16:20].detach().cpu().tolist()} "
+                    f"s_x[16:20]={_x_hat[0, 16:20].detach().cpu().tolist()} "
+                    f"sk[16:20]={scale[16:20].detach().cpu().tolist()} "
+                    f"zp[16:20]={zero[16:20].detach().cpu().tolist()} "
+                    f"recon[16:20]={_recon[0, 16:20].detach().cpu().tolist()}",
+                    flush=True,
+                )
+                print(
+                    f"[KDUMP7-store-dims] cfg_id%1000={id(cfg) % 1000} "
+                    f"codes[432:436]={codes_i32[0, 432:436].detach().cpu().tolist()} "
+                    f"s_x[432:436]={_x_hat[0, 432:436].detach().cpu().tolist()} "
+                    f"sk[432:436]={scale[432:436].detach().cpu().tolist()} "
+                    f"zp[432:436]={zero[432:436].detach().cpu().tolist()} "
+                    f"recon[432:436]={_recon[0, 432:436].detach().cpu().tolist()}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[KDUMP7-store-dims] dump failed: {_e}", flush=True)
+
     # --- Triton bitpack（T3）。
     dim_of_bit = cfg_gpu["dim_of_bit"]
     bitpos_in_dim = cfg_gpu["bitpos_in_dim"]
