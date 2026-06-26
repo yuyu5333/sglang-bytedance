@@ -126,7 +126,7 @@ class DeepEPMoE(FusedMoE):
             self.use_fp8_w8a8 = True
             self.fp8_dtype = torch.float8_e4m3fn
             self.use_w4afp8 = False
-        elif isinstance(quant_config, W4AFp8Config):
+        elif isinstance(quant_config, W4AFp8Config) or self._is_compressed_w4afp8_moe():
             self.use_w4afp8 = True
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
@@ -335,7 +335,7 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPNormalDispatchOutput,
     ):
         assert self.moe_runner_config.activation == "silu"
-        assert isinstance(self.quant_method, W4AFp8MoEMethod)
+        assert self._is_w4afp8_quant_method()
         return self.quant_method.apply_deepep_normal(
             layer=self,
             dispatch_output=dispatch_output,
@@ -346,11 +346,26 @@ class DeepEPMoE(FusedMoE):
         dispatch_output: DeepEPLLDispatchOutput,
     ):
         assert self.moe_runner_config.activation == "silu"
-        assert isinstance(self.quant_method, W4AFp8MoEMethod)
+        assert self._is_w4afp8_quant_method()
         return self.quant_method.apply_deepep_ll(
             layer=self,
             dispatch_output=dispatch_output,
         )
+
+    def _is_w4afp8_quant_method(self) -> bool:
+        if isinstance(self.quant_method, W4AFp8MoEMethod):
+            return True
+        return self._is_compressed_w4afp8_moe()
+
+    def _is_compressed_w4afp8_moe(self) -> bool:
+        if not isinstance(self.quant_method, CompressedTensorsFusedMoEMethod):
+            return False
+        from sglang.srt.layers.quantization.compressed_tensors.schemes import (
+            CompressedTensorsW4AFP8MoE,
+        )
+
+        scheme = getattr(self, "scheme", None)
+        return scheme is not None and isinstance(scheme, CompressedTensorsW4AFP8MoE)
 
     def forward_npu(
         self,

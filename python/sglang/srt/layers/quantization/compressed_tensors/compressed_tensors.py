@@ -1092,3 +1092,23 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
             group_list,
             output_dtype,
         )
+
+    def apply_deepep_normal(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+    ) -> torch.Tensor:
+        scheme = layer.scheme
+        if scheme is None:
+            raise ValueError("A scheme must be defined for each layer")
+        return scheme.apply_deepep_normal(layer, dispatch_output)
+
+    def apply_deepep_ll(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+    ) -> torch.Tensor:
+        scheme = layer.scheme
+        if scheme is None:
+            raise ValueError("A scheme must be defined for each layer")
+        return scheme.apply_deepep_ll(layer, dispatch_output)

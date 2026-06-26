@@ -21,8 +21,11 @@ from sglang.srt.layers.quantization.w4afp8 import interleave_scales
 from sglang.srt.utils import set_weight_attrs
 
 if TYPE_CHECKING:
+    from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
+        DeepEPLLDispatchOutput,
+        DeepEPNormalDispatchOutput,
         StandardDispatchOutput,
     )
     from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
@@ -201,9 +204,13 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             return
 
         dtype = torch.bfloat16
-        device = layer.w2_weight_packed.device
 
-        # TODO: currently only support per tensor quant.
+        # compressed-tensors W4AFP8 uses dynamic activation quant: no input
+        # scales are loaded from the checkpoint. The standard cutlass_w4a8_moe
+        # kernel handles None by computing absmax internally, so the default
+        # apply_weights() path keeps these as None. The DeepEP cutlass variants
+        # require caller-provided scale buffers; those are lazily allocated in
+        # apply_deepep_normal / apply_deepep_ll via _get_or_init_dynamic_act_scales.
         layer.a13_scale = None
         layer.a2_scale = None
 
@@ -321,3 +328,126 @@ class CompressedTensorsW4AFP8MoE(CompressedTensorsMoEScheme):
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
         )
         return StandardCombineInput(hidden_states=output)
+
+    def apply_deepep_normal(
+        self,
+        layer: DeepEPMoE,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ) -> torch.Tensor:
+        from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_absmax_fp8
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import (
+            cutlass_w4a8_moe_deepep_normal,
+        )
+
+        hidden_states, topk_ids, topk_weights = (
+            dispatch_output.hidden_states,
+            dispatch_output.topk_ids,
+            dispatch_output.topk_weights,
+        )
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        num_tokens = hidden_states.shape[0]
+        if num_tokens == 0:
+            return hidden_states
+
+        a1_scale = self._ensure_a1_scale_buffer(layer, hidden_states)
+
+        # Dynamic input quant: compute per-tensor absmax of bf16/fp16 inputs.
+        # per_tensor_absmax_fp8 uses atomic_max and requires zero-initialised
+        # output, so reset the scalar before each call.
+        a1_scale.zero_()
+        per_tensor_absmax_fp8(hidden_states, a1_scale)
+
+        # a2_scale is left as None so the kernel takes the dynamic path
+        # (silu+mul absmax + static quant fused via two-pass triton kernel).
+        return cutlass_w4a8_moe_deepep_normal(
+            hidden_states,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_weights,
+            topk_ids,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            a1_scale,
+            None,
+        )
+
+    def apply_deepep_ll(
+        self,
+        layer: DeepEPMoE,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ) -> torch.Tensor:
+        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe_deepep_ll
+
+        hidden_states, hidden_scales, topk_ids, _, masked_m, _ = dispatch_output
+
+        a1_scale = self._ensure_a1_scale_buffer(layer, hidden_states)
+
+        # The LL dispatch output already carries fp8 activations together with
+        # per-token scales. The cutlass LL kernel then rescales them to a
+        # per-tensor representation via
+        #   output_fp8 = (input_fp8 * per_token_scale) / a1_scale
+        # so a1_scale just needs to upper-bound (|input_fp8| * per_token_scale)
+        # to keep the result within fp8_max. Using the max per-token scale is
+        # the tightest bound that does not require a fresh pass over the fp8
+        # data.
+        a1_scale.copy_(hidden_scales.detach().to(torch.float32).amax().view(1))
+
+        # a2_scale is left as None so the LL kernel runs the two-pass
+        # silu+mul absmax + masked static quant variant.
+        return cutlass_w4a8_moe_deepep_ll(
+            hidden_states,
+            hidden_scales,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_ids,
+            masked_m,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            a1_scale,
+            None,
+        )
+
+    def _ensure_a1_scale_buffer(
+        self, layer: torch.nn.Module, ref: torch.Tensor
+    ) -> torch.Tensor:
+        """Lazily allocate the per-tensor input activation scale buffer.
+
+        compressed-tensors W4AFP8 is configured with dynamic input quant, so
+        the checkpoint provides no static input scale. The DeepEP cutlass
+        kernels still expect a caller-provided ``a1_scale`` buffer (they read
+        it as a static scalar), so we keep a fp32 scalar on the layer. It is
+        overwritten at every forward by ``apply_deepep_normal`` /
+        ``apply_deepep_ll``.
+
+        ``a2_scale`` is intentionally not allocated: passing ``None`` makes
+        the kernels run their dynamic two-pass variant, which computes the
+        intermediate per-tensor scale on the fly.
+        """
+        device = ref.device
+        if getattr(layer, "a13_scale", None) is None:
+            layer.a13_scale = torch.zeros(1, dtype=torch.float32, device=device)
+        return layer.a13_scale

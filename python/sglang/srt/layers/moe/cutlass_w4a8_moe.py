@@ -35,6 +35,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     fp8_per_token_to_per_tensor_quant_triton,
     post_reorder_for_cutlass_moe,
     pre_reorder_for_cutlass_moe,
+    silu_and_mul_masked_absmax_fwd,
     silu_and_mul_masked_post_per_tensor_quant_fwd,
     silu_mul_dynamic_tensorwise_quant_for_cutlass_moe,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
@@ -388,13 +389,20 @@ def cutlass_w4a8_moe_deepep_normal(
         128,
         topk,
     )
-    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
-    silu_and_mul(c1, intermediate)
-
     intermediate_q = torch.empty(
-        intermediate.shape, dtype=torch.float8_e4m3fn, device=device
+        (m * topk, n), dtype=torch.float8_e4m3fn, device=device
     )
-    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
+    if a2_scale is None:
+        a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
+        silu_mul_dynamic_tensorwise_quant_for_cutlass_moe(
+            c1, intermediate_q, a2_scale, expert_offsets[-1:], m * topk, n
+        )
+    else:
+        intermediate = torch.empty(
+            (m * topk, n), device=device, dtype=torch.bfloat16
+        )
+        silu_and_mul(c1, intermediate)
+        per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
 
     cutlass_w4a8_moe_mm(
         c2,
@@ -552,6 +560,9 @@ def cutlass_w4a8_moe_deepep_ll(
     intermediate_q = torch.empty(
         (num_experts, m, n), device=a_states.device, dtype=torch.float8_e4m3fn
     )
+    if a2_scale is None:
+        a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
+        silu_and_mul_masked_absmax_fwd(c1, masked_m, a2_scale)
     silu_and_mul_masked_post_per_tensor_quant_fwd(
         c1, intermediate_q, masked_m, a2_scale
     )

@@ -1516,6 +1516,107 @@ def _silu_and_mul_post_per_tensor_quant_kernel(
         tl.store(out_ptr, output_q, mask=mask_d)
 
 
+@triton.jit
+def _silu_and_mul_masked_absmax_kernel(
+    input_ptr,
+    stride_input_expert,
+    stride_input_token,
+    stride_input_dim,
+    scale_ptr,
+    masked_m_ptr,
+    inner_dim,
+    fp8_max,
+    BLOCK_N: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
+):
+    """Mirror of _silu_and_mul_post_per_tensor_quant_kernel but only writes
+    scale = max(|silu(gate)*up|) / fp8_max via atomic_max.
+
+    The caller must zero-initialise ``scale_ptr`` (a single fp32 scalar).
+    """
+    expert_id = tl.program_id(2)
+    block_id_token = tl.program_id(1)
+    block_id_dim = tl.program_id(0)
+
+    num_token_blocks = tl.num_programs(1)
+
+    token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+
+    stride_input_expert = tl.cast(stride_input_expert, tl.int32)
+    stride_input_token = tl.cast(stride_input_token, tl.int32)
+
+    offset_d = block_id_dim * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_d = offset_d < inner_dim
+
+    input_base_offs = input_ptr + expert_id * stride_input_expert + offset_d
+
+    absmax = 0.0
+    for token_idx in tl.range(
+        block_id_token, token_num_cur_expert, num_token_blocks, num_stages=NUM_STAGE
+    ):
+        gate_ptr = input_base_offs + token_idx * stride_input_token
+        up_ptr = gate_ptr + inner_dim
+        gate = tl.load(gate_ptr, mask=mask_d, other=0.0).to(tl.float32)
+        up = tl.load(up_ptr, mask=mask_d, other=0.0).to(tl.float32)
+
+        # SiLU: x * sigmoid(x)
+        gate = gate / (1 + tl.exp(-gate))
+        gate_up = up * gate
+
+        absmax = tl.maximum(absmax, tl.max(tl.abs(gate_up)))
+
+    absmax = tl.maximum(absmax, 1e-10)
+    tl.atomic_max(scale_ptr, absmax / fp8_max)
+
+
+def silu_and_mul_masked_absmax_fwd(
+    input: torch.Tensor,
+    masked_m: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Two-pass companion to ``silu_and_mul_masked_post_per_tensor_quant_fwd``.
+
+    Writes ``scale = max(|silu(gate)*up|) / fp8_max`` over the valid
+    (per-expert masked) tokens. The caller then feeds the resulting scale
+    back into the static silu+mul+quant kernel.
+
+    Args:
+        input: [expert_num, token_num_padded, 2 * inner_dim]
+        masked_m: [expert_num], actual token count for each expert
+        scale: float32 scalar tensor (numel == 1). Reset to 0 internally.
+    """
+    assert input.is_contiguous()
+    assert input.ndim == 3
+    assert input.shape[0] == masked_m.shape[0]
+    assert input.shape[-1] % 2 == 0
+    assert scale.numel() == 1
+
+    expert_num = input.shape[0]
+    inner_dim = input.shape[-1] // 2
+
+    BLOCK_N = 256
+    BLOCK_M = 64 if expert_num < 4 else 32
+    NUM_STAGES = 3
+    hidden_dim_split_block_num = triton.cdiv(inner_dim, BLOCK_N)
+
+    grid = (hidden_dim_split_block_num, BLOCK_M, expert_num)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+    scale.zero_()
+
+    _silu_and_mul_masked_absmax_kernel[grid](
+        input,
+        *input.stride(),
+        scale,
+        masked_m,
+        inner_dim,
+        fp8_max,
+        BLOCK_N=BLOCK_N,
+        NUM_STAGE=NUM_STAGES,
+    )
+    return scale
+
+
 def silu_and_mul_masked_post_per_tensor_quant_fwd(
     input: torch.Tensor,
     output: torch.Tensor,
