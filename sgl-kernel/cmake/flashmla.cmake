@@ -76,10 +76,16 @@ include(FetchContent)
 #     buf=0, t=0, dim_block=0, idx_in_wg=0, warpgroup_idx=2, blockIdx=0).
 #     NamedBarrier::sync added before printf so neighbor staging writes are
 #     visible. Will revert after root cause is fixed.
+#   460dbd0: [flashmla-kv2bit] KDUMP2 per-band R@x partial sums + R samples.
+#     Adds sum_lo/sum_hi (R[0,*]*s_x[*] over d<256 / d>=256), R[0,d] and
+#     s_x[d] samples at d in {0,64,128,255,256,300,447}, R[1..3,0..3] for
+#     row-major stride verification, and staging[4..15]. Used to localize
+#     whether R@x diverges in a specific dim band (orientation/stride bug)
+#     vs the staging->sK GMMA-swizzle write being incorrect.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG 2ac14f3
+    GIT_TAG 460dbd0
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
