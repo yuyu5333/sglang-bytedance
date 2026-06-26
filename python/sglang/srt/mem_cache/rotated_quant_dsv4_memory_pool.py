@@ -1333,13 +1333,22 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         #     fatal op，是当前必须 `--disable-cuda-graph` 的唯一原因；
         #   * shadow 即使被刷新也无人消费 (sparse_decode.h validator 见 6
         #     个 packed kwargs 全非 None 即 use_packed=true，绕过 shadow)。
-        # → 默认整体跳过 prologue (env=1)，捎带把整条 capture-unsafe 链
-        #   一并扫掉，让 server 可以去掉 `--disable-cuda-graph` 跑 graph。
+        # → 对 SWA 主窗口可默认跳过 prologue (env=1)，捎带把整条
+        #   capture-unsafe 链一并扫掉，让 server 可以去掉
+        #   `--disable-cuda-graph` 跑 graph。
+        #
+        # [M3.c.4 Stage-5 fix] 但 c4/c128 extra_k_cache 不是 SWA 主窗口：
+        # FlashMLA sparse_fp8 kernel only enables packed read for
+        # `!IS_EXTRA_BLOCK`; extra blocks explicitly stay on the dense FP8
+        # path. Therefore extra_k_cache still consumes the shadow/native
+        # FP8-layout buffer and must be refreshed even when SWA shadow
+        # refresh is skipped.
         #
         # 退路：SGLANG_RQ_SKIP_SHADOW_REFRESH=0 时退回原 shadow refresh
         # 行为，用于 dense-path 调试 / 回归对照。
-        if os.environ.get("SGLANG_RQ_SKIP_SHADOW_REFRESH", "1") == "1":
-            return
+        skip_swa_shadow_refresh = (
+            os.environ.get("SGLANG_RQ_SKIP_SHADOW_REFRESH", "1") == "1"
+        )
         # 诊断模式 SGLANG_RQ_WALL_BYPASS_QUANT=1: shadow_buffer 已被 store
         # 路径用 native FP8 kernel 直接写入真值, refresh 会用 packed (全 0)
         # 覆盖它 -> 跳过 SWA refresh; c4/c128 在 bypass 模式下仍走 packed,
@@ -1359,6 +1368,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             swa_pages is not None
             and "swa" in self._wall_pools
             and not bypass_quant
+            and not skip_swa_shadow_refresh
         ):
             entry = self._wall_pools["swa"]
             local_layer_id = self._swa_local_layer_id(layer_id)
