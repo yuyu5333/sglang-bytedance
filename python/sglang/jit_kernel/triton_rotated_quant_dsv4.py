@@ -503,13 +503,14 @@ def triton_scatter_tokens_to_shadow(
 # ---------------------------------------------------------------------------
 @triton.jit
 def _fused_norm_rope_kernel(
-    kv_ptr,        # [N, 512] BF16
+    kv_ptr,        # [N, 512] BF16 (row stride = kv_row_stride, may be > ROW_DIM)
     weight_ptr,    # [512] BF16
     freqs_cis_ptr, # [max_pos, 32] complex64 -> fp32 interleaved [max_pos, 64]
     pos_ptr,       # [N] i64
-    out_ptr,        # [N, 512] BF16
+    out_ptr,        # [N, 512] BF16 (contiguous, row stride = ROW_DIM)
     N,
     eps,
+    kv_row_stride,  # runtime: input row stride in elements (qkv_a slice => 1536)
     ROW_DIM: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
@@ -520,12 +521,15 @@ def _fused_norm_rope_kernel(
     if row >= N:
         return
 
+    in_base = row * kv_row_stride
+    out_base = row * ROW_DIM
+
     # Step 1: accumulate mean of squares
     sum_sq = 0.0
     for b_start in range(0, ROW_DIM, BLOCK_SIZE):
         offs = b_start + tl.arange(0, BLOCK_SIZE)
         mask = offs < ROW_DIM
-        kv = tl.load(kv_ptr + row * ROW_DIM + offs, mask=mask, other=0.0)
+        kv = tl.load(kv_ptr + in_base + offs, mask=mask, other=0.0)
         kv_f = kv.to(tl.float32)
         sum_sq += tl.sum(kv_f * kv_f, axis=0)
     norm = sum_sq / ROW_DIM
@@ -535,10 +539,10 @@ def _fused_norm_rope_kernel(
     for b_start in range(0, NOPE_DIM, BLOCK_SIZE):
         offs = b_start + tl.arange(0, BLOCK_SIZE)
         mask = offs < NOPE_DIM
-        kv = tl.load(kv_ptr + row * ROW_DIM + offs, mask=mask, other=0.0)
+        kv = tl.load(kv_ptr + in_base + offs, mask=mask, other=0.0)
         w = tl.load(weight_ptr + offs, mask=mask, other=0.0)
         out = kv.to(tl.float32) * rsqrt_val * w.to(tl.float32)
-        tl.store(out_ptr + row * ROW_DIM + offs, out.to(tl.bfloat16), mask=mask)
+        tl.store(out_ptr + out_base + offs, out.to(tl.bfloat16), mask=mask)
 
     # Step 3: RoPE portion: columns [NOPE_DIM, ROW_DIM).
     # kv rope layout: [re_0, im_0, re_1, im_1, ...] (interleaved).
@@ -549,8 +553,8 @@ def _fused_norm_rope_kernel(
     re_offs = NOPE_DIM + 2 * i
     im_offs = re_offs + 1
     # Normalize + weight for each complex pair.
-    re_kv = tl.load(kv_ptr + row * ROW_DIM + re_offs, mask=mask, other=0.0).to(tl.float32)
-    im_kv = tl.load(kv_ptr + row * ROW_DIM + im_offs, mask=mask, other=0.0).to(tl.float32)
+    re_kv = tl.load(kv_ptr + in_base + re_offs, mask=mask, other=0.0).to(tl.float32)
+    im_kv = tl.load(kv_ptr + in_base + im_offs, mask=mask, other=0.0).to(tl.float32)
     re_w = tl.load(weight_ptr + re_offs, mask=mask, other=0.0).to(tl.float32)
     im_w = tl.load(weight_ptr + im_offs, mask=mask, other=0.0).to(tl.float32)
     re_kv = re_kv * rsqrt_val * re_w
@@ -560,8 +564,8 @@ def _fused_norm_rope_kernel(
     fc_im = tl.load(freqs_cis_ptr + pos * ROPE_DIM + 2 * i + 1, mask=mask, other=0.0)
     out_re = re_kv * fc_re - im_kv * fc_im
     out_im = re_kv * fc_im + im_kv * fc_re
-    tl.store(out_ptr + row * ROW_DIM + re_offs, out_re.to(tl.bfloat16), mask=mask)
-    tl.store(out_ptr + row * ROW_DIM + im_offs, out_im.to(tl.bfloat16), mask=mask)
+    tl.store(out_ptr + out_base + re_offs, out_re.to(tl.bfloat16), mask=mask)
+    tl.store(out_ptr + out_base + im_offs, out_im.to(tl.bfloat16), mask=mask)
 
 
 def triton_fused_norm_rope(
@@ -612,12 +616,22 @@ def triton_fused_norm_rope(
         f"got {freqs_fp32.shape}"
     )
 
-    out = torch.empty_like(kv)
+    # Output is always contiguous [N, 512]; the kernel writes row-major.
+    # NOTE: torch.empty_like(kv) would inherit a strided layout when ``kv``
+    # is a non-contiguous slice (e.g. qkv_a[..., q_lora_rank:] with
+    # stride[0]=1536), so allocate a fresh contiguous buffer explicitly.
+    out = torch.empty((N, _MLA_HEAD_DIM), dtype=kv.dtype, device=kv.device)
+    # The kernel honours the input row stride so a non-contiguous ``kv``
+    # slice (the common DSv4 case) is read correctly without a copy. The
+    # innermost dim is assumed contiguous (stride 1), which holds for the
+    # qkv_a[..., q_lora_rank:] slice.
+    kv_row_stride = int(kv.stride(0))
     # Kernel launch: one program per row; each program processes the full
     # row in 128-column blocks for the sum-of-squares reduction and the
     # nope portion, and a single 64-wide load for rope.
     _fused_norm_rope_kernel[(N,)](
         kv, kv_weight, freqs_fp32, positions.to(torch.int64), out, N, eps,
+        kv_row_stride,
         ROW_DIM=_MLA_HEAD_DIM,
         NOPE_DIM=_MLA_NOPE_DIM,
         ROPE_DIM=_MLA_TILE_SIZE,
