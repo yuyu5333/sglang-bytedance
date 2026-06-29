@@ -396,6 +396,31 @@ class DeepseekV4AttnBackend(
         seq_lens: torch.Tensor,
         out_cache_loc: torch.Tensor,
     ) -> Union[DSV4Metadata, DSV4RawDecodeMetadata]:
+        if not (
+            req_pool_indices.shape[0]
+            == seq_lens.shape[0]
+            == out_cache_loc.shape[0]
+        ):
+            import traceback
+
+            logger.error(
+                "[DSV4-DEBUG] init_forward_metadata_decode shape mismatch: "
+                "speculative_step_id=%s speculative_num_steps=%s topk=%s "
+                "req_pool_indices=%s seq_lens=%s out_cache_loc=%s max_seq_len=%s\n"
+                "out_cache_loc[:16]=%s\nreq_pool_indices[:16]=%s\nseq_lens[:16]=%s\n"
+                "Caller stack:\n%s",
+                getattr(self, "speculative_step_id", None),
+                getattr(self, "speculative_num_steps", None),
+                getattr(self, "topk", None),
+                tuple(req_pool_indices.shape),
+                tuple(seq_lens.shape),
+                tuple(out_cache_loc.shape),
+                max_seq_len,
+                out_cache_loc.detach().flatten()[:16].tolist(),
+                req_pool_indices.detach().flatten()[:16].tolist(),
+                seq_lens.detach().flatten()[:16].tolist(),
+                "".join(traceback.format_stack(limit=20)),
+            )
         assert (
             req_pool_indices.shape[0] == seq_lens.shape[0] == out_cache_loc.shape[0]
         ), f"{req_pool_indices.shape=} {seq_lens.shape=} {out_cache_loc.shape=}"
@@ -672,6 +697,21 @@ class DeepseekV4AttnBackend(
         assert self.swa_page_size % SWA_WINDOW == 0 and self.page_size % 128 == 0
         assert seq_lens_cpu is not None
         max_seq_len = int(seq_lens_cpu.max().item())
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[DSV4-DEBUG] init_forward_metadata: mode=%s "
+                "speculative_step_id=%s speculative_num_steps=%s topk=%s "
+                "batch_size=%s req_pool_indices=%s seq_lens=%s out_cache_loc=%s",
+                forward_batch.forward_mode,
+                getattr(self, "speculative_step_id", None),
+                getattr(self, "speculative_num_steps", None),
+                getattr(self, "topk", None),
+                forward_batch.batch_size,
+                tuple(req_pool_indices.shape),
+                tuple(seq_lens.shape),
+                tuple(forward_batch.out_cache_loc.shape),
+            )
 
         if forward_batch.forward_mode.is_decode_or_idle():
             metadata = self.init_forward_metadata_decode(
@@ -1198,6 +1238,18 @@ class DeepseekV4MultiStepBackend(DeepseekV4AttnBackend):
             )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
+        logger.error(
+            "[DSV4-DEBUG] DraftAttnBackend.init_forward_metadata: mode=%s "
+            "speculative_num_steps=%s topk=%s batch_size=%s "
+            "req_pool_indices=%s seq_lens=%s out_cache_loc=%s",
+            forward_batch.forward_mode,
+            self.speculative_num_steps,
+            self.topk,
+            forward_batch.batch_size,
+            tuple(forward_batch.req_pool_indices.shape),
+            tuple(forward_batch.seq_lens.shape),
+            tuple(forward_batch.out_cache_loc.shape),
+        )
         for i in range(self.speculative_num_steps - 1):
             self.attn_backends[i].init_forward_metadata(forward_batch)
 
