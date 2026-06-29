@@ -291,6 +291,47 @@ def rotated_store_to_packed(
                     f"rmse={_rmse:.8f} max_abs={_max_abs:.8f}",
                     flush=True,
                 )
+                # KDUMP9: separate "calib scale/zero suboptimal" from
+                # "bit-budget SNR ceiling". Recompute IDEAL per-dim
+                # min-max scale/zero on THIS batch's real rotated nope
+                # (K_rot), using the SAME per-dim bit levels as calib,
+                # then sweep fixed 2/3/4/6/8-bit. R is orthogonal so
+                # cosine in K_rot space == cosine in nope space.
+                try:
+                    _Kr = K_rot.detach().to(torch.float32)      # [N, D]
+                    _nope_f = nope.detach().to(torch.float32)   # [N, D]
+                    _lv = levels_f.detach().to(torch.float32)   # [D] = 2^bits-1
+                    if _lv.dim() == 2:
+                        _lv = _lv[0]
+                    _kmin = _Kr.min(dim=0, keepdim=True).values  # [1, D]
+                    _kmax = _Kr.max(dim=0, keepdim=True).values
+                    _is = ((_kmax - _kmin) /
+                           _lv.clamp(min=1).unsqueeze(0)).clamp(min=1e-8)
+                    _ic = ((_Kr - _kmin) / _is).round().clamp(min=0)
+                    _ic = torch.minimum(_ic, _lv.unsqueeze(0))
+                    _ixh = _ic * _is + _kmin
+                    _irec = _ixh @ R.t()
+                    _ideal_cos = torch.nn.functional.cosine_similarity(
+                        _nope_f, _irec, dim=-1).mean().item()
+                    _sw = {}
+                    for _bb in (2, 3, 4, 6, 8):
+                        _L = float((1 << _bb) - 1)
+                        _s = ((_kmax - _kmin) / _L).clamp(min=1e-8)
+                        _c = ((_Kr - _kmin) / _s).round().clamp(min=0)
+                        _c = _c.clamp(max=_L)
+                        _xh = _c * _s + _kmin
+                        _rc = _xh @ R.t()
+                        _sw[_bb] = torch.nn.functional.cosine_similarity(
+                            _nope_f, _rc, dim=-1).mean().item()
+                    print(
+                        f"[KDUMP9-sweep] cfg_id%1000={id(cfg) % 1000} N={N} "
+                        f"ideal_perdim_cos={_ideal_cos:.6f} "
+                        f"b2={_sw[2]:.6f} b3={_sw[3]:.6f} b4={_sw[4]:.6f} "
+                        f"b6={_sw[6]:.6f} b8={_sw[8]:.6f}",
+                        flush=True,
+                    )
+                except Exception as _e9:
+                    print(f"[KDUMP9-sweep] failed: {_e9}", flush=True)
             except Exception as _e:
                 print(f"[KDUMP7-store-dims] dump failed: {_e}", flush=True)
 
