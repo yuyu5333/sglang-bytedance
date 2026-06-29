@@ -330,6 +330,42 @@ def rotated_store_to_packed(
                         f"b6={_sw[6]:.6f} b8={_sw[8]:.6f}",
                         flush=True,
                     )
+                    # KDUMP10: PER-TOKEN dynamic scale/zero (route A).
+                    # Each token gets its own min/max -> scale/zero, then
+                    # fixed b-bit RTN. Two granularities:
+                    #  (pt)  per-token single scalar over all 448 dims
+                    #  (pg)  per-token per-group=64 (7 groups) scale/zero
+                    # Reported in K_rot space (R orthogonal => cos preserved).
+                    def _pt_cos(_bb, _grp):
+                        _L = float((1 << _bb) - 1)
+                        if _grp == 0:
+                            _mn = _Kr.min(dim=1, keepdim=True).values  # [N,1]
+                            _mx = _Kr.max(dim=1, keepdim=True).values
+                            _s = ((_mx - _mn) / _L).clamp(min=1e-8)
+                            _c = ((_Kr - _mn) / _s).round().clamp(min=0)
+                            _c = _c.clamp(max=_L)
+                            _xh = _c * _s + _mn
+                        else:
+                            _D = _Kr.shape[1]
+                            _ng = _D // _grp
+                            _kr = _Kr.reshape(N, _ng, _grp)
+                            _mn = _kr.min(dim=2, keepdim=True).values  # [N,ng,1]
+                            _mx = _kr.max(dim=2, keepdim=True).values
+                            _s = ((_mx - _mn) / _L).clamp(min=1e-8)
+                            _c = ((_kr - _mn) / _s).round().clamp(min=0)
+                            _c = _c.clamp(max=_L)
+                            _xh = (_c * _s + _mn).reshape(N, _D)
+                        _rc = _xh @ R.t()
+                        return torch.nn.functional.cosine_similarity(
+                            _nope_f, _rc, dim=-1).mean().item()
+                    print(
+                        f"[KDUMP10-pertoken] cfg_id%1000={id(cfg) % 1000} N={N} "
+                        f"pt_b2={_pt_cos(2,0):.6f} pt_b3={_pt_cos(3,0):.6f} "
+                        f"pt_b4={_pt_cos(4,0):.6f} "
+                        f"pg64_b2={_pt_cos(2,64):.6f} pg64_b3={_pt_cos(3,64):.6f} "
+                        f"pg64_b4={_pt_cos(4,64):.6f}",
+                        flush=True,
+                    )
                 except Exception as _e9:
                     print(f"[KDUMP9-sweep] failed: {_e9}", flush=True)
             except Exception as _e:
