@@ -998,6 +998,26 @@ class EAGLEWorkerV2(BaseSpecWorker):
         verify_input.num_tokens_per_req = self.speculative_num_steps + 1
         bs = len(batch.seq_lens)
 
+        logger.error(
+            "[VERIFY-DEBUG] verify entry: bs=%s num_tokens_per_req=%s "
+            "num_steps=%s num_draft_tokens=%s draft_token=%s "
+            "seq_lens.shape=%s req_pool_indices.shape=%s "
+            "out_cache_loc.shape=%s forward_mode=%s",
+            bs,
+            verify_input.num_tokens_per_req,
+            self.speculative_num_steps,
+            self.speculative_num_draft_tokens,
+            tuple(verify_input.draft_token.shape)
+            if verify_input.draft_token is not None
+            else None,
+            tuple(batch.seq_lens.shape),
+            tuple(batch.req_pool_indices.shape),
+            tuple(batch.out_cache_loc.shape)
+            if batch.out_cache_loc is not None
+            else None,
+            batch.forward_mode,
+        )
+
         # Batch 1: Target verify
         # Prepare for target verify in a separate stream
         with self.plan_stream_ctx:

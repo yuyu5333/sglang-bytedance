@@ -540,6 +540,18 @@ class DeepseekV4AttnBackend(
         num_tokens = self.speculative_num_draft_tokens * batch_size
         if out_cache_loc is None:
             out_cache_loc = seq_lens.new_zeros(num_tokens)
+        logger.error(
+            "[VERIFY-DEBUG] init_forward_metadata_target_verify_old: "
+            "batch_size=%s num_draft_tokens=%s num_tokens=bs*ndt=%s "
+            "seq_lens.shape=%s req_pool_indices.shape=%s "
+            "out_cache_loc.shape=%s",
+            batch_size,
+            self.speculative_num_draft_tokens,
+            num_tokens,
+            tuple(seq_lens.shape),
+            tuple(req_pool_indices.shape),
+            tuple(out_cache_loc.shape),
+        )
         return self.init_forward_metadata_prefill(
             max_seq_len=max_seq_len,
             req_pool_indices=req_pool_indices,
@@ -568,6 +580,22 @@ class DeepseekV4AttnBackend(
             self.expand_extend_with_same_length(
                 bs, num_draft_tokens, seq_lens, req_pool_indices
             )
+        )
+        logger.error(
+            "[VERIFY-DEBUG] make_forward_metadata_from_raw_verify: "
+            "bs=%s num_draft_tokens=%s expected_q_tokens=bs*ndt=%s "
+            "seq_lens.shape=%s seq_lens_casual.shape=%s "
+            "req_pool_indices.shape=%s req_pool_indices_repeated.shape=%s "
+            "out_cache_loc.shape=%s extend_seq_lens.shape=%s",
+            bs,
+            num_draft_tokens,
+            bs * num_draft_tokens,
+            tuple(seq_lens.shape),
+            tuple(seq_lens_casual.shape),
+            tuple(req_pool_indices.shape),
+            tuple(req_pool_indices_repeated.shape),
+            tuple(out_cache_loc.shape) if out_cache_loc is not None else None,
+            tuple(extend_seq_lens.shape) if extend_seq_lens is not None else None,
         )
         core_attn_metadata = self.make_core_attn_metadata(
             req_to_token=self.req_to_token,

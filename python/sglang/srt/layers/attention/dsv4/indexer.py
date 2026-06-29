@@ -295,6 +295,27 @@ class C4IndexerBackendMixin:
             assert isinstance(self, CompressorBackendMixin)
 
         weights = c4_indexer.compute_weights(x, skip_scale=True)
+        import logging as _logging
+
+        _logger = _logging.getLogger(__name__)
+        _logger.error(
+            "[VERIFY-DEBUG] _forward_prepare_normal pre compute_q: "
+            "mode=%s layer_id=%s q_lora.shape=%s x.shape=%s "
+            "positions.shape=%s positions.dtype=%s weights.shape=%s "
+            "batch_size=%s input_ids.shape=%s out_cache_loc.shape=%s",
+            forward_batch.forward_mode,
+            c4_indexer.layer_id,
+            tuple(q_lora.shape),
+            tuple(x.shape),
+            tuple(positions.shape),
+            positions.dtype,
+            tuple(weights.shape),
+            forward_batch.batch_size,
+            tuple(forward_batch.input_ids.shape),
+            tuple(forward_batch.out_cache_loc.shape)
+            if forward_batch.out_cache_loc is not None
+            else None,
+        )
         q_fp8, weights = c4_indexer.compute_q(q_lora, positions, weights)
         self.forward_indexer_compressor(
             x=x,
