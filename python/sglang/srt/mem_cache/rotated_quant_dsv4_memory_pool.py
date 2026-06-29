@@ -807,6 +807,42 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     # ------------------------------------------------------------------
     # Wall-mode write overrides
     # ------------------------------------------------------------------
+    def _dyn_range_rotated_roundtrip(
+        self, cat_bf16_512: torch.Tensor, layer_id: int,
+    ) -> torch.Tensor:
+        """[DIAG] Per-token per-64-dim-group dynamic-range rotated round-trip.
+
+        Takes ``cat = [N, 512]`` BF16 (nope[:448] + rope[448:]), rotates the
+        nope by the layer's calib R, quantizes each (token, 64-dim group) with
+        its OWN min/max dynamic range to INT8, dequantizes, inverse-rotates,
+        and returns a new ``[N, 512]`` with the reconstructed nope (rope
+        untouched). Used to confirm the dynamic-range route fixes token salad
+        without rebuilding the FlashMLA kernel. Group size 64 (= MLA tile) and
+        8-bit are chosen to match KDUMP10 pg64_b8-equivalent (cos≈0.9999).
+        """
+        from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+            _get_cached_cfg_gpu, _MLA_NOPE_DIM,
+        )
+        cfg = self._nope_cfgs[layer_id]
+        cfg_gpu = _get_cached_cfg_gpu(cfg, cat_bf16_512.device)
+        R = cfg_gpu["R"]  # [448, 448] f32
+        nope = cat_bf16_512[:, :_MLA_NOPE_DIM].to(torch.float32)  # [N, 448]
+        N, D = nope.shape
+        grp = 64
+        ng = D // grp
+        levels = 255.0  # 8-bit
+        K_rot = nope @ R  # [N, 448]
+        kr = K_rot.reshape(N, ng, grp)
+        mn = kr.min(dim=2, keepdim=True).values
+        mx = kr.max(dim=2, keepdim=True).values
+        s = ((mx - mn) / levels).clamp(min=1e-8)
+        c = ((kr - mn) / s).round().clamp(min=0.0, max=levels)
+        xh = (c * s + mn).reshape(N, D)
+        recon = xh @ R.t()  # [N, 448]
+        out = cat_bf16_512.clone()
+        out[:, :_MLA_NOPE_DIM] = recon.to(cat_bf16_512.dtype)
+        return out
+
     def set_swa_key_buffer_radix_fused(
         self,
         layer_id: int,
@@ -1019,9 +1055,22 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # T3 token-shadow 模式: cat 已经是 norm+rope 后的 BF16 [N, 512]，
         # 直接量化写 shadow，prologue 跳过 page refresh。
         if _wall_token_shadow_enabled():
+            cat_for_shadow = self._wall_kv_input(cat)
+            # [DIAG] SGLANG_RQ_DYN_SHADOW: replace nope with a per-token,
+            # per-64-dim-group dynamic-range INT8 rotated round-trip BEFORE
+            # writing the authoritative shadow. This isolates whether the
+            # token salad is caused purely by calib-static range mismatch
+            # (cos≈0.997/layer) vs a structural issue: per-token-group
+            # dynamic range gives cos≈0.9999/token (KDUMP10 pg64) and is
+            # fully streamable (no cross-token blk buffering). If output is
+            # coherent under this flag, the dynamic-range route is confirmed.
+            if os.environ.get("SGLANG_RQ_DYN_SHADOW", "0") == "1":
+                cat_for_shadow = self._dyn_range_rotated_roundtrip(
+                    cat_for_shadow, layer_id,
+                )
             self._write_tokens_to_shadow(
                 self._wall_pools["swa"], local_layer_id,
-                self._wall_kv_input(cat), swa_loc,
+                cat_for_shadow, swa_loc,
             )
         # T3: mark dirty pages so prologue 只刷新被本次写过的页
         self._mark_pages_dirty_from_loc(
