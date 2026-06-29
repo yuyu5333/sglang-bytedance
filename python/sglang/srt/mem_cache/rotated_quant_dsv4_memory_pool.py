@@ -1491,6 +1491,15 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return None
         if kind not in self._wall_pools:
             return None
+        # [DIAG] Force the FlashMLA all-None (dense) branch so attention
+        # consumes the SHADOW buffer (refreshed from packed via
+        # _refresh_shadow_pages) instead of the kernel use_packed inner
+        # loop. Decisive bisect: if output is coherent under this flag but
+        # salad without it, the cross-token use_packed read path is the bug
+        # (writer packed content + Triton bitpack are exonerated). Requires
+        # drop_shadow=0 + SGLANG_RQ_SKIP_SHADOW_REFRESH=0 + --disable-cuda-graph.
+        if os.environ.get("SGLANG_RQ_FORCE_DENSE_READ", "0") == "1":
+            return None
         if _wall_drop_packed_enabled():
             # No packed buffer to expose; sparse-path falls back to the
             # shadow FP8 path (kernel runs the all-None branch).
