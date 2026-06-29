@@ -437,6 +437,21 @@ class EagleDraftWorker(BaseDraftWorker):
             self.speculative_num_steps, -1
         )
 
+        # `out_cache_loc_swa` is precomputed (hybrid SWA models) from the full
+        # `out_cache_loc` via element-wise `translate_loc_from_full_to_swa`, so
+        # its layout matches `out_cache_loc` exactly. Reshape/permute it the
+        # same way so each draft step sees a per-step slice; otherwise the next
+        # `_pad_inputs_to_size` call would try to pad a tensor that is already
+        # `num_steps`x too long and hit "negative dimension".
+        out_cache_loc_swa = forward_batch.out_cache_loc_swa
+        if out_cache_loc_swa is not None:
+            out_cache_loc_swa = out_cache_loc_swa.reshape(
+                forward_batch.batch_size, self.topk, self.speculative_num_steps
+            )
+            out_cache_loc_swa = out_cache_loc_swa.permute((2, 0, 1)).reshape(
+                self.speculative_num_steps, -1
+            )
+
         # Return values
         score_list: List[torch.Tensor] = []
         token_list: List[torch.Tensor] = []
@@ -459,6 +474,8 @@ class EagleDraftWorker(BaseDraftWorker):
             # Set inputs
             forward_batch.input_ids = input_ids
             forward_batch.out_cache_loc = out_cache_loc[i]
+            if out_cache_loc_swa is not None:
+                forward_batch.out_cache_loc_swa = out_cache_loc_swa[i]
             forward_batch.attn_backend = self.draft_attn_backend.attn_backends[i]
             spec_info.hidden_states = hidden_states
 
