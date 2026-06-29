@@ -396,31 +396,6 @@ class DeepseekV4AttnBackend(
         seq_lens: torch.Tensor,
         out_cache_loc: torch.Tensor,
     ) -> Union[DSV4Metadata, DSV4RawDecodeMetadata]:
-        if not (
-            req_pool_indices.shape[0]
-            == seq_lens.shape[0]
-            == out_cache_loc.shape[0]
-        ):
-            import traceback
-
-            logger.error(
-                "[DSV4-DEBUG] init_forward_metadata_decode shape mismatch: "
-                "speculative_step_id=%s speculative_num_steps=%s topk=%s "
-                "req_pool_indices=%s seq_lens=%s out_cache_loc=%s max_seq_len=%s\n"
-                "out_cache_loc[:16]=%s\nreq_pool_indices[:16]=%s\nseq_lens[:16]=%s\n"
-                "Caller stack:\n%s",
-                getattr(self, "speculative_step_id", None),
-                getattr(self, "speculative_num_steps", None),
-                getattr(self, "topk", None),
-                tuple(req_pool_indices.shape),
-                tuple(seq_lens.shape),
-                tuple(out_cache_loc.shape),
-                max_seq_len,
-                out_cache_loc.detach().flatten()[:16].tolist(),
-                req_pool_indices.detach().flatten()[:16].tolist(),
-                seq_lens.detach().flatten()[:16].tolist(),
-                "".join(traceback.format_stack(limit=20)),
-            )
         assert (
             req_pool_indices.shape[0] == seq_lens.shape[0] == out_cache_loc.shape[0]
         ), f"{req_pool_indices.shape=} {seq_lens.shape=} {out_cache_loc.shape=}"
@@ -697,21 +672,6 @@ class DeepseekV4AttnBackend(
         assert self.swa_page_size % SWA_WINDOW == 0 and self.page_size % 128 == 0
         assert seq_lens_cpu is not None
         max_seq_len = int(seq_lens_cpu.max().item())
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "[DSV4-DEBUG] init_forward_metadata: mode=%s "
-                "speculative_step_id=%s speculative_num_steps=%s topk=%s "
-                "batch_size=%s req_pool_indices=%s seq_lens=%s out_cache_loc=%s",
-                forward_batch.forward_mode,
-                getattr(self, "speculative_step_id", None),
-                getattr(self, "speculative_num_steps", None),
-                getattr(self, "topk", None),
-                forward_batch.batch_size,
-                tuple(req_pool_indices.shape),
-                tuple(seq_lens.shape),
-                tuple(forward_batch.out_cache_loc.shape),
-            )
 
         if forward_batch.forward_mode.is_decode_or_idle():
             metadata = self.init_forward_metadata_decode(
@@ -1238,20 +1198,39 @@ class DeepseekV4MultiStepBackend(DeepseekV4AttnBackend):
             )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        logger.error(
-            "[DSV4-DEBUG] DraftAttnBackend.init_forward_metadata: mode=%s "
-            "speculative_num_steps=%s topk=%s batch_size=%s "
-            "req_pool_indices=%s seq_lens=%s out_cache_loc=%s",
-            forward_batch.forward_mode,
-            self.speculative_num_steps,
-            self.topk,
-            forward_batch.batch_size,
-            tuple(forward_batch.req_pool_indices.shape),
-            tuple(forward_batch.seq_lens.shape),
-            tuple(forward_batch.out_cache_loc.shape),
-        )
-        for i in range(self.speculative_num_steps - 1):
-            self.attn_backends[i].init_forward_metadata(forward_batch)
+        if self.speculative_num_steps <= 1:
+            return
+
+        # EAGLE draft v2 把 forward_batch.out_cache_loc 一次性分配成
+        # (bs * topk * num_steps,)，按 [bs, topk, num_steps] 布局（见
+        # eagle_info_v2.prepare_for_v2_draft 与 eagle_worker_v2.draft_forward
+        # 中的 reshape/permute）。每个 step 的子 attn backend 期望 out_cache_loc
+        # 长度与 req_pool_indices 对齐（cuda graph capture 路径 L1260-1270 也是按
+        # step 单独传），这里在非 cuda graph 路径同样按 step 切片，避免子 backend
+        # init_forward_metadata_decode 触发 shape 断言。
+        bs = forward_batch.batch_size
+        out_cache_loc_full = forward_batch.out_cache_loc
+        expected_full = bs * self.topk * self.speculative_num_steps
+        slice_per_step: Optional[torch.Tensor] = None
+        if (
+            out_cache_loc_full is not None
+            and expected_full > 0
+            and out_cache_loc_full.shape[0] == expected_full
+        ):
+            slice_per_step = (
+                out_cache_loc_full.reshape(bs, self.topk, self.speculative_num_steps)
+                .permute(2, 0, 1)
+                .reshape(self.speculative_num_steps, -1)
+            )
+
+        original_out_cache_loc = forward_batch.out_cache_loc
+        try:
+            for i in range(self.speculative_num_steps - 1):
+                if slice_per_step is not None:
+                    forward_batch.out_cache_loc = slice_per_step[i]
+                self.attn_backends[i].init_forward_metadata(forward_batch)
+        finally:
+            forward_batch.out_cache_loc = original_out_cache_loc
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
         for i in range(self.speculative_num_steps):

@@ -359,22 +359,6 @@ class EagleDraftWorker(BaseDraftWorker):
             ):
                 # Skip attention backend init for 1-step draft,
                 # `draft_forward` only does sample in this case.
-                logger.error(
-                    "[EAGLE-DEBUG] draft pre-attn-init: mode=%s topk=%s "
-                    "speculative_num_steps=%s batch_size=%s "
-                    "req_pool_indices=%s seq_lens=%s out_cache_loc=%s "
-                    "expected_out_cache_loc=bs*topk*num_steps=%s",
-                    forward_batch.forward_mode,
-                    self.topk,
-                    self.speculative_num_steps,
-                    forward_batch.batch_size,
-                    tuple(forward_batch.req_pool_indices.shape),
-                    tuple(forward_batch.seq_lens.shape),
-                    tuple(forward_batch.out_cache_loc.shape),
-                    forward_batch.batch_size
-                    * self.topk
-                    * self.speculative_num_steps,
-                )
                 self.draft_attn_backend.init_forward_metadata(forward_batch)
             parent_list, top_scores_index, draft_tokens = self.draft_forward(
                 forward_batch
