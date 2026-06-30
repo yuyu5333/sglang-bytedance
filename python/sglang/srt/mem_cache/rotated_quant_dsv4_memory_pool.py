@@ -132,6 +132,7 @@ def load_rotated_quant_dsv4_calibration(
             calib_ratios,
             list(compression_ratios),
         )
+    bit_uniform = int(meta.get("bit_uniform", 0))
 
     out: Dict[int, RotatedQuantizerConfig] = {}
     for lid in range(layer_num):
@@ -146,6 +147,7 @@ def load_rotated_quant_dsv4_calibration(
             bits=entry["nope"]["bits"].to(torch.int32),
             scale=entry["nope"]["scale"].to(torch.float32),
             zero=entry["nope"]["zero"].to(torch.float32),
+            bit_uniform=bit_uniform,
         )
     return out
 
@@ -386,6 +388,12 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         }
         sample = next(iter(cfgs.values()))
         self._sim_row_bytes = (int(sample.bits.sum().item()) + 7) // 8
+        # Route G: when calib._meta.bit_uniform>0, packed layout has an
+        # extra 28-byte per-token×7-group header (fp16 min + fp16 range).
+        # Carried into every packed_bytes_per_token() callsite so that
+        # pool wall_bpt / shadow refresh / bytes_per_page accounting all
+        # agree on the same physical layout.
+        self._sim_bit_uniform = int(getattr(sample, "bit_uniform", 0))
 
         # Wall-storage state.
         self._wall_pools: Dict[str, _WallPoolEntry] = {}
@@ -445,7 +453,9 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             packed_bytes_per_token,
         )
 
-        bpt_packed = packed_bytes_per_token(self._sim_row_bytes)
+        bpt_packed = packed_bytes_per_token(
+            self._sim_row_bytes, self._sim_bit_uniform
+        )
         self._wall_bpt = bpt_packed
 
         env_kinds = os.environ.get("SGLANG_RQ_WALL_KINDS", "swa,c4,c128")

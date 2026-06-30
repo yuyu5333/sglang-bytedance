@@ -338,6 +338,12 @@ class RotatedQuantizerConfig:
     bits: torch.Tensor     # [D] int32 in [1, 4]
     scale: torch.Tensor    # [D] fp32 affine scale
     zero: torch.Tensor     # [D] fp32 affine zero (q_lo)
+    # When > 0, the packed storage layout uses uniform-N-bit codes with a
+    # per-token×group affine (min + range_fp16 header) instead of the
+    # per-dim static scale/zero. Set by the calib loader from the calib
+    # file's `_meta.bit_uniform` field. Default 0 => legacy variable-bit
+    # path (per-dim Lloyd water-filling + static scale/zero).
+    bit_uniform: int = 0
     row_bits: int = field(init=False)
     row_bytes: int = field(init=False)
 

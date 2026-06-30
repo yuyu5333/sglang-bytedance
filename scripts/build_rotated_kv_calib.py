@@ -133,12 +133,20 @@ def _calibrate_side(
     q_lo: float,
     q_hi: float,
     chunk_tokens: int,
+    bit_uniform: int = 0,
 ) -> Dict[str, torch.Tensor]:
     """Run the calibrator on the *rotated* samples and build the per-coord table.
 
     ``samples`` is ``[N, H, D]``. We flatten head + token, rotate, feed to
     ``KVCalibrator`` in chunks, then derive ``RotatedQuantizer`` parameters
     via ``RotatedQuantizer.from_calibration``.
+
+    When ``bit_uniform > 0`` the per-dim variable-bit ``allocate_bits`` step
+    is bypassed: every coordinate gets exactly ``bit_uniform`` bits. The
+    static ``scale``/``zero`` table is still produced from the calibrated
+    (q_lo, q_hi) so existing dequant paths keep working, but downstream
+    packed-storage layouts (Route G F1) are free to ignore them and use a
+    per-token×group affine instead.
     """
     if samples.ndim != 3:
         raise ValueError(f"expected [N, H, D], got {tuple(samples.shape)}")
@@ -152,6 +160,27 @@ def _calibrate_side(
     for start in range(0, flat.shape[0], chunk):
         cal.observe(flat[start : start + chunk] @ R_f32)
     stats = cal.finalize()
+
+    if bit_uniform > 0:
+        # Uniform-bit override: every coordinate gets `bit_uniform` bits.
+        # Skip Lloyd reverse water-filling entirely. Build scale/zero
+        # directly from the calibrated (q_lo, q_hi) range.
+        if bit_uniform > 8:
+            raise ValueError(
+                f"--bit-uniform {bit_uniform} too large; supported range 1..8"
+            )
+        bits = torch.full((d,), int(bit_uniform), dtype=torch.int32)
+        q_lo_t = stats["q_lo"].to(torch.float32)
+        q_hi_t = stats["q_hi"].to(torch.float32)
+        levels = float((1 << int(bit_uniform)) - 1)
+        scale = (q_hi_t - q_lo_t) / max(levels, 1.0)
+        zero = q_lo_t
+        return {
+            "R": R_f32,
+            "bits": bits,
+            "scale": scale.to(torch.float32),
+            "zero": zero.to(torch.float32),
+        }
 
     quantizer = RotatedQuantizer.from_calibration(
         stats, R=R_f32, b_mean=b_mean, b_min=b_min, b_max=b_max
@@ -203,6 +232,7 @@ def build_mla_calibration(
     q_lo: float,
     q_hi: float,
     chunk_tokens: int,
+    bit_uniform: int = 0,
 ) -> Dict:
     """MLA 模式校准：仅对 latent 段做旋转 + bit 分配；rope 段不校准。
 
@@ -231,6 +261,7 @@ def build_mla_calibration(
             "kv_lora_rank": int(kv_lora_rank),
             "qk_rope_head_dim": int(qk_rope_head_dim),
             "layer_num": len(kv_dump),
+            "bit_uniform": int(bit_uniform),
         }
     }
     for lid in sorted(kv_dump.keys()):
@@ -260,6 +291,7 @@ def build_mla_calibration(
             q_lo=q_lo,
             q_hi=q_hi,
             chunk_tokens=chunk_tokens,
+            bit_uniform=bit_uniform,
         )
         logger.info(
             "[mla] layer %d done in %.1fs: bits[latent] mean=%.2f",
@@ -310,6 +342,7 @@ def build_dsv4_calibration(
     q_lo: float,
     q_hi: float,
     chunk_tokens: int,
+    bit_uniform: int = 0,
 ) -> Dict:
     """DSv4 模式校准：仅对 nope 段做旋转 + bit 分配；rope / indexer 段不校准。
 
@@ -338,6 +371,7 @@ def build_dsv4_calibration(
             "qk_rope_head_dim": int(qk_rope_head_dim),
             "compression_ratios": list(compression_ratios) if compression_ratios else [],
             "layer_num": len(kv_dump),
+            "bit_uniform": int(bit_uniform),
         }
     }
     for lid in sorted(kv_dump.keys()):
@@ -366,6 +400,7 @@ def build_dsv4_calibration(
             q_lo=q_lo,
             q_hi=q_hi,
             chunk_tokens=chunk_tokens,
+            bit_uniform=bit_uniform,
         )
         logger.info(
             "[dsv4] layer %d done in %.1fs: bits[nope] mean=%.2f",
@@ -387,6 +422,7 @@ def build_calibration(
     q_lo: float,
     q_hi: float,
     chunk_tokens: int,
+    bit_uniform: int = 0,
 ) -> Dict[int, Dict[str, Dict[str, torch.Tensor]]]:
     """Fold the dump into the on-disk calibration schema."""
     if not kv_dump:
@@ -422,10 +458,12 @@ def build_calibration(
         side_k = _calibrate_side(
             k_samples, R_k, b_mean=b_mean, b_min=b_min, b_max=b_max,
             num_bins=num_bins, q_lo=q_lo, q_hi=q_hi, chunk_tokens=chunk_tokens,
+            bit_uniform=bit_uniform,
         )
         side_v = _calibrate_side(
             v_samples, R_v, b_mean=b_mean, b_min=b_min, b_max=b_max,
             num_bins=num_bins, q_lo=q_lo, q_hi=q_hi, chunk_tokens=chunk_tokens,
+            bit_uniform=bit_uniform,
         )
         logger.info(
             "layer %d done in %.1fs: bits[k] mean=%.2f, bits[v] mean=%.2f",
@@ -526,6 +564,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--b-mean", type=float, default=2.5)
     p.add_argument("--b-min", type=int, default=1)
     p.add_argument("--b-max", type=int, default=4)
+    p.add_argument(
+        "--bit-uniform",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, bypass per-dim Lloyd water-filling and assign a uniform "
+            "N-bit budget to every coordinate. Used by Route G F1: combined "
+            "with per-token×group affine in the packed kernel, this lets the "
+            "FlashMLA inner loop replace shared-mem atomicOr bit unpack with "
+            "thread-local `(byte >> shift) & mask`. Range 1..8."
+        ),
+    )
     p.add_argument("--num-bins", type=int, default=2048)
     p.add_argument("--q-lo", type=float, default=1e-3)
     p.add_argument("--q-hi", type=float, default=1.0 - 1e-3)
@@ -620,6 +670,7 @@ def main() -> int:
             q_lo=args.q_lo,
             q_hi=args.q_hi,
             chunk_tokens=args.chunk_tokens,
+            bit_uniform=args.bit_uniform,
         )
     elif args.dsv4_mode:
         compression_ratios = (
@@ -638,6 +689,7 @@ def main() -> int:
             q_lo=args.q_lo,
             q_hi=args.q_hi,
             chunk_tokens=args.chunk_tokens,
+            bit_uniform=args.bit_uniform,
         )
     else:
         calib = build_calibration(
@@ -649,6 +701,7 @@ def main() -> int:
             q_lo=args.q_lo,
             q_hi=args.q_hi,
             chunk_tokens=args.chunk_tokens,
+            bit_uniform=args.bit_uniform,
         )
 
     out_path = os.path.abspath(args.output)

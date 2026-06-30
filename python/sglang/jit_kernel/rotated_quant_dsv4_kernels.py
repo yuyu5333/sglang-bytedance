@@ -56,10 +56,38 @@ _MLA_SCALES_PER_TOKEN = 8
 # Rope is always BF16 (2 bytes per element) regardless of the nope bit budget.
 _ROPE_BYTES = _MLA_TILE_SIZE * 2  # 64 elements * 2 = 128 B
 
+# Route G uniform-bit layout: per-token × per-group affine header.
+# 7 groups of 64 dims each (HEAD_DIM_NOPE / GROUP_DIM = 448 / 64 = 7).
+# Each group stores (fp16 min, fp16 range) = 4 bytes.
+_UNIFORM_GROUPS = _MLA_NOPE_DIM // _MLA_TILE_SIZE  # 7
+_UNIFORM_HEADER_BYTES_PER_GROUP = 4  # fp16 min + fp16 range
+_UNIFORM_HEADER_BYTES = _UNIFORM_GROUPS * _UNIFORM_HEADER_BYTES_PER_GROUP  # 28 B
 
-def packed_bytes_per_token(row_bytes_nope: int) -> int:
-    """Total per-token byte count in the packed paged layout."""
-    return int(row_bytes_nope) + _ROPE_BYTES
+
+def uniform_row_bytes_nope(bit_uniform: int) -> int:
+    """Packed nope byte count for a uniform-N-bit row (N in [1..8])."""
+    if bit_uniform <= 0:
+        raise ValueError("uniform_row_bytes_nope requires bit_uniform > 0")
+    total_bits = _MLA_NOPE_DIM * int(bit_uniform)
+    if total_bits % 8 != 0:
+        raise ValueError(
+            f"uniform bit_uniform={bit_uniform} * dim={_MLA_NOPE_DIM} "
+            f"is not byte-aligned"
+        )
+    return total_bits // 8
+
+
+def packed_bytes_per_token(row_bytes_nope: int, bit_uniform: int = 0) -> int:
+    """Total per-token byte count in the packed paged layout.
+
+    When ``bit_uniform > 0``, an extra ``_UNIFORM_HEADER_BYTES`` (28 B)
+    is reserved between the nope codes and the rope bytes to hold the
+    per-token × per-64-dim-group (fp16 min, fp16 range) header. That
+    header is what makes the wall path dynamic per-token affine instead
+    of the legacy static per-dim ``(scale, zero)`` from calib.
+    """
+    extra = _UNIFORM_HEADER_BYTES if int(bit_uniform) > 0 else 0
+    return int(row_bytes_nope) + extra + _ROPE_BYTES
 
 
 def _build_pack_meta_from_bits(
@@ -189,7 +217,7 @@ def rotated_store_to_packed(
     if N == 0:
         return
     row_bytes_nope = cfg.row_bytes
-    bpt = packed_bytes_per_token(row_bytes_nope)
+    bpt = packed_bytes_per_token(row_bytes_nope, cfg.bit_uniform)
     bytes_per_page = cache.shape[1]
     if bytes_per_page != bpt * page_size:
         raise ValueError(
@@ -217,11 +245,32 @@ def rotated_store_to_packed(
     levels_f = cfg_gpu["levels"]
 
     K_rot = nope.to(torch.float32) @ R  # [N, 448]
-    codes_f = ((K_rot - zero) / scale).round()
-    codes_f = torch.clamp(
-        codes_f, min=torch.zeros_like(codes_f), max=levels_f
-    )
-    codes_i32 = codes_f.to(torch.int32)  # 留在 GPU
+
+    # Route G uniform path: per-token × per-group(64) dynamic affine.
+    # The per-dim calib (scale,zero,levels) is bypassed in favor of a
+    # per-token header (fp16 min + fp16 range, 7 groups × 4 B = 28 B)
+    # which is bitwise-stable across cudagraph replay (header bytes
+    # captured into the same packed cache slot as the bit codes).
+    if cfg.bit_uniform > 0:
+        bu = int(cfg.bit_uniform)
+        L_int = (1 << bu) - 1
+        L_f = float(L_int)
+        # [N, 7, 64]
+        K_rot_g = K_rot.reshape(N, _UNIFORM_GROUPS, _MLA_TILE_SIZE)
+        # Dynamic per-token × per-group min / max -> affine.
+        kmin = K_rot_g.amin(dim=2, keepdim=True)         # [N, 7, 1] fp32
+        kmax = K_rot_g.amax(dim=2, keepdim=True)         # [N, 7, 1] fp32
+        krange = (kmax - kmin).clamp_min(1e-8)           # [N, 7, 1]
+        step = krange / L_f                              # [N, 7, 1]
+        codes_g = ((K_rot_g - kmin) / step).round()
+        codes_g = torch.clamp(codes_g, min=0.0, max=L_f)
+        codes_i32 = codes_g.reshape(N, _MLA_NOPE_DIM).to(torch.int32)
+    else:
+        codes_f = ((K_rot - zero) / scale).round()
+        codes_f = torch.clamp(
+            codes_f, min=torch.zeros_like(codes_f), max=levels_f
+        )
+        codes_i32 = codes_f.to(torch.int32)  # 留在 GPU
 
     # KDUMP5: writer-side one-shot dump (env-gated). Cross-checks the
     # codes/sk/zp/R the writer hands to bitpack against the kernel KDUMP4
@@ -379,9 +428,28 @@ def rotated_store_to_packed(
         codes_i32, dim_of_bit, bitpos_in_dim, cfg.row_bytes,
     )
 
-    # Compose the [N, bpt] row on GPU (纯 view/cat，无 H2D)
+    # Compose the [N, bpt] row on GPU (纯 view/cat，无 H2D).
+    # Uniform path: insert 28-byte per-token×7-group header between
+    # packed nope codes and rope bytes. Header layout (per group):
+    #   bytes [0..2)  = fp16(min)
+    #   bytes [2..4)  = fp16(range = max - min)
     rope_bytes = rope.contiguous().view(torch.uint8).reshape(N, _ROPE_BYTES)
-    full_row = torch.cat([packed, rope_bytes], dim=1)  # [N, bpt]
+    if cfg.bit_uniform > 0:
+        # kmin / krange are [N, 7, 1] fp32 from above. Pack to fp16 and
+        # reinterpret as uint8 to splice into the byte row.
+        header_pairs = torch.stack(
+            (kmin.squeeze(-1).to(torch.float16),
+             krange.squeeze(-1).to(torch.float16)),
+            dim=-1,
+        )  # [N, 7, 2] fp16
+        header_bytes = (
+            header_pairs.contiguous()
+            .view(torch.uint8)
+            .reshape(N, _UNIFORM_HEADER_BYTES)
+        )
+        full_row = torch.cat([packed, header_bytes, rope_bytes], dim=1)
+    else:
+        full_row = torch.cat([packed, rope_bytes], dim=1)  # [N, bpt]
 
     # KDUMP6-store-rope: dump first token's rope half (BF16 values + raw
     # uint8 bytes) so we can cross-check that the kernel's
@@ -462,7 +530,7 @@ def rotated_load_to_fp8_layout(
         )
 
     row_bytes_nope = cfg.row_bytes
-    bpt = packed_bytes_per_token(row_bytes_nope)
+    bpt = packed_bytes_per_token(row_bytes_nope, cfg.bit_uniform)
     if cache.shape[1] != bpt * page_size:
         raise ValueError(
             f"cache bytes_per_page {cache.shape[1]} != bpt({bpt}) * page_size({page_size})"
@@ -498,21 +566,42 @@ def rotated_load_to_fp8_layout(
         triton_bitunpack_rowwise,
     )
 
+    is_uniform = cfg.bit_uniform > 0
+    if is_uniform:
+        bu = int(cfg.bit_uniform)
+        L_f = float((1 << bu) - 1)
+        header_off = row_bytes_nope
+        rope_off = header_off + _UNIFORM_HEADER_BYTES
+    else:
+        rope_off = row_bytes_nope
+
     CHUNK = 8192  # 每块 ~ 8K tokens → 峰值 ~30 MB → 不会 OOM
     for start in range(0, M, CHUNK):
         end = min(start + CHUNK, M)
         chunk_idx = indices_i64[start:end]
         chunk_rows = cache_flat.index_select(0, chunk_idx)  # [chunk, bpt]
         chunk_packed = chunk_rows[:, :row_bytes_nope].contiguous()
-        chunk_rope = chunk_rows[:, row_bytes_nope:].contiguous()
+        chunk_rope = chunk_rows[:, rope_off:].contiguous()
         # GPU bitunpack → codes_i32 (ch, 448) int32 (bits is GPU-cached)
         codes_chunk = triton_bitunpack_rowwise(chunk_packed, bits_gpu)
-        # dequant + inverse-rotate → bf16
-        nope_bf16 = ((codes_chunk.to(torch.float32) * scale + zero) @ R.t()).to(
-            torch.bfloat16
-        ).contiguous()
+        ch = end - start
+        if is_uniform:
+            # Read [ch, 28] header bytes -> [ch, 7, 2] fp16 -> kmin / krange.
+            hdr_bytes = chunk_rows[:, header_off:header_off + _UNIFORM_HEADER_BYTES].contiguous()
+            hdr_fp16 = hdr_bytes.view(torch.float16).reshape(ch, _UNIFORM_GROUPS, 2)
+            kmin_g = hdr_fp16[..., 0].to(torch.float32).unsqueeze(-1)   # [ch, 7, 1]
+            krange_g = hdr_fp16[..., 1].to(torch.float32).unsqueeze(-1)
+            step_g = krange_g / L_f                                     # [ch, 7, 1]
+            codes_g = codes_chunk.reshape(ch, _UNIFORM_GROUPS, _MLA_TILE_SIZE).to(torch.float32)
+            K_rot_hat = (codes_g * step_g + kmin_g).reshape(ch, _MLA_NOPE_DIM)
+            nope_bf16 = (K_rot_hat @ R.t()).to(torch.bfloat16).contiguous()
+        else:
+            # Legacy variable-bit path: per-dim static (scale,zero).
+            nope_bf16 = ((codes_chunk.to(torch.float32) * scale + zero) @ R.t()).to(
+                torch.bfloat16
+            ).contiguous()
         rope_bf16 = chunk_rope.view(torch.bfloat16).reshape(
-            end - start, _MLA_TILE_SIZE,
+            ch, _MLA_TILE_SIZE,
         ).contiguous()
         rotated_dequant_to_fp8_layout(
             nope_bf16, rope_bf16,
@@ -541,7 +630,7 @@ def rotated_load_to_fp8_layout_cpu_ref(
         raise ValueError(f"cache must be uint8, got {cache.dtype}")
     M = indices.shape[0]
     row_bytes_nope = cfg.row_bytes
-    bpt = packed_bytes_per_token(row_bytes_nope)
+    bpt = packed_bytes_per_token(row_bytes_nope, cfg.bit_uniform)
     if cache.shape[1] != bpt * page_size:
         raise ValueError(
             f"cache bytes_per_page {cache.shape[1]} != bpt({bpt}) * page_size({page_size})"
@@ -551,11 +640,26 @@ def rotated_load_to_fp8_layout_cpu_ref(
     cache_flat = cache.view(-1, bpt)
     rows = cache_flat.index_select(0, indices_i64)
     packed_nope = rows[:, :row_bytes_nope].contiguous()
-    rope_bytes = rows[:, row_bytes_nope:].contiguous()
-
-    bits_cpu = cfg.bits.to(torch.int32)
-    codes = bitunpack_rowwise(packed_nope, bits_cpu, dim=_MLA_NOPE_DIM)
-    K_rot_hat = codes.to(torch.float32) * cfg.scale + cfg.zero
+    if cfg.bit_uniform > 0:
+        bu = int(cfg.bit_uniform)
+        L_f = float((1 << bu) - 1)
+        header_off = row_bytes_nope
+        rope_off = header_off + _UNIFORM_HEADER_BYTES
+        hdr_bytes = rows[:, header_off:rope_off].contiguous()
+        hdr_fp16 = hdr_bytes.view(torch.float16).reshape(M, _UNIFORM_GROUPS, 2)
+        kmin_g = hdr_fp16[..., 0].to(torch.float32).unsqueeze(-1)   # [M, 7, 1]
+        krange_g = hdr_fp16[..., 1].to(torch.float32).unsqueeze(-1)
+        step_g = krange_g / L_f
+        rope_bytes = rows[:, rope_off:].contiguous()
+        bits_cpu = cfg.bits.to(torch.int32)
+        codes = bitunpack_rowwise(packed_nope, bits_cpu, dim=_MLA_NOPE_DIM)
+        codes_g = codes.reshape(M, _UNIFORM_GROUPS, _MLA_TILE_SIZE).to(torch.float32)
+        K_rot_hat = (codes_g * step_g + kmin_g).reshape(M, _MLA_NOPE_DIM)
+    else:
+        rope_bytes = rows[:, row_bytes_nope:].contiguous()
+        bits_cpu = cfg.bits.to(torch.int32)
+        codes = bitunpack_rowwise(packed_nope, bits_cpu, dim=_MLA_NOPE_DIM)
+        K_rot_hat = codes.to(torch.float32) * cfg.scale + cfg.zero
     nope_bf16 = (K_rot_hat @ cfg.R.t().to(torch.float32)).to(torch.bfloat16).contiguous()
     rope_bf16 = rope_bytes.view(torch.bfloat16).reshape(M, _MLA_TILE_SIZE).contiguous()
     return nope_bf16, rope_bf16, packed_nope
@@ -567,6 +671,7 @@ __all__ = [
     "rotated_load_to_fp8_layout_cpu_ref",
     "quant_fp8_layout_cpu_ref",
     "packed_bytes_per_token",
+    "uniform_row_bytes_nope",
 ]
 
 
