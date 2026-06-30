@@ -1633,6 +1633,11 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             "zero_point": cfg_gpu["zero"],
             "dim_of_bit": cfg_gpu["dim_of_bit"],
             "bitpos_in_dim": cfg_gpu["bitpos_in_dim"],
+            # [Stage-5 Route G step 5] uniform-bit layout switch
+            # forwarded to FlashMLA. 0 -> legacy variable-bit (default,
+            # byte-identical pre-step-5). >0 -> uniform N-bit + per-group
+            # fp16 affine header path in splitkv_mla.cuh.
+            "bit_uniform": int(getattr(cfg, "bit_uniform", 0) or 0),
         }
 
     # ------------------------------------------------------------------
