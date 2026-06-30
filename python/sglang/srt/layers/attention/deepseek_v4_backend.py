@@ -1090,6 +1090,18 @@ class DeepseekV4AttnBackend(
                 else None
             ) or {}
 
+            # [M3.c.4 Stage-5 Route B] Force FlashMLA to use the dense FP8
+            # shadow path (use_packed=false), bypassing the packed
+            # inner-loop barrier serialization (NamedBarrier::sync x 4 per
+            # token per dim_block) that bottlenecks tps to ~1 tok/s. The
+            # prologue is expected to dequant packed -> shadow each step,
+            # so this only makes sense with drop_shadow=0 + non-empty
+            # shadow + working prologue refresh (SKIP_SHADOW_REFRESH=0 or
+            # equivalent). See KVPerfTaskList T_M3c4_Stage5_packed_cgon_*.
+            import os as _os
+            if _os.environ.get("SGLANG_RQ_FORCE_DENSE_PATH", "0") == "1":
+                packed_kwargs = {}
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
