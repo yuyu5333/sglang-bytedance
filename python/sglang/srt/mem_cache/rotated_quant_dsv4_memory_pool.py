@@ -133,6 +133,24 @@ def load_rotated_quant_dsv4_calibration(
             list(compression_ratios),
         )
     bit_uniform = int(meta.get("bit_uniform", 0))
+    # [Stage-5 Route G step 5 canary] Runtime override to enable the
+    # uniform-bit fast path without rebuilding calib. When
+    # SGLANG_RQ_BIT_UNIFORM=N (N in {2,3,4,5,6,7,8}), we:
+    #   - force cfg.bit_uniform = N
+    #   - overwrite cfg.bits[:] = N (so row_bytes = 448*N/8 matches the
+    #     uniform layout; scale/zero are unused on the uniform path)
+    # Set N=0 (or unset) to keep the legacy variable-bit path.
+    env_bu = os.environ.get("SGLANG_RQ_BIT_UNIFORM")
+    if env_bu is not None and env_bu.strip() != "":
+        env_bu_int = int(env_bu)
+        if env_bu_int > 0:
+            logger.warning(
+                "[Route G canary] SGLANG_RQ_BIT_UNIFORM=%d overrides "
+                "calib bit_uniform=%d; every nope dim will use %d bits.",
+                env_bu_int, bit_uniform, env_bu_int,
+            )
+            bit_uniform = env_bu_int
+    force_uniform_bits = bit_uniform > 0
 
     out: Dict[int, RotatedQuantizerConfig] = {}
     for lid in range(layer_num):
@@ -142,9 +160,12 @@ def load_rotated_quant_dsv4_calibration(
         if "nope" not in entry:
             raise ValueError(f"calib[{lid}] missing 'nope'")
         _validate_side(entry["nope"], qk_nope_head_dim, f"layer {lid} nope")
+        bits_t = entry["nope"]["bits"].to(torch.int32)
+        if force_uniform_bits:
+            bits_t = torch.full_like(bits_t, bit_uniform, dtype=torch.int32)
         out[lid] = RotatedQuantizerConfig(
             R=entry["nope"]["R"].to(torch.float32),
-            bits=entry["nope"]["bits"].to(torch.int32),
+            bits=bits_t,
             scale=entry["nope"]["scale"].to(torch.float32),
             zero=entry["nope"]["zero"].to(torch.float32),
             bit_uniform=bit_uniform,
