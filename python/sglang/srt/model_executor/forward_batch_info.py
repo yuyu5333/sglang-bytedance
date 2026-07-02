@@ -29,6 +29,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from functools import total_ordering
@@ -847,16 +848,16 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         global_num_tokens = self.global_num_tokens_cpu
         sync_group_size = len(global_num_tokens)
         attn_tp_size = get_attention_tp_size()
+        alignment = math.lcm(attn_tp_size, get_attention_cp_size())
+        if self.spec_info is not None:
+            alignment = math.lcm(alignment, self.spec_info.num_tokens_per_req)
 
         for i in range(sync_group_size):
-            # make sure that the padded length is divisible by attn_tp_size because we may need reduce-scatter across attn_tp dim.
-            # there is no reduce-scatter in LM logprob, so we do not need to adjust the padded length for logprob
-            global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_tp_size)
-
-        # make sure that each rank has the same number of tokens to do collective communication.
-        attn_cp_size = get_attention_cp_size()
-        for i in range(sync_group_size):
-            global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_cp_size)
+            # Keep MLP-sync padding compatible with both communication constraints
+            # and speculative grouping (e.g. verify tokens per request).
+            # There is no reduce-scatter in LM logprob, so logprob lengths do not
+            # need the same alignment.
+            global_num_tokens[i] = ceil_align(global_num_tokens[i], alignment)
 
         dp_padding_mode = DpPaddingMode.get_dp_padding_mode(
             self.is_extend_in_batch, global_num_tokens
@@ -908,6 +909,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             else:
                 setattr(self, "_original_batch_size", self.batch_size)
                 if self.spec_info is not None:
+                    assert num_tokens % self.spec_info.num_tokens_per_req == 0, (
+                        f"{num_tokens=} must be divisible by "
+                        f"{self.spec_info.num_tokens_per_req=} after MLP-sync padding"
+                    )
                     bs = self.batch_size = (
                         num_tokens // self.spec_info.num_tokens_per_req
                     )
