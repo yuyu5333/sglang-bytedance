@@ -419,6 +419,7 @@ class EagleDraftWorker(BaseDraftWorker):
         # Parse args
         spec_info: EagleDraftInput = forward_batch.spec_info
         out_cache_loc = forward_batch.out_cache_loc
+        original_out_cache_loc_swa = forward_batch.out_cache_loc_swa
         topk_p, topk_index, hidden_states = (
             spec_info.topk_p,
             spec_info.topk_index,
@@ -459,6 +460,12 @@ class EagleDraftWorker(BaseDraftWorker):
             # Set inputs
             forward_batch.input_ids = input_ids
             forward_batch.out_cache_loc = out_cache_loc[i]
+            if original_out_cache_loc_swa is not None:
+                forward_batch.out_cache_loc_swa = (
+                    self.draft_runner.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
+                        forward_batch.out_cache_loc
+                    )
+                )
             forward_batch.attn_backend = self.draft_attn_backend.attn_backends[i]
             spec_info.hidden_states = hidden_states
 
