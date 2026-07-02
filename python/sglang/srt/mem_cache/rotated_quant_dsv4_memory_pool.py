@@ -1454,6 +1454,17 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             local_layer_id = self._swa_local_layer_id(layer_id)
             self._refresh_shadow_pages(entry, local_layer_id, cfg, swa_pages)
 
+        # [M3.c.4 Stage-5 / step7] c4/c128 extra-shadow refresh 也是 capture-
+        # unsafe（内部 _refresh_shadow_pages 有 boolean-mask indexing + unique
+        # + .any() 三处 GPU->CPU sync）。SGLANG_RQ_SKIP_EXTRA_SHADOW_REFRESH=1
+        # 时整体跳过 c4/c128 refresh，让 --disable-cuda-graph 可以摘掉。
+        # 语义前提：sparse-path 对 extra block 的 shadow 读也可能因为主 attention
+        # 是 packed-driven 而变成 dead work；此开关先用来探测 CG 能否 capture 通过 +
+        # 输出是否连贯。默认 0 保守（保持既有行为）。
+        skip_extra_shadow_refresh = (
+            os.environ.get("SGLANG_RQ_SKIP_EXTRA_SHADOW_REFRESH", "0") == "1"
+        )
+
         if compress_ratio == 4:
             extra_pages = getattr(
                 core_attn_metadata, "c4_sparse_page_indices", None
@@ -1463,7 +1474,11 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         else:
             extra_pages = None
 
-        if extra_pages is not None and compress_ratio in (4, 128):
+        if (
+            extra_pages is not None
+            and compress_ratio in (4, 128)
+            and not skip_extra_shadow_refresh
+        ):
             kind, local_layer_id = self._layer_id_for_extra(layer_id)
             if kind in self._wall_pools:
                 entry = self._wall_pools[kind]
