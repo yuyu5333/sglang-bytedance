@@ -437,14 +437,51 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
 - ⚠️ ``set_swa_key_buffer_radix_fused_norm_rope`` 用 PyTorch RMSNorm+RoPE fallback；M3.c.3 fused Triton kernel 直接写 packed
 - ⚠️ shadow buffer 当前 worst-case 静态预分配（与原 FP8 同尺寸），M3.c.3 改 ring buffer 进一步省显存
 
-#### M3.c.3：bit-pack/unpack Triton 化 —— **未启动（性能化）**
+#### M3.c.3：bit-pack/unpack Triton 化（性能化）—— **⚠️ 在 R+affine 框架内已 stuck（终判证伪）**
 
-当前 ``rotated_store_to_packed`` / ``rotated_load_to_fp8_layout`` 内部的 ``bitpack_rowwise / bitunpack_rowwise`` 都走 CPU + 一次 H2D/D2H 往返。M3.c.3 把这两个原语换成纯 Triton kernel：每个 token row 一个 thread block，每 thread 处理 4 个坐标的 bit-extract（``tl.bfloat16`` 直接做反 affine），消除 CPU 往返。配合 fast WHT（M2 的 7 层蝶形）共同把 store/load 路径压到 GPU-only。
+**性能侧已完成（T3_pack_triton, T5, T6）**：
+- ``bitpack_rowwise / bitunpack_rowwise`` 已 Triton 化（每 token row 一个 block，每 thread 4 坐标 bit-extract，``tl.bfloat16`` 直接反 affine），CPU 往返消除，decode 14 → 1193 tok/s（85× 提速）；canary 字节级 0/N diff
+- ``triton_fused_norm_rope`` 替换原 PyTorch fp32 fused-norm-rope fallback，BF16-only 单 kernel 路径，cudagraph capture-safe
+- ``triton_fused_refresh_shadow_scatter`` capture-safe 索引绑定，去除 PyTorch advanced indexing 在 capture replay 期的 byte alias
 
-**M3.c 总验收目标（M3.c.1+M3.c.2+M3.c.3 完成后）**：
-- 显存：DSv4 swa_kv_pool 从 584B/token 降到 268B/token（**2.18×**）；c4/c128 同步替换后整 KV 压缩比再放大
-- 精度：开放领域 eval cosine sim 与 baseline FP8 ≥ 0.95
-- 延迟：长上下文 decode ≤ 1.05× baseline（M3.c.3 Triton 化后）
+**精度侧已被证伪（M3.c.3 在 R+affine 框架内死局）**：
+- (β) packed-only on-the-fly Triton bitunpack at attention prologue：calib b̄=4 / b̄=6 单层 cos≈0.97，43 层累积下 token salad → SNR 不足
+- (γ) **R+affine 框架终判**（[KVPerfTaskList §5 探索归档](KVPerfTaskList.md#5-已证伪--已-reject-探索归档按时间倒序)）：把 calib bits 推到框架硬上限 b̄=8u（uniform 8 bit, nope_row_bytes=448=native FP8 dim, 显存收益=0）仍 token salad → bug 不在 SNR，而在 R + affine + 重 requant→FP8 layout 整套数学链在 43 层 DSv4 累积下与 native FlashMLA 解码期望不兼容
+- 前序证伪链：H7 PyTorch fp32 vs native CUDA norm+rope cos=0.9996+；H8 (β) 全链 vs native byte 差 2.5% 在 FP8 noise 内；Triton bitpack/unpack round-trip 0/57344 mismatches；calib 来自 96 reqs × 真实 KV dump
+- **结论**：M3.c.3 当前 R+affine 框架内**无法继续推进**，必须切换技术路线 → M3.c.4
+
+**M3.c.3 阶段性收益**：T5/T6 Triton kernel 在 wall + drop_packed=1 + token_shadow + cudagraph 配置下端到端 PASS（T5+T6_wall_drop_packed_cg）；但 drop_packed=1 路径下 calib 完全不参与 forward，等价 baseline，**无低 bit 收益**。
+
+#### M3.c.4：FlashMLA fork + packed_fp8 op + sparse-path 接入 —— **当前 in_progress（M3.c 唯一前进路径）**
+
+> 切换技术路线：放弃 "wall packed-storage + attention prologue dequant→shadow 中转 layout" 这一架构（M3.c.1/c.2/c.3 主线），改为 **fused-dequant inner-loop**：FlashMLA inner-loop 在 K-tile load 处直接吃 packed bytes（bitunpack + 反 affine + @R^T → fp8 → MMA），消灭 shadow buffer 这一层 layout 中转。这要求改 FlashMLA C++ kernel，scope-guard 上 `sgl-kernel/**` 是 denylist → 引入独立 fork [`yuyu5333/FlashMLA`](https://github.com/yuyu5333/FlashMLA) 分支 `kv2bit-dev`，sgl-kernel 仅靠 [flashmla.cmake](sgl-kernel/cmake/flashmla.cmake) `FetchContent_Declare GIT_REPOSITORY/GIT_TAG` 切到 fork。
+
+**已完成 sub-task**：
+1. **FlashMLA fork dev loop 闭环**（T_m3c4_fork_probe）：本地 [`<sglang>/FlashMLA`](FlashMLA) → push → 容器 `/workspace/FlashMLA` pull --ff-only，三点同步范式与 sglang-bytedance 主仓完全一致；FetchContent 真拉到 fork 验证（`/tmp/tmpXXX/build/_deps/repo-flashmla-src/csrc/extension/sm90/dense_fp8/dense_fp8_fork_probe.cpp` 在盘）；dense_fp8 numeric regression `tests/test_flashmla.py::test_flash_mla_fp8` 48/48 pass，未被 fork-side TU + cmake 改动破坏
+2. **packed_fp8 op scaffold**（T_m3c4_packed_fp8_scaffold）：FlashMLA fork `dense_fp8_packed_entry.cpp` 提供新签名 `fwd_kvcache_mla_packed_fp8(... + 6 占位 optional Tensor: packed_kcache / scale_kcache / R_matrix / zero_point / dim_of_bit / bitpos_in_dim)`，6 占位全 None → 直通已验证的 `fwd_kvcache_mla_fp8`（同函数同 stream → bit-exact 天然成立）；任一非 None → 进入 S2-S2 fused dequant kernel
+3. **S2-S2 fused dequant kernel**（FlashMLA fork `f1c8e0d`）：`flash_fwd_mla_kernel.h` 8 处 `__syncthreads()` → `cutlass::arch::NamedBarrier::sync(128, PackedKvProducer)` 解死锁；s_codes/s_x smem 448→512；K-tile load 处加 `packed_kcache_ptr != nullptr` 分支：`bitunpack(packed_bytes) → affine_dequant(scale, zero) → @R^T → fp8` 替换原 `cp.async kcache 字节 → smem`
+4. **sgl-kernel header / op-schema 同步**（sglang `beee4c399`）：[`sgl-kernel/include/sgl_kernel_ops.h`](sgl-kernel/include/sgl_kernel_ops.h) + [`sgl-kernel/csrc/flashmla_extension.cc`](sgl-kernel/csrc/flashmla_extension.cc) op schema 4→6 packed 参数；[`sgl-kernel/cmake/flashmla.cmake`](sgl-kernel/cmake/flashmla.cmake) `GIT_TAG` bump 至 `f1c8e0d`
+5. **Numeric bit-exact 验证**（T_m3c4_packed_op_regression）：identity calib (R=I/zero=0/bits=1/packed=0xFF) host-side `test_packed_numeric.py` → packed↔dense `out bit-exact: True / lse bit-exact: True`；端到端回归 `T5+T6_wall_drop_packed_cg` (drop_packed=1) gsm8k 0.985 / lat 10.50s / tps 2036 — 不破坏既有路径
+
+**当前阻塞 sub-task（M3.c 唯一未完成工作面）**：
+
+**T_M3c4_sparse_接入** — 让 packed_fp8 op 在 sglang DSv4 sparse-path 上真正参与 forward。
+- 矛盾点：sglang DSv4 attention 走的是 sparse `flash_mla.flash_mla_with_kvcache`（多池 + indices + attn_sink + extra_k_cache + topk_length），而 `fwd_kvcache_mla_packed_fp8` 是 **dense block_table** API → 签名不匹配 → packed buffer 没有 forward 出口
+- 当前现状：只能跑 `SGLANG_RQ_WALL_DROP_PACKED=1` 配置，让 wall pipeline 走 native FP8 shadow，packed=1B 占位，calib 不参与 forward → 等价 baseline，**无低 bit / 显存 / 性能收益**
+- 设计选择（二选一）：
+  - **路线 A（首选）**：在 FlashMLA fork 把 `fwd_kvcache_mla_packed_fp8` 扩展支持 sparse API（指针化多池 wiring + `indices/attn_sink/extra_k_cache/topk_length` 形参 + S2-S2 kernel 内 sparse mask 分支），保留 sparse top-k 收益。工作量在 fork inner-loop（dev loop 已闭环），无 sgl-kernel scope-leak 风险
+  - **路线 B（兜底）**：在 [`deepseek_v4_backend.py L986`](python/sglang/srt/layers/attention/deepseek_v4_backend.py#L986) 把 swa decode 出口从 `flash_mla.flash_mla_with_kvcache` 切到 `fwd_kvcache_mla_packed_fp8` dense 版本。swa 是滑窗，舍弃 sparse top-k 收益小；c4/c128 池仍依赖 sparse API，需要决策（保留这两池 native FP8 不进 packed，或单独扩 sparse API）
+- 决策准则：先用 1 周尝试 A 的 prototype；如 sparse mask + S2-S2 kernel 复杂度爆炸，回退 B + c4/c128 native FP8 双轨
+
+**M3.c.4 验收目标**：
+- 真显存收益：drop_packed=0 真生效后，DSv4 swa_kv_pool 从 584B/token 降到 268B/token（**2.18×**），shadow buffer 因 fused-dequant inner-loop 消灭，整 KV cache HBM 占用 -50%+
+- 精度：gsm8k ≥ **0.94**（硬阈值），≥ baseline mean − 0.01（软目标 0.945+）
+- 延迟：长上下文 decode TPOT ≤ baseline × 1.05
+
+**M3.c 总验收目标（M3.c.1 + c.2 + c.4 完成后；c.3 R+affine 路线已死，由 c.4 fused-dequant 替代）**：
+- 显存：DSv4 swa/c4/c128 三池整 KV 压缩比 ≥ 2.18×（drop_packed=0 真生效时）
+- 精度：开放领域 eval gsm8k ≥ 0.94
+- 延迟：长上下文 decode ≤ 1.05× baseline
 
 ## 风险与回退
 1. **校准漂移**：长尾 prompt 可能让 σ² 估计偏移，b̄=2 时易出现尾部精度下降。回退路线：每层独立保留一个"逃逸通道" raw FP8 区，承接 q[d]=2^b[d]-1 饱和的 token；M0 阶段先不做，记录在 `dequantize` 的统计里
@@ -471,7 +508,7 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
   - quantize-dequantize roundtrip 在 b̄∈{2,3,4} 上的相对 L2 误差曲线
 
 
-## 当前状态总览（截至 M3.c.2 交付）
+## 当前状态总览（截至 M3.c.4 进行中，2026-06-24）
 
 ### 里程碑进度
 
@@ -481,13 +518,19 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
 | M1 — vanilla MHA pool 接入 | ✅ 完成 | `RotatedQuantTokenToKVPool` + e2e | 4/4 MHA e2e |
 | M2 — 算子化（fast WHT 7 层蝶形） | ✅ 完成 | 蝶形 Hadamard | — |
 | M3.a — 标准 MLA 接入 | ✅ 完成 | `RotatedQuantMLATokenToKVPool` | 4/4 MLA e2e |
-| M3.b — DSv4 多比例分级压缩（**评估模式**） | ✅ 完成 | `RotatedQuantDeepSeekV4TokenToKVPool` (mode=eval)；c4/c128/swa 的 simulate-only 路径 | 4/4 DSv4 eval e2e |
-| M3.c.1 — DSv4 wall-storage swa 池真替换 + canary | ✅ 完成 | Triton dequant kernel + `swa_kv_pool` packed buffer + `dequant_swa_to_fp8_layout` shim + 5 用例 canary | 5/5 canary，wall ratio 2.18× (swa 池) |
-| M3.c.2 — attention prologue 接入 + c4/c128 同步替换 | ✅ **本轮交付** | 三池同步 wall + `_rotated_quant_attention_prologue` hook + 5 write override + 2 read override + backend duck-typed hook + 7 用例 canary（含 e2e cosine ≥ 0.95） | **7/7 canary、12/12 regression、cosine.mean ≥ 0.95** |
-| M3.c.3 — bit-pack/unpack Triton 化（性能化） | ⏳ 未启动 | CPU 往返 → Triton kernel；fused norm+rope→packed；shadow ring buffer | latency ≤ 1.05× baseline |
+| M3.b — DSv4 多比例分级压缩（**评估模式**） | ✅ 完成 | `RotatedQuantDeepSeekV4TokenToKVPool` (mode=eval) | 4/4 DSv4 eval e2e |
+| M3.c.1 — DSv4 wall-storage swa 池真替换 + canary | ✅ 完成 | swa_kv_pool packed buffer + `dequant_swa_to_fp8_layout` shim | 5/5 canary，wall ratio 2.18× (swa 池) |
+| M3.c.2 — attention prologue 接入 + c4/c128 同步替换 | ✅ 完成 | 三池同步 wall + `_rotated_quant_attention_prologue` hook | 7/7 canary、12/12 regression（**单层 cosine ≥ 0.95；token-level 解码端到端在 c.3 才暴露 SNR 不足**） |
+| M3.c.3 — bit-pack/unpack Triton 化（性能化） | ⚠️ **partial pass / R+affine 框架终判证伪** | T3/T5/T6 Triton kernel 全部 capture-safe；perf 侧 85× decode 提速；但 R+affine 数学链 b̄=8u 上限仍 token salad → 必须切换技术路线 | 性能侧 PASS（drop_packed=1 等价 baseline 配置）；精度侧在 R+affine 框架内 **不可达** |
+| **M3.c.4 — FlashMLA fork + packed_fp8 op + sparse-path 接入** | 🔥 **in_progress（M3.c 唯一前进路径）** | FlashMLA fork dev loop 闭环 / 6-arg packed_fp8 op + S2-S2 fused dequant kernel / sgl-kernel cmake bump (GIT_TAG=f1c8e0d) / numeric bit-exact 验证 | scaffold + numeric ✅；**sparse-path 接入未启动，drop_packed=0 暂无 forward 出口** |
 
-### M3.c.2 一句话总结
-DSv4 三池（swa/c4/c128）全部从 native FP8 切换到 INT2/3/4 packed wall-storage；FlashMLA 路径不动，靠 attention prologue 的 dequant→shadow 完成 layout 兜底；端到端 cosine.mean ≥ 0.95 通过，partial-mode 不一致风险（原风险条 6）已消除。
+### M3.c.4 一句话总结
+
+FlashMLA fork `f1c8e0d` packed_fp8 op + S2-S2 fused dequant kernel **数值层面 bit-exact**（identity calib，host-side `test_packed_numeric.py` `out/lse bit-exact: True`），但 sglang DSv4 attention 走 sparse `flash_mla.flash_mla_with_kvcache` 与 dense packed_fp8 API 签名不匹配 → packed buffer 没有 forward 出口 → **当前唯一可启动配置是 `SGLANG_RQ_WALL_DROP_PACKED=1`，calib 完全不参与 forward，等价 baseline**（实测 [T_wall_v2 mean](KVPerfTaskList.md#4-迭代记录表最新--历史只保留里程碑级数据) 0.953 / 66.72s / 1566.63 tps，与 baseline 三项噪声内一致）。下一步是在 FlashMLA fork 上扩 sparse API 或在 sglang backend 切到 dense 出口（详见 M3.c.4 sparse-path 接入设计选择二选一），是 M3.c 整条路线唯一阻塞。
+
+### M3.c.3 R+affine 框架终判（重要，不再追求）
+
+经过 5 轮证伪链（T3 perf ✓ / T_cgraph_safe / T_packedonly_beta / T_h7_h8_diag / T_beta_pure_b8u_nocg），把 calib bits 推到框架硬上限 b̄=8u（uniform 8 bit, nope_row_bytes=448=native FP8 dim, 显存收益=0）仍 token salad → bug 不在 SNR，而在 R + affine + 重 requant→FP8 layout 整套数学链在 43 层 DSv4 累积下与 native FlashMLA 解码期望不兼容。**M3.c.3 在 R+affine 框架内死局**，由 M3.c.4 fused-dequant inner-loop 替代（packed bytes 直接进 K-tile load，消灭 shadow buffer 这个 layout 中转层）。详见 [KVPerfTaskList §5 探索归档](KVPerfTaskList.md#5-已证伪--已-reject-探索归档按时间倒序)。
 
 ### 测试矩阵（CPU-only，macOS 已通过）
 - `test/manual/quant/test_rotated_kv_quant_dsv4_canary.py`：**7 用例**（4 wall-storage + 2 prologue e2e + 1 GPU skipped），耗时 0.28s
@@ -516,10 +559,8 @@ DSv4 三池（swa/c4/c128）全部从 native FP8 切换到 INT2/3/4 packed wall-
 7. ✅ CPU helper 提到 kernels：`quant_fp8_layout_cpu_ref` 公共化，pool 与 canary 共享
 8. ✅ M3.c.1 layout bug 修复：保留 `bytes_per_page_padded` 为原 native FP8 size（packed 是物理存储，shadow 给读侧用），不再失配下游 view shape
 
-### 下一步（M3.c.3，性能化）
-1. 把 `bitpack_rowwise / bitunpack_rowwise` 的 CPU 往返替换为 Triton kernel（每 token row 一个 thread block，每 thread 处理 4 个坐标的 bit-extract，`tl.bfloat16` 直接做反 affine）
-2. 把 `set_swa_key_buffer_radix_fused_norm_rope` 的 PyTorch RMSNorm+RoPE fallback 替换为 fused Triton kernel 直写 packed
-3. 把 shadow buffer 从 worst-case 静态预分配改为 ring buffer，进一步省显存
-4. 端到端验收：长上下文 decode latency ≤ 1.05× FP8 baseline；GSM8K / HumanEval 相对掉点 ≤ 1pp
+### 下一步（M3.c.4 sparse-path 接入，M3.c 唯一阻塞）
+
+详见 [KVPerfTaskList §3 T_M3c4_sparse_接入](KVPerfTaskList.md#3-task-拆分按依赖顺序逐条迭代) 与本文件上方 `M3.c.4` 段的设计选择二选一。**M3.c.3 R+affine 框架内的"bit-pack Triton 化 / fused norm+rope→packed / shadow ring buffer"已在 T3/T5/T6 完成 perf 侧；精度侧在 R+affine 数学链下不可达，由 M3.c.4 fused-dequant inner-loop 替代，不再追求 R+affine 路线。**
 
 
