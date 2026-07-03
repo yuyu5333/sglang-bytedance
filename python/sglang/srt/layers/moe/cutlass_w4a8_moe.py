@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cutlass W4A8 MoE kernel."""
 
+import os
 from typing import Optional
 
 import torch
@@ -40,6 +41,79 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_dynamic_tensorwise_quant_for_cutlass_moe,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
+
+_TRACE_W4A8_GEMM_BRANCH = os.getenv("SGLANG_W4A8_GEMM_TRACE", "0") not in ("", "0")
+_TRACE_W4A8_GEMM_BRANCH_SEEN = set()
+
+
+def _get_w4a8_dispatch_branch(m: int, n: int, k: int) -> str:
+    if n == 4096 and k == 7168:
+        if m <= 4:
+            return "n4096_k7168_m_le_4_SM90_PP_64x32x512_c211"
+        if m <= 32:
+            return "n4096_k7168_m_le_32_SM90_CO_128x16x512_c211"
+        if m <= 256:
+            return "n4096_k7168_m_le_256_SM90_CO_128x16x512_c111"
+        if m <= 1024:
+            return "n4096_k7168_m_le_1024_SM90_CO_128x32x512_c211"
+        if m <= 4096:
+            return "n4096_k7168_m_le_4096_SM90_CO_128x64x512_c211"
+        return "n4096_k7168_m_gt_4096_SM90_CO_128x64x512_c111"
+
+    if n == 7168 and k == 2048:
+        if m <= 8:
+            return "n7168_k2048_m_le_8_SM90_PP_64x16x512_c111"
+        if m <= 512:
+            return "n7168_k2048_m_le_512_SM90_CO_128x32x512_c111"
+        if m <= 4096:
+            return "n7168_k2048_m_le_4096_SM90_CO_128x64x512_c211"
+        return "n7168_k2048_m_gt_4096_SM90_CO_128x64x512_c111"
+
+    if n == 512 and k == 7168:
+        if m <= 4:
+            return "n512_k7168_m_le_4_SM90_PP_64x32x512_c211"
+        if m <= 32:
+            return "n512_k7168_m_le_32_SM90_CO_128x16x512_c211"
+        if m <= 256:
+            return "n512_k7168_m_le_256_SM90_CO_128x16x512_c111"
+        if m <= 1024:
+            return "n512_k7168_m_le_1024_SM90_CO_128x32x512_c211"
+        return "n512_k7168_m_gt_1024_SM90_CO_128x64x512_c111"
+
+    if n == 7168 and k == 256:
+        if m <= 8:
+            return "n7168_k256_m_le_8_SM90_PP_64x16x128_c111"
+        if m <= 32:
+            return "n7168_k256_m_le_32_SM90_PP_128x32x128_c111"
+        if m <= 512:
+            return "n7168_k256_m_le_512_SM90_PP_128x32x128_c211"
+        return "n7168_k256_m_gt_512_SM90_PP_128x64x128_c111"
+
+    if k % 512 == 0:
+        if m <= 32:
+            return "fallback_k_mod_512_eq_0_m_le_32_SM90_CO_128x16x512_c111"
+        if m <= 1024:
+            return "fallback_k_mod_512_eq_0_m_le_1024_SM90_CO_128x32x512_c111"
+        return "fallback_k_mod_512_eq_0_m_gt_1024_SM90_CO_128x64x512_c111"
+
+    if m <= 32:
+        return "fallback_k_mod_512_ne_0_m_le_32_SM90_PP_128x32x128_c111"
+    return "fallback_k_mod_512_ne_0_m_gt_32_SM90_PP_128x64x128_c111"
+
+
+def _trace_w4a8_dispatch_once(stage: str, m: int, n: int, k: int, topk: int) -> None:
+    if not _TRACE_W4A8_GEMM_BRANCH:
+        return
+
+    branch = _get_w4a8_dispatch_branch(m=m, n=n, k=k)
+    key = (stage, branch)
+    if key in _TRACE_W4A8_GEMM_BRANCH_SEEN:
+        return
+    _TRACE_W4A8_GEMM_BRANCH_SEEN.add(key)
+    print(
+        f"[SGLANG_W4A8_GEMM_TRACE] stage={stage} branch={branch} m={m} n={n} k={k} topk={topk} chunk_size=128",
+        flush=True,
+    )
 
 
 def cutlass_w4a8_moe(
@@ -179,6 +253,13 @@ def cutlass_w4a8_moe(
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
 
+    _trace_w4a8_dispatch_once(
+        "cutlass_w4a8_moe.gemm1",
+        m=gateup_input.size(0) // topk,
+        n=c1.size(1),
+        k=gateup_input.size(1),
+        topk=topk,
+    )
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -209,6 +290,13 @@ def cutlass_w4a8_moe(
             c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
         )
 
+    _trace_w4a8_dispatch_once(
+        "cutlass_w4a8_moe.gemm2",
+        m=intermediate_q.size(0) // topk,
+        n=c2.size(1),
+        k=intermediate_q.size(1),
+        topk=topk,
+    )
     cutlass_w4a8_moe_mm(
         c2,
         intermediate_q,
@@ -374,6 +462,13 @@ def cutlass_w4a8_moe_deepep_normal(
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.zeros((m * topk, k), device=device, dtype=torch.bfloat16)
 
+    _trace_w4a8_dispatch_once(
+        "cutlass_w4a8_moe_deepep_normal.gemm1",
+        m=gateup_input.size(0) // topk,
+        n=c1.size(1),
+        k=gateup_input.size(1),
+        topk=topk,
+    )
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -404,6 +499,13 @@ def cutlass_w4a8_moe_deepep_normal(
         silu_and_mul(c1, intermediate)
         per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
 
+    _trace_w4a8_dispatch_once(
+        "cutlass_w4a8_moe_deepep_normal.gemm2",
+        m=intermediate_q.size(0) // topk,
+        n=c2.size(1),
+        k=intermediate_q.size(1),
+        topk=topk,
+    )
     cutlass_w4a8_moe_mm(
         c2,
         intermediate_q,
@@ -541,6 +643,9 @@ def cutlass_w4a8_moe_deepep_ll(
     c1 = torch.empty((num_experts, m, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((num_experts, m, k), device=device, dtype=torch.bfloat16)
 
+    _trace_w4a8_dispatch_once(
+        "cutlass_w4a8_moe_deepep_ll.gemm1", m=m, n=n, k=k, topk=topk
+    )
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -565,6 +670,9 @@ def cutlass_w4a8_moe_deepep_ll(
         silu_and_mul_masked_absmax_fwd(c1, masked_m, a2_scale)
     silu_and_mul_masked_post_per_tensor_quant_fwd(
         c1, intermediate_q, masked_m, a2_scale
+    )
+    _trace_w4a8_dispatch_once(
+        "cutlass_w4a8_moe_deepep_ll.gemm2", m=m, n=k, k=n // 2, topk=topk
     )
     cutlass_w4a8_moe_mm(
         c2,
