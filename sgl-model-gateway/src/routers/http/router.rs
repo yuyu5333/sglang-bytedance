@@ -16,8 +16,9 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
-        WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
+        is_retryable_status, should_ignore_http_status_for_failure_count, AttachedBody,
+        ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType,
+        UNKNOWN_MODEL_ID,
     },
     observability::{
         events::{self, Event},
@@ -320,7 +321,11 @@ impl Router {
         events::RequestReceivedEvent {}.emit();
 
         let status = response.status();
-        worker.record_outcome(status.is_success());
+        if status.is_success() {
+            worker.record_outcome(true);
+        } else if !should_ignore_http_status_for_failure_count(status) {
+            worker.record_outcome(false);
+        }
 
         // Record worker errors for server errors (5xx)
         if status.is_server_error() {

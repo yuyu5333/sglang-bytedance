@@ -31,8 +31,8 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, model_type::Endpoint, ModelCard, ProviderType, RetryExecutor,
-        RuntimeType, Worker, WorkerRegistry,
+        is_retryable_status, should_ignore_http_status_for_failure_count, model_type::Endpoint,
+        ModelCard, ProviderType, RetryExecutor, RuntimeType, Worker, WorkerRegistry,
     },
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     protocols::{
@@ -597,7 +597,9 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
                     // Record circuit breaker failure for error status codes
-                    if !status.is_success() {
+                    if !status.is_success()
+                        && !should_ignore_http_status_for_failure_count(status)
+                    {
                         worker.circuit_breaker().record_failure();
                     }
 
