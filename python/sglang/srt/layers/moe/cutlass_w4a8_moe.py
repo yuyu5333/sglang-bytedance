@@ -106,7 +106,7 @@ def _trace_w4a8_dispatch_once(stage: str, m: int, n: int, k: int, topk: int) -> 
         return
 
     branch = _get_w4a8_dispatch_branch(m=m, n=n, k=k)
-    key = (stage, branch)
+    key = (stage, branch, m, n, k)
     if key in _TRACE_W4A8_GEMM_BRANCH_SEEN:
         return
     _TRACE_W4A8_GEMM_BRANCH_SEEN.add(key)
