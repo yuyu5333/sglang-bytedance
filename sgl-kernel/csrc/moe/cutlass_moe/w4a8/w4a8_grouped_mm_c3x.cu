@@ -225,6 +225,71 @@ void dispatch_w4a8_moe_mm_sm90(
           "n512_k7168_m_gt_1024_SM90_CO_128x64x512_c111",
           (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
+  } else if (n == 1024 && k == 4096) {
+    // TP4 PD prefill/decode gemm1 hot path
+    if (m <= 32) {
+      TRACE_AND_INVOKE_GEMM(
+          "n1024_k4096_m_le_32_SM90_CO_128x16x512_c111",
+          (SM90_CO<128, 16, 512, 1, 1, 1>));
+    } else if (m <= 1024) {
+      TRACE_AND_INVOKE_GEMM(
+          "n1024_k4096_m_le_1024_SM90_CO_128x32x512_c111",
+          (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else {
+      TRACE_AND_INVOKE_GEMM(
+          "n1024_k4096_m_gt_1024_SM90_CO_128x64x512_c111",
+          (SM90_CO<128, 64, 512, 1, 1, 1>));
+    }
+  } else if (n == 512 && k == 4096) {
+    // TP8 colocated gemm1 hot path
+    if (m <= 32) {
+      TRACE_AND_INVOKE_GEMM(
+          "n512_k4096_m_le_32_SM90_CO_128x16x512_c111",
+          (SM90_CO<128, 16, 512, 1, 1, 1>));
+    } else if (m <= 1024) {
+      TRACE_AND_INVOKE_GEMM(
+          "n512_k4096_m_le_1024_SM90_CO_128x32x512_c111",
+          (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else {
+      TRACE_AND_INVOKE_GEMM(
+          "n512_k4096_m_gt_1024_SM90_CO_128x64x512_c111",
+          (SM90_CO<128, 64, 512, 1, 1, 1>));
+    }
+  } else if (n == 4096 && k == 512) {
+    // TP4 PD prefill/decode gemm2 hot path
+    if (m <= 32) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k512_m_le_32_SM90_CO_128x16x512_c111",
+          (SM90_CO<128, 16, 512, 1, 1, 1>));
+    } else if (m <= 1024) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k512_m_le_1024_SM90_CO_128x32x512_c111",
+          (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k512_m_gt_1024_SM90_CO_128x64x512_c111",
+          (SM90_CO<128, 64, 512, 1, 1, 1>));
+    }
+  } else if (n == 4096 && k == 256) {
+    // TP8 colocated gemm2 hot path. For decode-sized m, the narrower 128x32x128
+    // tile with larger cluster performs better than the generic fallback.
+    if (m <= 8) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k256_m_le_8_SM90_PP_64x16x128_c111",
+          (SM90_PP<64, 16, 128, 1, 1, 1>));
+    } else if (m <= 32) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k256_m_le_32_SM90_PP_128x32x128_c111",
+          (SM90_PP<128, 32, 128, 1, 1, 1>));
+    } else if (m <= 512) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k256_m_le_512_SM90_PP_128x32x128_c211",
+          (SM90_PP<128, 32, 128, 2, 1, 1>));
+    } else {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k256_m_gt_512_SM90_PP_128x64x128_c111",
+          (SM90_PP<128, 64, 128, 1, 1, 1>));
+    }
   } else if (n == 7168 && k == 256) {
     // group gemm 2 for tp
     if (m <= 8) {

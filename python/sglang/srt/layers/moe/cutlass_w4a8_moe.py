@@ -80,6 +80,36 @@ def _get_w4a8_dispatch_branch(m: int, n: int, k: int) -> str:
             return "n512_k7168_m_le_1024_SM90_CO_128x32x512_c211"
         return "n512_k7168_m_gt_1024_SM90_CO_128x64x512_c111"
 
+    if n == 1024 and k == 4096:
+        if m <= 32:
+            return "n1024_k4096_m_le_32_SM90_CO_128x16x512_c111"
+        if m <= 1024:
+            return "n1024_k4096_m_le_1024_SM90_CO_128x32x512_c111"
+        return "n1024_k4096_m_gt_1024_SM90_CO_128x64x512_c111"
+
+    if n == 512 and k == 4096:
+        if m <= 32:
+            return "n512_k4096_m_le_32_SM90_CO_128x16x512_c111"
+        if m <= 1024:
+            return "n512_k4096_m_le_1024_SM90_CO_128x32x512_c111"
+        return "n512_k4096_m_gt_1024_SM90_CO_128x64x512_c111"
+
+    if n == 4096 and k == 512:
+        if m <= 32:
+            return "n4096_k512_m_le_32_SM90_CO_128x16x512_c111"
+        if m <= 1024:
+            return "n4096_k512_m_le_1024_SM90_CO_128x32x512_c111"
+        return "n4096_k512_m_gt_1024_SM90_CO_128x64x512_c111"
+
+    if n == 4096 and k == 256:
+        if m <= 8:
+            return "n4096_k256_m_le_8_SM90_PP_64x16x128_c111"
+        if m <= 32:
+            return "n4096_k256_m_le_32_SM90_PP_128x32x128_c111"
+        if m <= 512:
+            return "n4096_k256_m_le_512_SM90_PP_128x32x128_c211"
+        return "n4096_k256_m_gt_512_SM90_PP_128x64x128_c111"
+
     if n == 7168 and k == 256:
         if m <= 8:
             return "n7168_k256_m_le_8_SM90_PP_64x16x128_c111"
