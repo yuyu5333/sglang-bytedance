@@ -614,6 +614,11 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     def free_swa(self, free_index: torch.Tensor):
         swa_indices = self.full_to_swa_index_mapping[free_index]
         swa_indices = swa_indices[swa_indices > 0]
+        # Sliding-window reuse can make multiple full indices point to the same SWA
+        # slot. Free each SWA slot once even if the current free batch includes
+        # several aliases to it.
+        if swa_indices.numel() > 1:
+            swa_indices = torch.unique(swa_indices)
         self.swa_attn_allocator.free(swa_indices)
         self.full_to_swa_index_mapping[free_index] = 0
 
