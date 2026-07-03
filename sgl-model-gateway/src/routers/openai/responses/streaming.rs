@@ -32,7 +32,6 @@ use super::{
     utils::{mask_tools_as_mcp, patch_response_with_request_metadata, rewrite_streaming_block},
 };
 use crate::{
-    core::should_ignore_http_status_for_failure_count,
     protocols::{
         event_types::{
             is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
@@ -514,9 +513,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
     if !status.is_success() {
-        if !should_ignore_http_status_for_failure_count(status_code) {
-            circuit_breaker.record_failure();
-        }
+        circuit_breaker.record_failure();
         let error_body = response
             .text()
             .await

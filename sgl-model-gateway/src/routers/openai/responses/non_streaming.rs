@@ -20,7 +20,6 @@ use crate::routers::{
     openai::context::{PayloadState, RequestContext},
     persistence_utils::persist_conversation_items,
 };
-use crate::core::should_ignore_http_status_for_failure_count;
 
 /// Handle a non-streaming responses request
 pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response {
@@ -118,11 +117,9 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         };
 
         if !response.status().is_success() {
+            worker.circuit_breaker().record_failure();
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            if !should_ignore_http_status_for_failure_count(status) {
-                worker.circuit_breaker().record_failure();
-            }
             let body = response.text().await.unwrap_or_default();
             return (status, body).into_response();
         }

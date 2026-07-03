@@ -3,18 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::http::StatusCode;
 use tracing::info;
 
 use crate::observability::metrics::Metrics;
-
-/// HTTP statuses that reflect transient admission/overload rather than worker breakage.
-///
-/// These statuses should not contribute to circuit-breaker failure counts, otherwise a
-/// single overloaded worker can be opened even though the process is still healthy.
-pub fn should_ignore_http_status_for_failure_count(status: StatusCode) -> bool {
-    status == StatusCode::SERVICE_UNAVAILABLE
-}
 
 /// Circuit breaker configuration
 #[derive(Debug, Clone)]
@@ -631,18 +622,5 @@ mod tests {
         }
 
         assert_eq!(cb.total_failures(), 1000);
-    }
-
-    #[test]
-    fn test_should_ignore_http_status_for_failure_count() {
-        assert!(should_ignore_http_status_for_failure_count(
-            StatusCode::SERVICE_UNAVAILABLE
-        ));
-        assert!(!should_ignore_http_status_for_failure_count(
-            StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(!should_ignore_http_status_for_failure_count(
-            StatusCode::BAD_GATEWAY
-        ));
     }
 }
