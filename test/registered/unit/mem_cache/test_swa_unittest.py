@@ -296,6 +296,63 @@ class TestSWA(unittest.TestCase):
             )
         )
 
+    def test_alloc_extend_swa_tail_clears_stale_prefix_mappings(self):
+        size = 32
+        size_swa = 32
+        page_size = 4
+        head_num = 8
+        head_dim = 128
+        num_layers = 48
+        global_interval = 4
+        dtype = torch.bfloat16
+        device = get_device()
+        full_attention_layer_ids = [i for i in range(0, num_layers, global_interval)]
+        full_attention_layer_ids_set = set(full_attention_layer_ids)
+        swa_attention_layer_ids = [
+            i for i in range(num_layers) if i not in full_attention_layer_ids_set
+        ]
+        pool = SWAKVPool(
+            size=size,
+            size_swa=size_swa,
+            page_size=page_size,
+            dtype=dtype,
+            head_num=head_num,
+            head_dim=head_dim,
+            swa_attention_layer_ids=swa_attention_layer_ids,
+            full_attention_layer_ids=full_attention_layer_ids,
+            enable_kvcache_transpose=False,
+            device=device,
+        )
+        alloc = SWATokenToKVPoolAllocator(
+            size=size,
+            size_swa=size_swa,
+            page_size=page_size,
+            dtype=dtype,
+            device=device,
+            kvcache=pool,
+            need_sort=False,
+        )
+
+        stale_full_indices = torch.arange(4, 12, dtype=torch.int64, device=device)
+        alloc.full_to_swa_index_mapping[stale_full_indices] = torch.arange(
+            100, 108, dtype=torch.int64, device=device
+        )
+
+        full_indices = alloc.alloc_extend_swa_tail(
+            prefix_lens=torch.zeros((1,), dtype=torch.int64, device=device),
+            prefix_lens_cpu=torch.zeros((1,), dtype=torch.int64),
+            seq_lens=torch.tensor([8], dtype=torch.int64, device=device),
+            seq_lens_cpu=torch.tensor([8], dtype=torch.int64),
+            last_loc=torch.tensor([-1], dtype=torch.int64, device=device),
+            extend_num_tokens=8,
+            swa_tail_len=4,
+        )
+
+        self.assertTrue(torch.equal(full_indices, stale_full_indices))
+        translated = alloc.translate_loc_from_full_to_swa(full_indices)
+        self.assertTrue(torch.equal(translated[:4], torch.zeros(4, dtype=torch.int64, device=device)))
+        self.assertTrue(torch.all(translated[4:] > 0))
+
     def test_swa_radix_cache_1(self):
         # args
         req_size = 10

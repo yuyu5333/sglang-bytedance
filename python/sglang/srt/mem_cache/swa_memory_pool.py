@@ -526,6 +526,12 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         )
         assert alloc_full_indices is not None
 
+        # decode preallocation may reserve full KV for a long prefix while only the
+        # tail participates in SWA. Reused full slots can carry stale SWA mappings
+        # from previous requests, so clear the whole allocation before writing the
+        # current tail mapping.
+        self.full_to_swa_index_mapping[alloc_full_indices] = 0
+
         if swa_tail_len == 0:
             return alloc_full_indices
 
