@@ -216,6 +216,35 @@ def rotated_store_to_packed(
     N = input_bf16.shape[0]
     if N == 0:
         return
+
+    # [Route H step3g] STORE-NULL PERF PROBE toggle.
+    #   When SGLANG_RQ_STORE_NULL_PROBE=1, skip the ENTIRE per-token store
+    #   (nope @ R rotation + per-group affine min/max/round/clamp + Triton
+    #   bitpack + scatter into the packed paged cache). This is the ONLY
+    #   heavy per-decode-step, per-layer GPU op that the packed-wall path
+    #   runs but the native FP8 baseline does NOT (native has no store-side
+    #   rotation/quant — it writes FP8 bytes directly via set_kv_buffer).
+    #
+    #   Rationale (step3f correction): reading splitkv_mla.cuh proved the
+    #   producer->consumer handshake (bar_k_local_ready.arrive at L1468) is
+    #   SHARED verbatim by both the packed and dense K-load branches, and
+    #   the dense/native K path is ALSO manual load+dequant+smem-store (not
+    #   TMA async) — so step3f's "packed replaced TMA async with named
+    #   barrier" mechanism is factually wrong. step3b already zeroed the
+    #   entire producer nope reconstruction inside the kernel with zero tps
+    #   gain, and the consumer WG is shared with native. The last untested
+    #   packed-specific per-step op is this store rotation/quant, which
+    #   fires ~13 eager kernel launches/layer x 60 layers/step. This probe
+    #   zeroes it in one cut:
+    #     tps jumps toward native cgoff (~398) -> the store path IS the
+    #       21.5x bottleneck (per-step host-launch-bound eager store);
+    #     tps stays ~19.5 -> store is exonerated too, pivot elsewhere.
+    #   Output is intentionally salad (packed cache stays stale); this only
+    #   measures the full-load 32-req decode tps ceiling.
+    import os as _os
+    if _os.environ.get("SGLANG_RQ_STORE_NULL_PROBE", "0") == "1":
+        return
+
     row_bytes_nope = cfg.row_bytes
     bpt = packed_bytes_per_token(row_bytes_nope, cfg.bit_uniform)
     bytes_per_page = cache.shape[1]
