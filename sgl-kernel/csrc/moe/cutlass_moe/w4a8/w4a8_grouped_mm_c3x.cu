@@ -189,6 +189,15 @@ inline void record_w4a8_branch_histogram(
   ++state.shape_m_counts[shape_m_key];
   ++state.branch_counts[branch_label];
   ++state.exact_branch_counts[exact_branch_key];
+
+  std::fprintf(
+      stderr,
+      "[SGLANG_W4A8_GEMM_HIST_SAMPLE] n=%u k=%u m=%u branch=%s\n",
+      n,
+      k,
+      m,
+      branch_label);
+  std::fflush(stderr);
 }
 
 inline void trace_w4a8_branch_once(
