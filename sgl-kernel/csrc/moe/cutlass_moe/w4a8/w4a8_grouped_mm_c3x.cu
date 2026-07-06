@@ -5,10 +5,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "cutlass/cutlass.h"
 #include "w4a8_grouped_mm_c3x.cuh"
@@ -99,6 +103,94 @@ inline bool w4a8_branch_trace_enabled() {
   return enabled;
 }
 
+inline bool w4a8_branch_hist_enabled() {
+  static bool enabled = [] {
+    char const* env = std::getenv("SGLANG_W4A8_GEMM_HIST");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+  }();
+  return enabled;
+}
+
+struct W4A8BranchHistogramState {
+  std::mutex mutex;
+  std::unordered_map<std::string, uint64_t> shape_counts;
+  std::unordered_map<std::string, uint64_t> shape_m_counts;
+  std::unordered_map<std::string, uint64_t> branch_counts;
+  std::unordered_map<std::string, uint64_t> exact_branch_counts;
+};
+
+inline W4A8BranchHistogramState& w4a8_branch_histogram_state() {
+  static W4A8BranchHistogramState state;
+  return state;
+}
+
+inline void dump_sorted_histogram(
+    char const* section_name,
+    std::unordered_map<std::string, uint64_t> const& counts) {
+  std::vector<std::pair<std::string, uint64_t>> sorted(counts.begin(), counts.end());
+  std::sort(
+      sorted.begin(),
+      sorted.end(),
+      [](auto const& lhs, auto const& rhs) {
+        if (lhs.second != rhs.second) {
+          return lhs.second > rhs.second;
+        }
+        return lhs.first < rhs.first;
+      });
+
+  std::fprintf(stderr, "[SGLANG_W4A8_GEMM_HIST] section=%s entries=%zu\n", section_name, sorted.size());
+  for (auto const& [key, count] : sorted) {
+    std::fprintf(stderr, "[SGLANG_W4A8_GEMM_HIST] section=%s count=%llu key=%s\n", section_name,
+                 static_cast<unsigned long long>(count), key.c_str());
+  }
+  std::fflush(stderr);
+}
+
+inline void dump_w4a8_branch_histogram() {
+  if (!w4a8_branch_hist_enabled()) {
+    return;
+  }
+
+  auto& state = w4a8_branch_histogram_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  dump_sorted_histogram("shape", state.shape_counts);
+  dump_sorted_histogram("shape_m", state.shape_m_counts);
+  dump_sorted_histogram("branch", state.branch_counts);
+  dump_sorted_histogram("exact_branch", state.exact_branch_counts);
+}
+
+inline void ensure_w4a8_branch_histogram_registered() {
+  static bool registered = [] {
+    std::atexit(dump_w4a8_branch_histogram);
+    return true;
+  }();
+  (void)registered;
+}
+
+inline void record_w4a8_branch_histogram(
+    char const* branch_label,
+    uint32_t m,
+    uint32_t n,
+    uint32_t k) {
+  if (!w4a8_branch_hist_enabled()) {
+    return;
+  }
+
+  ensure_w4a8_branch_histogram_registered();
+
+  auto& state = w4a8_branch_histogram_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+
+  std::string shape_key = "n=" + std::to_string(n) + ",k=" + std::to_string(k);
+  std::string shape_m_key = shape_key + ",m=" + std::to_string(m);
+  std::string exact_branch_key = shape_m_key + ",branch=" + branch_label;
+
+  ++state.shape_counts[shape_key];
+  ++state.shape_m_counts[shape_m_key];
+  ++state.branch_counts[branch_label];
+  ++state.exact_branch_counts[exact_branch_key];
+}
+
 inline void trace_w4a8_branch_once(
     char const* branch_label,
     uint32_t m,
@@ -132,6 +224,7 @@ inline void trace_w4a8_branch_once(
 
 #define TRACE_AND_INVOKE_GEMM(label, Config) \
   do {                                       \
+    record_w4a8_branch_histogram(label, m, n, k); \
     trace_w4a8_branch_once(label, m, n, k, topk, chunk_size); \
     INVOKE_GEMM_WITH_CONFIG(Config);         \
   } while (0)
