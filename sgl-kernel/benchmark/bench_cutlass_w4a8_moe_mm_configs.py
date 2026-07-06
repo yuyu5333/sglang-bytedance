@@ -139,7 +139,7 @@ def parse_m_values(raw: str) -> List[int]:
 
 
 def format_ms(value: float) -> str:
-    return f"{value:.3f}"
+    return f"{value:.6f}"
 
 
 def clear_force_envs() -> None:
