@@ -298,16 +298,28 @@ void dispatch_w4a8_moe_mm_sm90(
       TRACE_AND_INVOKE_GEMM(
           "n1024_k4096_m_le_32_SM90_CO_128x16x512_c111",
           (SM90_CO<128, 16, 512, 1, 1, 1>));
+    } else if (m <= 64) {
+      TRACE_AND_INVOKE_GEMM(
+          "n1024_k4096_m_le_64_SM90_CO_128x32x512_c211",
+          (SM90_CO<128, 32, 512, 2, 1, 1>));
+    } else if (m <= 96) {
+      TRACE_AND_INVOKE_GEMM(
+          "n1024_k4096_m_le_96_SM90_CO_128x32x512_c111",
+          (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else if (m <= 128) {
+      TRACE_AND_INVOKE_GEMM(
+          "n1024_k4096_m_le_128_SM90_CO_128x16x512_c111",
+          (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 1024) {
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N1024_K4096_LE1024", "n1024_k4096_forced");
       TRACE_AND_INVOKE_GEMM(
-          "n1024_k4096_m_le_1024_SM90_CO_128x32x512_c111",
-          (SM90_CO<128, 32, 512, 1, 1, 1>));
+          "n1024_k4096_m_le_1024_SM90_PP_64x32x512_c111",
+          (SM90_PP<64, 32, 512, 1, 1, 1>));
     } else {
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N1024_K4096_GT1024", "n1024_k4096_forced");
       TRACE_AND_INVOKE_GEMM(
-          "n1024_k4096_m_gt_1024_SM90_CO_128x64x512_c111",
-          (SM90_CO<128, 64, 512, 1, 1, 1>));
+          "n1024_k4096_m_gt_1024_SM90_PP_64x32x512_c111",
+          (SM90_PP<64, 32, 512, 1, 1, 1>));
     }
   } else if (n == 512 && k == 4096) {
     // TP8 colocated gemm1 hot path
@@ -329,16 +341,29 @@ void dispatch_w4a8_moe_mm_sm90(
     }
   } else if (n == 4096 && k == 512) {
     // TP4 PD prefill/decode gemm2 hot path
-    if (m <= 32) {
+    if (m <= 16) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k512_m_le_16_SM90_PP_64x32x512_c211",
+          (SM90_PP<64, 32, 512, 2, 1, 1>));
+    } else if (m <= 32) {
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_LE32", "n4096_k512_forced");
       TRACE_AND_INVOKE_GEMM(
-          "n4096_k512_m_le_32_SM90_CO_128x16x512_c111",
-          (SM90_CO<128, 16, 512, 1, 1, 1>));
+          "n4096_k512_m_le_32_SM90_CO_128x32x512_c211",
+          (SM90_CO<128, 32, 512, 2, 1, 1>));
+    } else if (m <= 64) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k512_m_le_64_SM90_CO_128x32x512_c211",
+          (SM90_CO<128, 32, 512, 2, 1, 1>));
+    } else if (m <= 512) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_LE1024", "n4096_k512_forced");
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k512_m_le_512_SM90_PP_64x32x512_c111",
+          (SM90_PP<64, 32, 512, 1, 1, 1>));
     } else if (m <= 1024) {
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_LE1024", "n4096_k512_forced");
       TRACE_AND_INVOKE_GEMM(
-          "n4096_k512_m_le_1024_SM90_CO_128x32x512_c111",
-          (SM90_CO<128, 32, 512, 1, 1, 1>));
+          "n4096_k512_m_le_1024_SM90_CO_128x16x512_c111",
+          (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else {
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_GT1024", "n4096_k512_forced");
       TRACE_AND_INVOKE_GEMM(
@@ -352,6 +377,10 @@ void dispatch_w4a8_moe_mm_sm90(
       TRACE_AND_INVOKE_GEMM(
           "n4096_k256_m_le_8_SM90_PP_64x16x128_c111",
           (SM90_PP<64, 16, 128, 1, 1, 1>));
+    } else if (m <= 16) {
+      TRACE_AND_INVOKE_GEMM(
+          "n4096_k256_m_le_16_SM90_PP_128x32x128_c211",
+          (SM90_PP<128, 32, 128, 2, 1, 1>));
     } else if (m <= 32) {
       MAYBE_FORCE_K128_CONFIG("SGLANG_W4A8_FORCE_N4096_K256_LE32", "n4096_k256_forced");
       TRACE_AND_INVOKE_GEMM(
