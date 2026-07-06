@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -135,6 +136,37 @@ inline void trace_w4a8_branch_once(
     INVOKE_GEMM_WITH_CONFIG(Config);         \
   } while (0)
 
+#define TRACE_AND_INVOKE_CO_FOR_TOKEN(token, shape_prefix)                                \
+  do {                                                                                    \
+    if (std::strcmp(token, "16_c111") == 0) {                                            \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x16x512_c111",                     \
+                            (SM90_CO<128, 16, 512, 1, 1, 1>));                           \
+    } else if (std::strcmp(token, "16_c211") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x16x512_c211",                     \
+                            (SM90_CO<128, 16, 512, 2, 1, 1>));                           \
+    } else if (std::strcmp(token, "32_c111") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x32x512_c111",                     \
+                            (SM90_CO<128, 32, 512, 1, 1, 1>));                           \
+    } else if (std::strcmp(token, "32_c211") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x32x512_c211",                     \
+                            (SM90_CO<128, 32, 512, 2, 1, 1>));                           \
+    } else if (std::strcmp(token, "64_c111") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x64x512_c111",                     \
+                            (SM90_CO<128, 64, 512, 1, 1, 1>));                           \
+    } else if (std::strcmp(token, "64_c211") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x64x512_c211",                     \
+                            (SM90_CO<128, 64, 512, 2, 1, 1>));                           \
+    }                                                                                     \
+  } while (0)
+
+#define MAYBE_FORCE_CO(env_name, shape_prefix)                    \
+  do {                                                            \
+    char const* forced_token = std::getenv(env_name);             \
+    if (forced_token != nullptr && forced_token[0] != '\0') {     \
+      TRACE_AND_INVOKE_CO_FOR_TOKEN(forced_token, shape_prefix);  \
+    }                                                             \
+  } while (0)
+
 void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -228,14 +260,17 @@ void dispatch_w4a8_moe_mm_sm90(
   } else if (n == 1024 && k == 4096) {
     // TP4 PD prefill/decode gemm1 hot path
     if (m <= 32) {
+      MAYBE_FORCE_CO("SGLANG_W4A8_FORCE_N1024_K4096_LE32", "n1024_k4096_forced");
       TRACE_AND_INVOKE_GEMM(
           "n1024_k4096_m_le_32_SM90_CO_128x16x512_c111",
           (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 1024) {
+      MAYBE_FORCE_CO("SGLANG_W4A8_FORCE_N1024_K4096_LE1024", "n1024_k4096_forced");
       TRACE_AND_INVOKE_GEMM(
           "n1024_k4096_m_le_1024_SM90_CO_128x32x512_c111",
           (SM90_CO<128, 32, 512, 1, 1, 1>));
     } else {
+      MAYBE_FORCE_CO("SGLANG_W4A8_FORCE_N1024_K4096_GT1024", "n1024_k4096_forced");
       TRACE_AND_INVOKE_GEMM(
           "n1024_k4096_m_gt_1024_SM90_CO_128x64x512_c111",
           (SM90_CO<128, 64, 512, 1, 1, 1>));
@@ -258,14 +293,17 @@ void dispatch_w4a8_moe_mm_sm90(
   } else if (n == 4096 && k == 512) {
     // TP4 PD prefill/decode gemm2 hot path
     if (m <= 32) {
+      MAYBE_FORCE_CO("SGLANG_W4A8_FORCE_N4096_K512_LE32", "n4096_k512_forced");
       TRACE_AND_INVOKE_GEMM(
           "n4096_k512_m_le_32_SM90_CO_128x16x512_c111",
           (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 1024) {
+      MAYBE_FORCE_CO("SGLANG_W4A8_FORCE_N4096_K512_LE1024", "n4096_k512_forced");
       TRACE_AND_INVOKE_GEMM(
           "n4096_k512_m_le_1024_SM90_CO_128x32x512_c111",
           (SM90_CO<128, 32, 512, 1, 1, 1>));
     } else {
+      MAYBE_FORCE_CO("SGLANG_W4A8_FORCE_N4096_K512_GT1024", "n4096_k512_forced");
       TRACE_AND_INVOKE_GEMM(
           "n4096_k512_m_gt_1024_SM90_CO_128x64x512_c111",
           (SM90_CO<128, 64, 512, 1, 1, 1>));
