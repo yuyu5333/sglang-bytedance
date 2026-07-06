@@ -46,9 +46,10 @@ _TRACE_W4A8_GEMM_BRANCH = os.getenv("SGLANG_W4A8_GEMM_TRACE", "0") not in ("", "
 _TRACE_W4A8_GEMM_BRANCH_SEEN = set()
 
 
-def _get_forced_tp4_branch(n: int, k: int, m: int) -> Optional[str]:
+def _get_forced_branch(n: int, k: int, m: int) -> Optional[str]:
     env_name = None
     shape_prefix = None
+    use_pp_label = False
     if n == 1024 and k == 4096:
         shape_prefix = "n1024_k4096_forced"
         if m <= 32:
@@ -65,19 +66,39 @@ def _get_forced_tp4_branch(n: int, k: int, m: int) -> Optional[str]:
             env_name = "SGLANG_W4A8_FORCE_N4096_K512_LE1024"
         else:
             env_name = "SGLANG_W4A8_FORCE_N4096_K512_GT1024"
+    elif n == 512 and k == 4096:
+        shape_prefix = "n512_k4096_forced"
+        if m <= 32:
+            env_name = "SGLANG_W4A8_FORCE_N512_K4096_LE32"
+        elif m <= 1024:
+            env_name = "SGLANG_W4A8_FORCE_N512_K4096_LE1024"
+        else:
+            env_name = "SGLANG_W4A8_FORCE_N512_K4096_GT1024"
+    elif n == 4096 and k == 256:
+        shape_prefix = "n4096_k256_forced"
+        use_pp_label = True
+        if m <= 8:
+            env_name = "SGLANG_W4A8_FORCE_N4096_K256_LE8"
+        elif m <= 32:
+            env_name = "SGLANG_W4A8_FORCE_N4096_K256_LE32"
+        else:
+            env_name = "SGLANG_W4A8_FORCE_N4096_K256_GT32"
 
     if env_name is None:
         return None
 
     token = os.getenv(env_name, "")
     if token:
+        if use_pp_label:
+            tile, cluster = token.split("_", 1)
+            return f"{shape_prefix}_SM90_PP_{tile}x128_{cluster}"
         tile_n, cluster = token.split("_", 1)
         return f"{shape_prefix}_SM90_CO_128x{tile_n}x512_{cluster}"
     return None
 
 
 def _get_w4a8_dispatch_branch(m: int, n: int, k: int) -> str:
-    forced_branch = _get_forced_tp4_branch(n=n, k=k, m=m)
+    forced_branch = _get_forced_branch(n=n, k=k, m=m)
     if forced_branch is not None:
         return forced_branch
 
