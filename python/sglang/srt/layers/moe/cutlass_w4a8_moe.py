@@ -161,6 +161,8 @@ def _get_w4a8_dispatch_branch_label(m: int, n: int, k: int) -> str:
 def _dump_w4a8_py_hist(stage: str, global_m: int, problem_sizes: torch.Tensor) -> None:
     if not _w4a8_py_hist_enabled():
         return
+    if torch.cuda.is_current_stream_capturing():
+        return
 
     rows = problem_sizes.detach().cpu().tolist()
     active_rows = []
