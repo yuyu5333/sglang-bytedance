@@ -2,7 +2,13 @@
 #include <cudaTypedefs.h>
 #include <torch/all.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
 #include <type_traits>
+#include <unordered_set>
 
 #include "cutlass/cutlass.h"
 #include "w4a8_grouped_mm_c3x.cuh"
@@ -85,6 +91,136 @@ inline void invoke_gemm(
       chunk_size)
 #define INVOKE_GEMM_WITH_CONFIG(Config) INVOKE_GEMM_WITH_CONFIG_HELPER Config
 
+inline bool w4a8_branch_trace_enabled() {
+  static bool enabled = [] {
+    char const* env = std::getenv("SGLANG_W4A8_GEMM_TRACE");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+  }();
+  return enabled;
+}
+
+inline void trace_w4a8_branch_once(
+    char const* branch_label,
+    uint32_t m,
+    uint32_t n,
+    uint32_t k,
+    int64_t topk,
+    int64_t chunk_size) {
+  if (!w4a8_branch_trace_enabled()) {
+    return;
+  }
+
+  static std::mutex trace_mutex;
+  static std::unordered_set<std::string> seen_branch_labels;
+
+  std::lock_guard<std::mutex> lock(trace_mutex);
+  if (!seen_branch_labels.insert(branch_label).second) {
+    return;
+  }
+
+  std::fprintf(
+      stderr,
+      "[SGLANG_W4A8_GEMM_TRACE] branch=%s m=%u n=%u k=%u topk=%lld chunk_size=%lld\n",
+      branch_label,
+      m,
+      n,
+      k,
+      static_cast<long long>(topk),
+      static_cast<long long>(chunk_size));
+  std::fflush(stderr);
+}
+
+#define TRACE_AND_INVOKE_GEMM(label, Config) \
+  do {                                       \
+    trace_w4a8_branch_once(label, m, n, k, topk, chunk_size); \
+    INVOKE_GEMM_WITH_CONFIG(Config);         \
+  } while (0)
+
+#define TRACE_AND_INVOKE_K512_CONFIG_FOR_TOKEN(token, shape_prefix)                         \
+  do {                                                                                      \
+    if (std::strcmp(token, "pp_64x16x512_111") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_64x16x512_c111",                        \
+                            (SM90_PP<64, 16, 512, 1, 1, 1>));                              \
+    } else if (std::strcmp(token, "pp_64x32x512_111") == 0) {                              \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_64x32x512_c111",                        \
+                            (SM90_PP<64, 32, 512, 1, 1, 1>));                              \
+    } else if (std::strcmp(token, "pp_64x32x512_211") == 0) {                              \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_64x32x512_c211",                        \
+                            (SM90_PP<64, 32, 512, 2, 1, 1>));                              \
+    } else if (std::strcmp(token, "co_128x16x512_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x16x512_c111",                       \
+                            (SM90_CO<128, 16, 512, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x16x512_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x16x512_c211",                       \
+                            (SM90_CO<128, 16, 512, 2, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x32x512_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x32x512_c111",                       \
+                            (SM90_CO<128, 32, 512, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x32x512_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x32x512_c211",                       \
+                            (SM90_CO<128, 32, 512, 2, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x64x512_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x64x512_c111",                       \
+                            (SM90_CO<128, 64, 512, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x64x512_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x64x512_c211",                       \
+                            (SM90_CO<128, 64, 512, 2, 1, 1>));                             \
+    }                                                                                       \
+  } while (0)
+
+#define MAYBE_FORCE_K512_CONFIG(env_name, shape_prefix)                 \
+  do {                                                                  \
+    char const* forced_token = std::getenv(env_name);                   \
+    if (forced_token != nullptr && forced_token[0] != '\0') {           \
+      TRACE_AND_INVOKE_K512_CONFIG_FOR_TOKEN(forced_token, shape_prefix); \
+      return;                                                           \
+    }                                                                   \
+  } while (0)
+
+#define TRACE_AND_INVOKE_K128_CONFIG_FOR_TOKEN(token, shape_prefix)                         \
+  do {                                                                                      \
+    if (std::strcmp(token, "pp_64x16x128_111") == 0) {                                     \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_64x16x128_c111",                        \
+                            (SM90_PP<64, 16, 128, 1, 1, 1>));                              \
+    } else if (std::strcmp(token, "pp_128x32x128_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_128x32x128_c111",                       \
+                            (SM90_PP<128, 32, 128, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "pp_128x32x128_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_128x32x128_c211",                       \
+                            (SM90_PP<128, 32, 128, 2, 1, 1>));                             \
+    } else if (std::strcmp(token, "pp_128x64x128_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_PP_128x64x128_c111",                       \
+                            (SM90_PP<128, 64, 128, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x16x128_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x16x128_c111",                       \
+                            (SM90_CO<128, 16, 128, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x16x128_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x16x128_c211",                       \
+                            (SM90_CO<128, 16, 128, 2, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x32x128_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x32x128_c111",                       \
+                            (SM90_CO<128, 32, 128, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x32x128_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x32x128_c211",                       \
+                            (SM90_CO<128, 32, 128, 2, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x64x128_111") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x64x128_c111",                       \
+                            (SM90_CO<128, 64, 128, 1, 1, 1>));                             \
+    } else if (std::strcmp(token, "co_128x64x128_211") == 0) {                             \
+      TRACE_AND_INVOKE_GEMM(shape_prefix "_SM90_CO_128x64x128_c211",                       \
+                            (SM90_CO<128, 64, 128, 2, 1, 1>));                             \
+    }                                                                                       \
+  } while (0)
+
+#define MAYBE_FORCE_K128_CONFIG(env_name, shape_prefix)                 \
+  do {                                                                  \
+    char const* forced_token = std::getenv(env_name);                   \
+    if (forced_token != nullptr && forced_token[0] != '\0') {           \
+      TRACE_AND_INVOKE_K128_CONFIG_FOR_TOKEN(forced_token, shape_prefix); \
+      return;                                                           \
+    }                                                                   \
+  } while (0)
+
 void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -146,72 +282,100 @@ void dispatch_w4a8_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 1024 && k == 4096) {
+    if (m <= 32) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N1024_K4096_LE32", "n1024_k4096_forced");
+    } else if (m <= 1024) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N1024_K4096_LE1024", "n1024_k4096_forced");
+    } else {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N1024_K4096_GT1024", "n1024_k4096_forced");
+    }
     // TP4 PD prefill/decode gemm1 hot path
     if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_8_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     } else if (m <= 24) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_24_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
     } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_32_SM90_CO_128x16x512_c111", (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 64) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_64_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else if (m <= 96) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_96_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
     } else if (m <= 128) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_128_SM90_CO_128x16x512_c111", (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_1024_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_gt_1024_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
     }
   } else if (n == 512 && k == 4096) {
+    if (m <= 32) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N512_K4096_LE32", "n512_k4096_forced");
+    } else if (m <= 1024) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N512_K4096_LE1024", "n512_k4096_forced");
+    } else {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N512_K4096_GT1024", "n512_k4096_forced");
+    }
     // TP8 colocated gemm1 hot path
     if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_32_SM90_CO_128x16x512_c211", (SM90_CO<128, 16, 512, 2, 1, 1>));
     } else if (m <= 64) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 16, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_64_SM90_PP_64x16x512_c111", (SM90_PP<64, 16, 512, 1, 1, 1>));
     } else if (m <= 192) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_192_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
     } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_1024_SM90_CO_128x64x512_c211", (SM90_CO<128, 64, 512, 2, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_gt_1024_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 512) {
+    if (m <= 32) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_LE32", "n4096_k512_forced");
+    } else if (m <= 1024) {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_LE1024", "n4096_k512_forced");
+    } else {
+      MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_GT1024", "n4096_k512_forced");
+    }
     // TP4 PD prefill/decode gemm2 hot path
     if (m <= 16) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_16_SM90_PP_64x32x512_c211", (SM90_PP<64, 32, 512, 2, 1, 1>));
     } else if (m <= 24) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_24_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else if (m <= 64) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_64_SM90_CO_128x64x512_c211", (SM90_CO<128, 64, 512, 2, 1, 1>));
     } else if (m <= 96) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_96_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
     } else if (m <= 512) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_512_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
     } else if (m <= 1024) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 16, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_1024_SM90_CO_128x16x512_c111", (SM90_CO<128, 16, 512, 1, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_CO<128, 64, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_gt_1024_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 256) {
+    if (m <= 8) {
+      MAYBE_FORCE_K128_CONFIG("SGLANG_W4A8_FORCE_N4096_K256_LE8", "n4096_k256_forced");
+    } else if (m <= 32) {
+      MAYBE_FORCE_K128_CONFIG("SGLANG_W4A8_FORCE_N4096_K256_LE32", "n4096_k256_forced");
+    } else {
+      MAYBE_FORCE_K128_CONFIG("SGLANG_W4A8_FORCE_N4096_K256_GT32", "n4096_k256_forced");
+    }
     // TP8 colocated gemm2 hot path.
     if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 16, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_8_SM90_PP_64x16x128_c111", (SM90_PP<64, 16, 128, 1, 1, 1>));
     } else if (m <= 16) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_16_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
     } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_32_SM90_PP_128x32x128_c111", (SM90_PP<128, 32, 128, 1, 1, 1>));
     } else if (m <= 48) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 16, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_48_SM90_PP_64x16x128_c111", (SM90_PP<64, 16, 128, 1, 1, 1>));
     } else if (m <= 64) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_64_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
     } else if (m <= 192) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_192_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
     } else if (m <= 4096) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_4096_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_4096_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
     }
   } else if (n == 7168 && k == 256) {
     // group gemm 2 for tp
