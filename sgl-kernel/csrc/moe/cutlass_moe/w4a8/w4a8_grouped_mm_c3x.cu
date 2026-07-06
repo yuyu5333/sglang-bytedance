@@ -430,8 +430,10 @@ void dispatch_w4a8_moe_mm_sm90(
       TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_2048_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     } else if (m <= 4096) {
       TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_4096_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
+    } else if (m <= 4352) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_4352_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n512_k4096_m_gt_4096_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_gt_4352_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 512) {
     if (m <= 32) {
@@ -472,8 +474,10 @@ void dispatch_w4a8_moe_mm_sm90(
       TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_64_SM90_CO_128x32x128_c111", (SM90_CO<128, 32, 128, 1, 1, 1>));
     } else if (m <= 128) {
       TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_128_SM90_CO_128x64x128_c111", (SM90_CO<128, 64, 128, 1, 1, 1>));
+    } else if (m <= 160) {
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_160_SM90_PP_128x32x128_c111", (SM90_PP<128, 32, 128, 1, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_128_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_160_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
     }
   } else if (n == 7168 && k == 256) {
     // group gemm 2 for tp
