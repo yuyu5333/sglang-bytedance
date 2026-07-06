@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cutlass W4A8 MoE kernel."""
 
-import os
 from typing import Optional
 
 import torch
@@ -41,185 +40,6 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     silu_mul_dynamic_tensorwise_quant_for_cutlass_moe,
     silu_mul_static_tensorwise_quant_for_cutlass_moe,
 )
-
-_TRACE_W4A8_GEMM_BRANCH = os.getenv("SGLANG_W4A8_GEMM_TRACE", "0") not in ("", "0")
-_TRACE_W4A8_GEMM_BRANCH_SEEN = set()
-
-
-def _get_forced_branch(n: int, k: int, m: int) -> Optional[str]:
-    env_name = None
-    shape_prefix = None
-    use_pp_label = False
-    if n == 1024 and k == 4096:
-        shape_prefix = "n1024_k4096_forced"
-        if m <= 32:
-            env_name = "SGLANG_W4A8_FORCE_N1024_K4096_LE32"
-        elif m <= 1024:
-            env_name = "SGLANG_W4A8_FORCE_N1024_K4096_LE1024"
-        else:
-            env_name = "SGLANG_W4A8_FORCE_N1024_K4096_GT1024"
-    elif n == 4096 and k == 512:
-        shape_prefix = "n4096_k512_forced"
-        if m <= 32:
-            env_name = "SGLANG_W4A8_FORCE_N4096_K512_LE32"
-        elif m <= 1024:
-            env_name = "SGLANG_W4A8_FORCE_N4096_K512_LE1024"
-        else:
-            env_name = "SGLANG_W4A8_FORCE_N4096_K512_GT1024"
-    elif n == 512 and k == 4096:
-        shape_prefix = "n512_k4096_forced"
-        if m <= 32:
-            env_name = "SGLANG_W4A8_FORCE_N512_K4096_LE32"
-        elif m <= 1024:
-            env_name = "SGLANG_W4A8_FORCE_N512_K4096_LE1024"
-        else:
-            env_name = "SGLANG_W4A8_FORCE_N512_K4096_GT1024"
-    elif n == 4096 and k == 256:
-        shape_prefix = "n4096_k256_forced"
-        use_pp_label = True
-        if m <= 8:
-            env_name = "SGLANG_W4A8_FORCE_N4096_K256_LE8"
-        elif m <= 32:
-            env_name = "SGLANG_W4A8_FORCE_N4096_K256_LE32"
-        else:
-            env_name = "SGLANG_W4A8_FORCE_N4096_K256_GT32"
-
-    if env_name is None:
-        return None
-
-    token = os.getenv(env_name, "")
-    if token:
-        if token.startswith("co_"):
-            _, tile, cluster = token.split("_", 2)
-            tile_m, tile_n, tile_k = tile.split("x")
-            return f"{shape_prefix}_SM90_CO_{tile_m}x{tile_n}x{tile_k}_c{cluster}"
-        if token.startswith("pp_"):
-            _, tile, cluster = token.split("_", 2)
-            tile_m, tile_n, tile_k = tile.split("x")
-            return f"{shape_prefix}_SM90_PP_{tile_m}x{tile_n}x{tile_k}_c{cluster}"
-        if use_pp_label:
-            tile, cluster = token.split("_", 1)
-            return f"{shape_prefix}_SM90_PP_{tile}x128_{cluster}"
-        tile_n, cluster = token.split("_", 1)
-        return f"{shape_prefix}_SM90_CO_128x{tile_n}x512_{cluster}"
-    return None
-
-
-def _get_w4a8_dispatch_branch(m: int, n: int, k: int) -> str:
-    forced_branch = _get_forced_branch(n=n, k=k, m=m)
-    if forced_branch is not None:
-        return forced_branch
-
-    if n == 4096 and k == 7168:
-        if m <= 4:
-            return "n4096_k7168_m_le_4_SM90_PP_64x32x512_c211"
-        if m <= 32:
-            return "n4096_k7168_m_le_32_SM90_CO_128x16x512_c211"
-        if m <= 256:
-            return "n4096_k7168_m_le_256_SM90_CO_128x16x512_c111"
-        if m <= 1024:
-            return "n4096_k7168_m_le_1024_SM90_CO_128x32x512_c211"
-        if m <= 4096:
-            return "n4096_k7168_m_le_4096_SM90_CO_128x64x512_c211"
-        return "n4096_k7168_m_gt_4096_SM90_CO_128x64x512_c111"
-
-    if n == 7168 and k == 2048:
-        if m <= 8:
-            return "n7168_k2048_m_le_8_SM90_PP_64x16x512_c111"
-        if m <= 512:
-            return "n7168_k2048_m_le_512_SM90_CO_128x32x512_c111"
-        if m <= 4096:
-            return "n7168_k2048_m_le_4096_SM90_CO_128x64x512_c211"
-        return "n7168_k2048_m_gt_4096_SM90_CO_128x64x512_c111"
-
-    if n == 512 and k == 7168:
-        if m <= 4:
-            return "n512_k7168_m_le_4_SM90_PP_64x32x512_c211"
-        if m <= 32:
-            return "n512_k7168_m_le_32_SM90_CO_128x16x512_c211"
-        if m <= 256:
-            return "n512_k7168_m_le_256_SM90_CO_128x16x512_c111"
-        if m <= 1024:
-            return "n512_k7168_m_le_1024_SM90_CO_128x32x512_c211"
-        return "n512_k7168_m_gt_1024_SM90_CO_128x64x512_c111"
-
-    if n == 1024 and k == 4096:
-        if m <= 32:
-            return "n1024_k4096_m_le_32_SM90_CO_128x16x512_c111"
-        if m <= 64:
-            return "n1024_k4096_m_le_64_SM90_CO_128x32x512_c211"
-        if m <= 96:
-            return "n1024_k4096_m_le_96_SM90_CO_128x32x512_c111"
-        if m <= 128:
-            return "n1024_k4096_m_le_128_SM90_CO_128x16x512_c111"
-        if m <= 1024:
-            return "n1024_k4096_m_le_1024_SM90_PP_64x32x512_c111"
-        return "n1024_k4096_m_gt_1024_SM90_PP_64x32x512_c111"
-
-    if n == 512 and k == 4096:
-        if m <= 32:
-            return "n512_k4096_m_le_32_SM90_CO_128x16x512_c111"
-        if m <= 1024:
-            return "n512_k4096_m_le_1024_SM90_CO_128x32x512_c111"
-        return "n512_k4096_m_gt_1024_SM90_CO_128x64x512_c111"
-
-    if n == 4096 and k == 512:
-        if m <= 16:
-            return "n4096_k512_m_le_16_SM90_PP_64x32x512_c211"
-        if m <= 32:
-            return "n4096_k512_m_le_32_SM90_CO_128x32x512_c211"
-        if m <= 64:
-            return "n4096_k512_m_le_64_SM90_CO_128x32x512_c211"
-        if m <= 512:
-            return "n4096_k512_m_le_512_SM90_PP_64x32x512_c111"
-        if m <= 1024:
-            return "n4096_k512_m_le_1024_SM90_CO_128x16x512_c111"
-        return "n4096_k512_m_gt_1024_SM90_CO_128x64x512_c111"
-
-    if n == 4096 and k == 256:
-        if m <= 8:
-            return "n4096_k256_m_le_8_SM90_PP_64x16x128_c111"
-        if m <= 16:
-            return "n4096_k256_m_le_16_SM90_PP_128x32x128_c211"
-        if m <= 32:
-            return "n4096_k256_m_le_32_SM90_PP_128x32x128_c111"
-        return "n4096_k256_m_gt_32_SM90_PP_128x64x128_c111"
-
-    if n == 7168 and k == 256:
-        if m <= 8:
-            return "n7168_k256_m_le_8_SM90_PP_64x16x128_c111"
-        if m <= 32:
-            return "n7168_k256_m_le_32_SM90_PP_128x32x128_c111"
-        if m <= 512:
-            return "n7168_k256_m_le_512_SM90_PP_128x32x128_c211"
-        return "n7168_k256_m_gt_512_SM90_PP_128x64x128_c111"
-
-    if k % 512 == 0:
-        if m <= 32:
-            return "fallback_k_mod_512_eq_0_m_le_32_SM90_CO_128x16x512_c111"
-        if m <= 1024:
-            return "fallback_k_mod_512_eq_0_m_le_1024_SM90_CO_128x32x512_c111"
-        return "fallback_k_mod_512_eq_0_m_gt_1024_SM90_CO_128x64x512_c111"
-
-    if m <= 32:
-        return "fallback_k_mod_512_ne_0_m_le_32_SM90_PP_128x32x128_c111"
-    return "fallback_k_mod_512_ne_0_m_gt_32_SM90_PP_128x64x128_c111"
-
-
-def _trace_w4a8_dispatch_once(stage: str, m: int, n: int, k: int, topk: int) -> None:
-    if not _TRACE_W4A8_GEMM_BRANCH:
-        return
-
-    branch = _get_w4a8_dispatch_branch(m=m, n=n, k=k)
-    key = (stage, branch, m, n, k)
-    if key in _TRACE_W4A8_GEMM_BRANCH_SEEN:
-        return
-    _TRACE_W4A8_GEMM_BRANCH_SEEN.add(key)
-    print(
-        f"[SGLANG_W4A8_GEMM_TRACE] stage={stage} branch={branch} m={m} n={n} k={k} topk={topk} chunk_size=128",
-        flush=True,
-    )
-
 
 def cutlass_w4a8_moe(
     a: torch.Tensor,
@@ -358,13 +178,6 @@ def cutlass_w4a8_moe(
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
 
-    _trace_w4a8_dispatch_once(
-        "cutlass_w4a8_moe.gemm1",
-        m=gateup_input.size(0) // topk,
-        n=c1.size(1),
-        k=gateup_input.size(1),
-        topk=topk,
-    )
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -395,13 +208,6 @@ def cutlass_w4a8_moe(
             c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
         )
 
-    _trace_w4a8_dispatch_once(
-        "cutlass_w4a8_moe.gemm2",
-        m=intermediate_q.size(0) // topk,
-        n=c2.size(1),
-        k=intermediate_q.size(1),
-        topk=topk,
-    )
     cutlass_w4a8_moe_mm(
         c2,
         intermediate_q,
@@ -567,13 +373,6 @@ def cutlass_w4a8_moe_deepep_normal(
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.zeros((m * topk, k), device=device, dtype=torch.bfloat16)
 
-    _trace_w4a8_dispatch_once(
-        "cutlass_w4a8_moe_deepep_normal.gemm1",
-        m=gateup_input.size(0) // topk,
-        n=c1.size(1),
-        k=gateup_input.size(1),
-        topk=topk,
-    )
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -604,13 +403,6 @@ def cutlass_w4a8_moe_deepep_normal(
         silu_and_mul(c1, intermediate)
         per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
 
-    _trace_w4a8_dispatch_once(
-        "cutlass_w4a8_moe_deepep_normal.gemm2",
-        m=intermediate_q.size(0) // topk,
-        n=c2.size(1),
-        k=intermediate_q.size(1),
-        topk=topk,
-    )
     cutlass_w4a8_moe_mm(
         c2,
         intermediate_q,
@@ -748,9 +540,6 @@ def cutlass_w4a8_moe_deepep_ll(
     c1 = torch.empty((num_experts, m, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((num_experts, m, k), device=device, dtype=torch.bfloat16)
 
-    _trace_w4a8_dispatch_once(
-        "cutlass_w4a8_moe_deepep_ll.gemm1", m=m, n=n, k=k, topk=topk
-    )
     cutlass_w4a8_moe_mm(
         c1,
         gateup_input,
@@ -775,9 +564,6 @@ def cutlass_w4a8_moe_deepep_ll(
         silu_and_mul_masked_absmax_fwd(c1, masked_m, a2_scale)
     silu_and_mul_masked_post_per_tensor_quant_fwd(
         c1, intermediate_q, masked_m, a2_scale
-    )
-    _trace_w4a8_dispatch_once(
-        "cutlass_w4a8_moe_deepep_ll.gemm2", m=m, n=k, k=n // 2, topk=topk
     )
     cutlass_w4a8_moe_mm(
         c2,
