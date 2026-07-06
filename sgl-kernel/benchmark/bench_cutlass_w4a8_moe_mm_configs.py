@@ -311,8 +311,10 @@ def main() -> None:
         tokens = list(SHAPES[shape_name]["tokens"])  # type: ignore[index]
         for m in m_values:
             results[shape_name][m] = {}
-            for token_index, token in enumerate(tokens):
-                seed = args.seed + shape_index * 100000 + m * 100 + token_index
+            # Keep the input tensors identical across candidate configs for the
+            # same shape/m case so the comparison is strictly apples-to-apples.
+            seed = args.seed + shape_index * 100000 + m * 100
+            for token in tokens:
                 ms = run_one_case(shape_name, m, token, warmup=args.warmup, iters=args.iters, seed=seed)
                 results[shape_name][m][token] = ms
                 print(f"[bench] shape={shape_name} m={m} token={token} mean_ms={ms:.6f}", flush=True)
