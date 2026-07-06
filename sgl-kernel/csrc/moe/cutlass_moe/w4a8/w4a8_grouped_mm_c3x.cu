@@ -290,22 +290,20 @@ void dispatch_w4a8_moe_mm_sm90(
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N1024_K4096_GT1024", "n1024_k4096_forced");
     }
     // TP4 PD prefill/decode gemm1 hot path
-    if (m <= 8) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_8_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
-    } else if (m <= 24) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_24_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
-    } else if (m <= 32) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_32_SM90_CO_128x16x512_c111", (SM90_CO<128, 16, 512, 1, 1, 1>));
-    } else if (m <= 64) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_64_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
-    } else if (m <= 96) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_96_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
+    if (m <= 64) {
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_64_SM90_PP_64x16x512_c111", (SM90_PP<64, 16, 512, 1, 1, 1>));
     } else if (m <= 128) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_128_SM90_CO_128x16x512_c111", (SM90_CO<128, 16, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_128_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
+    } else if (m <= 192) {
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_192_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else if (m <= 256) {
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_256_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else if (m <= 1024) {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_1024_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_1024_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
+    } else if (m <= 2048) {
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_le_2048_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_gt_1024_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n1024_k4096_m_gt_2048_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 512 && k == 4096) {
     if (m <= 32) {
@@ -316,16 +314,22 @@ void dispatch_w4a8_moe_mm_sm90(
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N512_K4096_GT1024", "n512_k4096_forced");
     }
     // TP8 colocated gemm1 hot path
-    if (m <= 32) {
-      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_32_SM90_CO_128x16x512_c211", (SM90_CO<128, 16, 512, 2, 1, 1>));
-    } else if (m <= 64) {
-      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_64_SM90_PP_64x16x512_c111", (SM90_PP<64, 16, 512, 1, 1, 1>));
-    } else if (m <= 192) {
-      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_192_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
-    } else if (m <= 1024) {
-      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_1024_SM90_CO_128x64x512_c211", (SM90_CO<128, 64, 512, 2, 1, 1>));
+    if (m <= 8) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_8_SM90_PP_64x16x512_c111", (SM90_PP<64, 16, 512, 1, 1, 1>));
+    } else if (m <= 32) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_32_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
+    } else if (m <= 128) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_128_SM90_PP_64x16x512_c111", (SM90_PP<64, 16, 512, 1, 1, 1>));
+    } else if (m <= 256) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_256_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
+    } else if (m <= 512) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_512_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else if (m <= 2048) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_2048_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
+    } else if (m <= 4096) {
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_le_4096_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n512_k4096_m_gt_1024_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n512_k4096_m_gt_4096_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 512) {
     if (m <= 32) {
@@ -336,20 +340,16 @@ void dispatch_w4a8_moe_mm_sm90(
       MAYBE_FORCE_K512_CONFIG("SGLANG_W4A8_FORCE_N4096_K512_GT1024", "n4096_k512_forced");
     }
     // TP4 PD prefill/decode gemm2 hot path
-    if (m <= 16) {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_16_SM90_PP_64x32x512_c211", (SM90_PP<64, 32, 512, 2, 1, 1>));
+    if (m <= 8) {
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_8_SM90_CO_128x16x512_c211", (SM90_CO<128, 16, 512, 2, 1, 1>));
     } else if (m <= 24) {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_24_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
-    } else if (m <= 64) {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_64_SM90_CO_128x64x512_c211", (SM90_CO<128, 64, 512, 2, 1, 1>));
-    } else if (m <= 96) {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_96_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_24_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
+    } else if (m <= 32) {
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_32_SM90_CO_128x32x512_c211", (SM90_CO<128, 32, 512, 2, 1, 1>));
     } else if (m <= 512) {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_512_SM90_PP_64x32x512_c111", (SM90_PP<64, 32, 512, 1, 1, 1>));
-    } else if (m <= 1024) {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_1024_SM90_CO_128x16x512_c111", (SM90_CO<128, 16, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_le_512_SM90_CO_128x32x512_c111", (SM90_CO<128, 32, 512, 1, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n4096_k512_m_gt_1024_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k512_m_gt_512_SM90_CO_128x64x512_c111", (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 256) {
     if (m <= 8) {
@@ -360,33 +360,29 @@ void dispatch_w4a8_moe_mm_sm90(
       MAYBE_FORCE_K128_CONFIG("SGLANG_W4A8_FORCE_N4096_K256_GT32", "n4096_k256_forced");
     }
     // TP8 colocated gemm2 hot path.
-    if (m <= 8) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_8_SM90_PP_64x16x128_c111", (SM90_PP<64, 16, 128, 1, 1, 1>));
+    if (m <= 4) {
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_4_SM90_PP_64x16x128_c111", (SM90_PP<64, 16, 128, 1, 1, 1>));
+    } else if (m <= 8) {
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_8_SM90_CO_128x16x128_c211", (SM90_CO<128, 16, 128, 2, 1, 1>));
     } else if (m <= 16) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_16_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
-    } else if (m <= 32) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_32_SM90_PP_128x32x128_c111", (SM90_PP<128, 32, 128, 1, 1, 1>));
-    } else if (m <= 48) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_48_SM90_PP_64x16x128_c111", (SM90_PP<64, 16, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_16_SM90_CO_128x16x128_c111", (SM90_CO<128, 16, 128, 1, 1, 1>));
     } else if (m <= 64) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_64_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
-    } else if (m <= 192) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_192_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
-    } else if (m <= 4096) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_4096_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_64_SM90_CO_128x32x128_c111", (SM90_CO<128, 32, 128, 1, 1, 1>));
+    } else if (m <= 128) {
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_128_SM90_CO_128x64x128_c111", (SM90_CO<128, 64, 128, 1, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_4096_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_128_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
     }
   } else if (n == 7168 && k == 256) {
     // group gemm 2 for tp
     if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<64, 16, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n7168_k256_m_le_8_SM90_PP_64x16x128_c111", (SM90_PP<64, 16, 128, 1, 1, 1>));
     } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n7168_k256_m_le_32_SM90_PP_128x32x128_c111", (SM90_PP<128, 32, 128, 1, 1, 1>));
     } else if (m <= 512) {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 32, 128, 2, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n7168_k256_m_le_512_SM90_PP_128x32x128_c211", (SM90_PP<128, 32, 128, 2, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG((SM90_PP<128, 64, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n7168_k256_m_gt_512_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
     }
   } else {
     if (k % 512 == 0) {
