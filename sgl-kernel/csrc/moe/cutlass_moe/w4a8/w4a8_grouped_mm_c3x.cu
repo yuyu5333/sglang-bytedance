@@ -271,8 +271,7 @@ void dispatch_w4a8_moe_mm_sm90(
           (SM90_CO<128, 64, 512, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 256) {
-    // TP8 colocated gemm2 hot path. For decode-sized m, the narrower 128x32x128
-    // tile with larger cluster performs better than the generic fallback.
+    // TP8 colocated gemm2 hot path.
     if (m <= 8) {
       TRACE_AND_INVOKE_GEMM(
           "n4096_k256_m_le_8_SM90_PP_64x16x128_c111",
@@ -281,13 +280,9 @@ void dispatch_w4a8_moe_mm_sm90(
       TRACE_AND_INVOKE_GEMM(
           "n4096_k256_m_le_32_SM90_PP_128x32x128_c111",
           (SM90_PP<128, 32, 128, 1, 1, 1>));
-    } else if (m <= 512) {
-      TRACE_AND_INVOKE_GEMM(
-          "n4096_k256_m_le_512_SM90_PP_128x32x128_c211",
-          (SM90_PP<128, 32, 128, 2, 1, 1>));
     } else {
       TRACE_AND_INVOKE_GEMM(
-          "n4096_k256_m_gt_512_SM90_PP_128x64x128_c111",
+          "n4096_k256_m_gt_32_SM90_PP_128x64x128_c111",
           (SM90_PP<128, 64, 128, 1, 1, 1>));
     }
   } else if (n == 7168 && k == 256) {

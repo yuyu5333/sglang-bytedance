@@ -106,9 +106,7 @@ def _get_w4a8_dispatch_branch(m: int, n: int, k: int) -> str:
             return "n4096_k256_m_le_8_SM90_PP_64x16x128_c111"
         if m <= 32:
             return "n4096_k256_m_le_32_SM90_PP_128x32x128_c111"
-        if m <= 512:
-            return "n4096_k256_m_le_512_SM90_PP_128x32x128_c211"
-        return "n4096_k256_m_gt_512_SM90_PP_128x64x128_c111"
+        return "n4096_k256_m_gt_32_SM90_PP_128x64x128_c111"
 
     if n == 7168 and k == 256:
         if m <= 8:
