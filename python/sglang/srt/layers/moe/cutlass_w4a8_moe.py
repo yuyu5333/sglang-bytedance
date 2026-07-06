@@ -89,6 +89,14 @@ def _get_forced_branch(n: int, k: int, m: int) -> Optional[str]:
 
     token = os.getenv(env_name, "")
     if token:
+        if token.startswith("co_"):
+            _, tile, cluster = token.split("_", 2)
+            tile_m, tile_n, tile_k = tile.split("x")
+            return f"{shape_prefix}_SM90_CO_{tile_m}x{tile_n}x{tile_k}_c{cluster}"
+        if token.startswith("pp_"):
+            _, tile, cluster = token.split("_", 2)
+            tile_m, tile_n, tile_k = tile.split("x")
+            return f"{shape_prefix}_SM90_PP_{tile_m}x{tile_n}x{tile_k}_c{cluster}"
         if use_pp_label:
             tile, cluster = token.split("_", 1)
             return f"{shape_prefix}_SM90_PP_{tile}x128_{cluster}"

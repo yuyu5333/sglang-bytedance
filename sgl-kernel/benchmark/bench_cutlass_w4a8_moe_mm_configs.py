@@ -22,7 +22,7 @@ import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, List
 
 import torch
 
@@ -30,8 +30,23 @@ from sgl_kernel import cutlass_w4a8_moe_mm
 from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 
 
-CO_TOKENS = ["16_c111", "16_c211", "32_c111", "32_c211", "64_c111", "64_c211"]
-PP_TOKENS = ["64x16_c111", "128x32_c111", "128x32_c211", "128x64_c111"]
+K512_CONFIG_TOKENS = [
+    "pp_64x16x512_111",
+    "pp_64x32x512_111",
+    "pp_64x32x512_211",
+    "co_128x16x512_111",
+    "co_128x16x512_211",
+    "co_128x32x512_111",
+    "co_128x32x512_211",
+    "co_128x64x512_111",
+    "co_128x64x512_211",
+]
+K128_CONFIG_TOKENS = [
+    "pp_64x16x128_111",
+    "pp_128x32x128_111",
+    "pp_128x32x128_211",
+    "pp_128x64x128_111",
+]
 DEFAULT_M_VALUES = [4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024, 2048, 4096, 8192]
 
 SHAPES: Dict[str, Dict[str, object]] = {
@@ -39,7 +54,7 @@ SHAPES: Dict[str, Dict[str, object]] = {
         "label": "TP4 PD gemm1",
         "n": 1024,
         "k": 4096,
-        "kind": "co",
+        "tokens": K512_CONFIG_TOKENS,
         "env_for_m": lambda m: (
             "SGLANG_W4A8_FORCE_N1024_K4096_LE32"
             if m <= 32
@@ -52,7 +67,7 @@ SHAPES: Dict[str, Dict[str, object]] = {
         "label": "TP4 PD gemm2",
         "n": 4096,
         "k": 512,
-        "kind": "co",
+        "tokens": K512_CONFIG_TOKENS,
         "env_for_m": lambda m: (
             "SGLANG_W4A8_FORCE_N4096_K512_LE32"
             if m <= 32
@@ -65,7 +80,7 @@ SHAPES: Dict[str, Dict[str, object]] = {
         "label": "TP8 colocated gemm1",
         "n": 512,
         "k": 4096,
-        "kind": "co",
+        "tokens": K512_CONFIG_TOKENS,
         "env_for_m": lambda m: (
             "SGLANG_W4A8_FORCE_N512_K4096_LE32"
             if m <= 32
@@ -78,7 +93,7 @@ SHAPES: Dict[str, Dict[str, object]] = {
         "label": "TP8 colocated gemm2",
         "n": 4096,
         "k": 256,
-        "kind": "pp",
+        "tokens": K128_CONFIG_TOKENS,
         "env_for_m": lambda m: (
             "SGLANG_W4A8_FORCE_N4096_K256_LE8"
             if m <= 8
@@ -241,8 +256,7 @@ def build_markdown(results: Dict[str, Dict[int, Dict[str, float]]]) -> str:
     lines: List[str] = []
     for shape_name, shape_results in results.items():
         shape = SHAPES[shape_name]
-        kind = str(shape["kind"])
-        tokens = CO_TOKENS if kind == "co" else PP_TOKENS
+        tokens = list(shape["tokens"])  # type: ignore[index]
         lines.append(f"## {shape['label']} (`n={shape['n']}, k={shape['k']}`)")
         lines.append("")
         lines.append("| m | best_config | best_ms | second_best | delta_ms |")
@@ -294,8 +308,7 @@ def main() -> None:
     results: Dict[str, Dict[int, Dict[str, float]]] = defaultdict(dict)
     bench_start = time.time()
     for shape_name in requested_shapes:
-        kind = str(SHAPES[shape_name]["kind"])
-        tokens = CO_TOKENS if kind == "co" else PP_TOKENS
+        tokens = list(SHAPES[shape_name]["tokens"])  # type: ignore[index]
         for m in m_values:
             results[shape_name][m] = {}
             for idx, token in enumerate(tokens):
