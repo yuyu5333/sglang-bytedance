@@ -42,6 +42,7 @@ import torch
 from sglang.srt.layers.quantization.rotated_kv_quant import (
     RotatedQuantizer,
     RotatedQuantizerConfig,
+    build_hadamard,
 )
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
     DeepSeekV4SingleKVPool,
@@ -168,6 +169,82 @@ def load_rotated_quant_dsv4_calibration(
             bits=bits_t,
             scale=entry["nope"]["scale"].to(torch.float32),
             zero=entry["nope"]["zero"].to(torch.float32),
+            bit_uniform=bit_uniform,
+        )
+    return out
+
+
+# ----------------------------------------------------------------------
+# Synthetic calibration builder (DSv4 wall path — no offline file needed)
+# ----------------------------------------------------------------------
+_DEFAULT_WALL_BIT_UNIFORM = 3
+
+
+def build_synthetic_dsv4_calibration(
+    layer_num: int,
+    qk_nope_head_dim: int,
+) -> Dict[int, RotatedQuantizerConfig]:
+    """Build the DSv4 wall-path per-layer quantizer config in-process.
+
+    The wall packed path is **uniform-bit only**: every nope coordinate uses
+    the same ``bit_uniform`` bits, and the affine (min/step) is recomputed
+    per-token × per-64-dim-group at store time (see
+    ``rotated_store_to_packed``'s ``cfg.bit_uniform > 0`` branch). Therefore
+    the only data-dependent quantity a calibration file used to carry — the
+    static per-dim ``scale``/``zero``/``bits`` table — is **never read** on
+    this path. The rotation ``R`` is the deterministic Walsh–Hadamard matrix
+    ``build_hadamard(qk_nope_head_dim)`` (±1/√D, no seed, no data), so it can
+    be regenerated exactly at runtime.
+
+    Consequently the offline ``.pt`` calibration file is redundant for the
+    wall path and is removed entirely: this function synthesizes an
+    equivalent config with a deterministic ``R`` and placeholder
+    ``scale``/``zero``/``bits`` (unused on the uniform path).
+
+    Bit width defaults to :data:`_DEFAULT_WALL_BIT_UNIFORM` (3, matching the
+    validated packed 真路径 milestone). ``SGLANG_RQ_BIT_UNIFORM=N`` (N>0)
+    may still override the width for sweeps; it is *not* required for the
+    path to activate.
+    """
+    bit_uniform = _DEFAULT_WALL_BIT_UNIFORM
+    env_bu = os.environ.get("SGLANG_RQ_BIT_UNIFORM")
+    if env_bu is not None and env_bu.strip() != "":
+        env_bu_int = int(env_bu)
+        if env_bu_int > 0:
+            bit_uniform = env_bu_int
+        else:
+            raise ValueError(
+                "synthetic DSv4 wall calibration requires uniform bits > 0; "
+                "the legacy variable-bit path needs a real calibration file, "
+                "which has been removed. Set SGLANG_RQ_BIT_UNIFORM>0 or leave "
+                f"it unset to use the default {_DEFAULT_WALL_BIT_UNIFORM}-bit."
+            )
+    if bit_uniform > 8:
+        raise ValueError(f"bit_uniform={bit_uniform} too large; supported 1..8")
+
+    logger.warning(
+        "Building SYNTHETIC DSv4 wall calibration (no offline .pt file): "
+        "R=build_hadamard(%d) deterministic; bit_uniform=%d; per-token×group "
+        "affine computed at store time (calib scale/zero/bits unused).",
+        qk_nope_head_dim,
+        bit_uniform,
+    )
+
+    R = build_hadamard(qk_nope_head_dim).to(torch.float32)
+    bits = torch.full((qk_nope_head_dim,), bit_uniform, dtype=torch.int32)
+    # Placeholders: never read on the uniform packed path (the store kernel
+    # derives min/step per token×group). Kept valid so RotatedQuantizerConfig
+    # bookkeeping (row_bits/row_bytes) and any incidental clamp_min stay sane.
+    scale = torch.ones(qk_nope_head_dim, dtype=torch.float32)
+    zero = torch.zeros(qk_nope_head_dim, dtype=torch.float32)
+
+    out: Dict[int, RotatedQuantizerConfig] = {}
+    for lid in range(layer_num):
+        out[lid] = RotatedQuantizerConfig(
+            R=R.clone(),
+            bits=bits.clone(),
+            scale=scale.clone(),
+            zero=zero.clone(),
             bit_uniform=bit_uniform,
         )
     return out
@@ -338,9 +415,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     """DSv4 + 旋转量化 KV pool.
 
     Args:
-        calib_path: DSv4-mode calibration .pt 路径.
         mode: ``'eval'`` (M3.b) 或 ``'wall'`` (M3.c.2).
         其余参数透传给 ``DeepSeekV4TokenToKVPool``.
+
+    Note:
+        不再依赖离线 calib ``.pt``：wall packed 路径是 uniform-bit，store 时
+        逐 token×group 现算 affine，唯一存活量是确定性 Hadamard 旋转，由
+        :func:`build_synthetic_dsv4_calibration` 在进程内构造。
     """
 
     def __init__(
@@ -363,7 +444,6 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         device: str,
         enable_memory_saver: bool,
         compression_ratios: List[int],
-        calib_path: str,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
         enable_hisparse: bool = False,
@@ -395,13 +475,12 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         if mode not in ("eval", "wall"):
             raise ValueError(f"unknown mode {mode!r}; expected 'eval'|'wall'")
         self._mode: Mode = mode
-        self._calib_path = calib_path
-        cfgs = load_rotated_quant_dsv4_calibration(
-            calib_path,
+        # No offline calibration file: the wall packed path is uniform-bit and
+        # recomputes the affine per token×group at store time, so the only live
+        # quantity is the deterministic Hadamard rotation. Build it in-process.
+        cfgs = build_synthetic_dsv4_calibration(
             layer_num=layer_num,
             qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            compression_ratios=list(compression_ratios),
         )
         self._nope_cfgs: Dict[int, RotatedQuantizerConfig] = cfgs
         self._nope_quantizers: Dict[int, RotatedQuantizer] = {
@@ -435,10 +514,9 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
 
         logger.warning(
             "RotatedQuantDeepSeekV4TokenToKVPool active. %s "
-            "calib=%s qk_nope_head_dim=%d packed_row_bytes=%d b_mean=%.2f "
-            "wall_pools=%s token_shadow=%s drop_packed=%s",
+            "calib=synthetic(no-file) qk_nope_head_dim=%d packed_row_bytes=%d "
+            "b_mean=%.2f wall_pools=%s token_shadow=%s drop_packed=%s",
             mode_msg,
-            calib_path,
             qk_nope_head_dim,
             self._sim_row_bytes,
             float(sample.bits.float().mean()),

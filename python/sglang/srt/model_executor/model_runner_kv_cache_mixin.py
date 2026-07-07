@@ -379,30 +379,30 @@ class ModelRunnerKVCacheMixin:
                 ] * self.num_effective_layers
             else:
                 compression_ratios = self.model_config.compress_ratios
-            if self.server_args.rotated_kv_quant_config:
+            if self.server_args.rotated_kv_quant_mode:
                 # 启发三 / M3.b + M3.c.1: DSv4 rotated INT2/3/4 KV pool.
                 # mode='eval'  (M3.b)  — main FP8 storage unchanged; per-layer
-                #                         rotated quantizers loaded for offline
-                #                         accuracy eval (simulate_quantize_nope).
+                #                         rotated quantizers built in-process for
+                #                         offline accuracy eval.
                 # mode='wall'  (M3.c.1) — swa_kv_pool main buffer replaced with
                 #                         INT2/3/4 packed nope + raw BF16 rope.
-                #                         M3.c.2 will wire a dequant-shim into
+                #                         M3.c.2 wires a dequant-shim into
                 #                         the attention prologue (FlashMLA stays
                 #                         unchanged). c4/c128/indexer remain FP8.
+                # No offline calib .pt: the wall packed path is uniform-bit and
+                # recomputes the affine per token×group at store time, so the
+                # config is synthesized in-process (deterministic Hadamard R).
                 # See rotated_quant_dsv4_memory_pool.py for the long form.
                 from sglang.srt.mem_cache.rotated_quant_dsv4_memory_pool import (
                     RotatedQuantDeepSeekV4TokenToKVPool,
                 )
 
-                rq_mode = (
-                    self.server_args.rotated_kv_quant_mode or "eval"
-                )
+                rq_mode = self.server_args.rotated_kv_quant_mode
                 logger.info(
                     "Routing DSv4 KV cache to "
                     "RotatedQuantDeepSeekV4TokenToKVPool "
-                    "(mode=%s; calib=%s).",
+                    "(mode=%s; calib=synthetic-no-file).",
                     rq_mode,
-                    self.server_args.rotated_kv_quant_config,
                 )
                 self.token_to_kv_pool = RotatedQuantDeepSeekV4TokenToKVPool(
                     max_num_reqs=self.max_running_requests,
@@ -422,7 +422,6 @@ class ModelRunnerKVCacheMixin:
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
                     compression_ratios=compression_ratios,
-                    calib_path=self.server_args.rotated_kv_quant_config,
                     start_layer=self.start_layer,
                     end_layer=self.end_layer,
                     enable_hisparse=self.enable_hisparse,
