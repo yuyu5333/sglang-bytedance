@@ -103,10 +103,23 @@ include(FetchContent)
 #     bugs. KDUMP4b (first 16 producer-wg threads): dumps (idx_in_wg,
 #     warp, lane, my_token, abs_token, dim_in_block, idx_in_cluster) to
 #     verify the producer tiling bijectively covers expected sK layout.
+# fa68162 = 2fe729c + remove step3k debug cudaStreamSynchronize.
+#   The [DEBUG step3k] block (added way back at 2f17544) did an
+#   unconditional cudaStreamSynchronize after every mla_kernel launch.
+#   Any stream sync during CUDA graph capture is illegal, poisoning the
+#   capture stream (splitkv_mla.cuh:1491 "operation not permitted when
+#   stream is capturing" -> combine.cu:209 -> deep_gemm DGException ->
+#   rank0 abort -6). That forced the wall packed path to run with
+#   --disable-cuda-graph, leaving 39% GPU idle + 5.5x host-side gloo
+#   broadcast (profiling T_prof_wall_vs_baseline). Removing it makes the
+#   sparse_fp8 decode kernel cudagraph-safe.
+#   NOTE: 2fe729c also carries the d557790 dense-salad revert (ccbfc65,
+#   WG0-does-PV consumer) that the previous dfe5666 build was MISSING —
+#   so this bump additionally fixes dense token salad on the cgon path.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG dfe5666
+    GIT_TAG fa68162
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
