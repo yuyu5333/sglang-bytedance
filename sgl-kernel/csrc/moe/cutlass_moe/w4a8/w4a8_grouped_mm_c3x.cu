@@ -474,10 +474,8 @@ void dispatch_w4a8_moe_mm_sm90(
       TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_64_SM90_CO_128x32x128_c111", (SM90_CO<128, 32, 128, 1, 1, 1>));
     } else if (m <= 128) {
       TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_128_SM90_CO_128x64x128_c111", (SM90_CO<128, 64, 128, 1, 1, 1>));
-    } else if (m <= 160) {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_le_160_SM90_PP_128x32x128_c111", (SM90_PP<128, 32, 128, 1, 1, 1>));
     } else {
-      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_160_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
+      TRACE_AND_INVOKE_GEMM("n4096_k256_m_gt_128_SM90_PP_128x64x128_c111", (SM90_PP<128, 64, 128, 1, 1, 1>));
     }
   } else if (n == 7168 && k == 256) {
     // group gemm 2 for tp
