@@ -1744,10 +1744,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 except Exception as _e:
                     print(f"[KDUMP5-read] dump failed: {_e}", flush=True)
 
+        _bu = int(getattr(cfg, "bit_uniform", 0) or 0)
         return {
             "packed_kcache": packed_rows,
             "scale_kcache": cfg_gpu["scale"],
-            "R_matrix": cfg_gpu["R"],
+            # [step3r] uniform-bit path (bit_uniform>0) consumes a BF16
+            #   prestore of R in the FlashMLA fill_sR wgmma loop (value-
+            #   identical, halves R L2 load + drops fp32->bf16 convert).
+            #   Legacy variable-bit path (bit_uniform==0) still needs fp32 R
+            #   for its float4 R@x kernel branch.
+            "R_matrix": cfg_gpu["R_bf16"] if _bu > 0 else cfg_gpu["R"],
             "zero_point": cfg_gpu["zero"],
             "dim_of_bit": cfg_gpu["dim_of_bit"],
             "bitpos_in_dim": cfg_gpu["bitpos_in_dim"],
@@ -1755,7 +1761,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # forwarded to FlashMLA. 0 -> legacy variable-bit (default,
             # byte-identical pre-step-5). >0 -> uniform N-bit + per-group
             # fp16 affine header path in splitkv_mla.cuh.
-            "bit_uniform": int(getattr(cfg, "bit_uniform", 0) or 0),
+            "bit_uniform": _bu,
         }
 
     # ------------------------------------------------------------------

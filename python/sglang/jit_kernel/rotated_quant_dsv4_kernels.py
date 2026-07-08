@@ -173,6 +173,12 @@ def _get_cached_cfg_gpu(
         "dim_of_bit": dim_of_bit,
         "bitpos_in_dim": bitpos_in_dim,
         "R": R_gpu,
+        # [step3r] BF16 prestore of R for the uniform-bit FlashMLA fill_sR
+        #   path. The kernel already truncates R to bf16 before the gemm, so
+        #   this is value-identical (RNE) while halving the R L2 load width
+        #   and dropping the per-element fp32->bf16 convert. The fp32 R_gpu
+        #   above is still used by the Python store-path rotation.
+        "R_bf16": R_gpu.to(torch.bfloat16),
         "scale": scale_gpu,
         "zero": zero_gpu,
         "bits": bits_gpu,
