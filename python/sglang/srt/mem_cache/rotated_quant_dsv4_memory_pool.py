@@ -669,15 +669,26 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # 反复 ``torch.empty`` 临时 tensor 导致指针不稳定。
             # 容量上限 = num_pages * page_size = 池中所有 slot 数（一次
             # forward 写入 token 数不可能超过这个上限）。
-            staging_capacity = num_pages * page_size
-            staging_slot = torch.zeros(
-                staging_capacity, _DSV4_SLOT_BYTES,
-                dtype=torch.uint8, device=device,
-            )
-            staging_scale = torch.zeros(
-                staging_capacity, _DSV4_SCALES_PER_TOKEN,
-                dtype=torch.uint8, device=device,
-            )
+            # [step3w] staging 仅被 ``_write_tokens_to_shadow`` 使用，而后者
+            # 只在 ``_wall_token_shadow_enabled()`` 为 True 时才被 store 路径
+            # 调用（set_swa_key_buffer_radix_fused / ..._norm_rope /
+            # set_extra_key_buffer_fused）。drop_shadow 主线强制 token_shadow=0，
+            # 此时 staging 是纯 dead memory（swa 池按 num_pages*page_size*(576+8)B
+            # 计，GB 级）。条件化：token_shadow 关闭时用 1B sentinel 占位，
+            # 回收该 dead memory；任何误用会立刻触发 shape error 而非静默坏读。
+            if _wall_token_shadow_enabled():
+                staging_capacity = num_pages * page_size
+                staging_slot = torch.zeros(
+                    staging_capacity, _DSV4_SLOT_BYTES,
+                    dtype=torch.uint8, device=device,
+                )
+                staging_scale = torch.zeros(
+                    staging_capacity, _DSV4_SCALES_PER_TOKEN,
+                    dtype=torch.uint8, device=device,
+                )
+            else:
+                staging_slot = torch.zeros(1, dtype=torch.uint8, device=device)
+                staging_scale = torch.zeros(1, dtype=torch.uint8, device=device)
 
             # The pool's main kv_buffer is now the PACKED storage. Reading
             # via super().get_swa_key_buffer_radix would return packed bytes
