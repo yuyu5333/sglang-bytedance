@@ -1102,6 +1102,27 @@ class DeepseekV4AttnBackend(
             if _os.environ.get("SGLANG_RQ_FORCE_DENSE_PATH", "0") == "1":
                 packed_kwargs = {}
 
+            q_for_extra = None
+            q_nope_is_folded = False
+            if (
+                packed_kwargs
+                and int(packed_kwargs.get("bit_uniform", 0)) > 0
+                and _os.environ.get("SGLANG_RQ_Q_FOLD", "0") == "1"
+            ):
+                R_matrix = packed_kwargs.get("R_matrix")
+                if R_matrix is not None:
+                    # Fold only the NoPE half: q_nope @ R. The packed sparse
+                    # kernel then consumes x directly for original swa blocks.
+                    q_orig = q
+                    q_folded = q.clone()
+                    q_folded[..., :448] = torch.matmul(q[..., :448], R_matrix)
+                    q = q_folded
+                    q_nope_is_folded = True
+                    # c4/c128 extra blocks still read native FP8 K, so the
+                    # kernel reloads original Q before the first extra block.
+                    if extra_k_cache is not None:
+                        q_for_extra = q_orig
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
@@ -1117,6 +1138,8 @@ class DeepseekV4AttnBackend(
                 extra_k_cache=extra_k_cache,
                 extra_indices_in_kvcache=extra_indices,
                 extra_topk_length=extra_topk_lengths,
+                q_for_extra=q_for_extra,
+                q_nope_is_folded=q_nope_is_folded,
                 **packed_kwargs,
             )[0]
 
