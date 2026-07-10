@@ -1104,6 +1104,13 @@ class DeepseekV4AttnBackend(
 
             q_for_extra = None
             q_nope_is_folded = False
+            identity_tail_bypass = False
+            if (
+                packed_kwargs
+                and int(packed_kwargs.get("bit_uniform", 0)) > 0
+                and _os.environ.get("SGLANG_RQ_IDENTITY_TAIL_BYPASS", "0") == "1"
+            ):
+                identity_tail_bypass = True
             if (
                 packed_kwargs
                 and int(packed_kwargs.get("bit_uniform", 0)) > 0
@@ -1140,6 +1147,7 @@ class DeepseekV4AttnBackend(
                 extra_topk_length=extra_topk_lengths,
                 q_for_extra=q_for_extra,
                 q_nope_is_folded=q_nope_is_folded,
+                identity_tail_bypass=identity_tail_bypass,
                 **packed_kwargs,
             )[0]
 
