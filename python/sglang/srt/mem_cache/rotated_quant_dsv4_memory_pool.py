@@ -590,11 +590,29 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             old_buffers = pool.kv_buffer
             if not old_buffers:
                 continue
-            num_pages = old_buffers[0].shape[0]
+            native_num_pages = old_buffers[0].shape[0]
             device = old_buffers[0].device
             page_size = pool.page_size
             packed_bytes_per_page = bpt_packed * page_size
             shadow_bytes_per_page = _native_bytes_per_page(page_size)
+
+            # Capacity amplification: packed bytes_per_page is smaller
+            # than native, so the same memory budget can hold more pages.
+            # Only apply to SWA pool (c4/c128 stay on native layout).
+            if kind == "swa" and not _wall_drop_packed_enabled():
+                scale_factor = shadow_bytes_per_page / packed_bytes_per_page
+                num_pages = int(native_num_pages * scale_factor)
+                new_size = num_pages * page_size
+                logger.warning(
+                    f"wall-storage capacity amplification: "
+                    f"swa native_num_pages={native_num_pages} -> "
+                    f"packed_num_pages={num_pages} "
+                    f"(scale={scale_factor:.3f}x), "
+                    f"tokens: {pool.size} -> {new_size}"
+                )
+                pool.size = new_size
+            else:
+                num_pages = native_num_pages
 
             # Drop the existing FP8 buffers; reallocate as packed + shadow.
             pool.kv_buffer = []  # type: ignore[assignment]
@@ -737,6 +755,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         if "swa" in self._wall_pools:
             swa_entry = self._wall_pools["swa"]
             self._wall_bytes_per_page = swa_entry.packed_bytes_per_page
+            # Update top-level swa_size to reflect the amplified capacity
+            if hasattr(self, "swa_size"):
+                old_swa_size = self.swa_size
+                self.swa_size = swa_entry.pool.size
+                logger.warning(
+                    f"wall-storage: updated self.swa_size "
+                    f"{old_swa_size} -> {self.swa_size}"
+                )
         else:
             self._wall_bytes_per_page = None
 
