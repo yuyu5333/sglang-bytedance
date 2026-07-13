@@ -215,7 +215,7 @@ def cutlass_w4a8_moe(
                 "magic default."
             )
         from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
-            swiglu_oai_func,
+            swiglu_gpt_oss_sigmoid_alpha_contiguous,
         )
 
         alpha = float(gemm1_alpha)
@@ -223,7 +223,7 @@ def cutlass_w4a8_moe(
         intermediate = torch.empty(
             (m * topk, n), dtype=torch.bfloat16, device=device
         )
-        swiglu_oai_func(intermediate, c1, alpha, limit)
+        swiglu_gpt_oss_sigmoid_alpha_contiguous(intermediate, c1, alpha, limit)
         if a2_scale is None:
             a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
             # is_static=False: kernel computes absmax-based scale itself.
