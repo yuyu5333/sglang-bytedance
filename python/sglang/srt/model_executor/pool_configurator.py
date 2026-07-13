@@ -14,6 +14,7 @@ Two entry points, same core computation:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -461,11 +462,95 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
         return self._to_config(sizes)
 
 
+class RotatedDSV4PoolConfigurator(DSV4PoolConfigurator):
+    """Configurator for DSV4 + rotated-kv-quant wall mode.
+
+    Same as DSV4PoolConfigurator, but swa pool kv_bytes uses the packed
+    format (smaller bytes_per_token) so max_total_num_tokens is scaled up
+    by the native-to-packed ratio. c4/c128/indexer/state pools stay on
+    native FP8 layout unchanged.
+    """
+
+    def __init__(self, mr: ModelRunner):
+        super().__init__(mr)
+        from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+            _MLA_NOPE_DIM,
+            _ROPE_BYTES,
+            _UNIFORM_HEADER_BYTES,
+        )
+
+        bit_uniform_env = os.environ.get("SGLANG_RQ_BIT_UNIFORM")
+        if bit_uniform_env and int(bit_uniform_env) > 0:
+            bit_uniform = int(bit_uniform_env)
+        else:
+            bit_uniform = 3
+
+        row_bytes_nope = (_MLA_NOPE_DIM * bit_uniform + 7) // 8
+        self.packed_kv_bytes = row_bytes_nope + _UNIFORM_HEADER_BYTES + _ROPE_BYTES
+        logger.warning(
+            f"RotatedDSV4PoolConfigurator: swa packed kv_bytes={self.packed_kv_bytes} "
+            f"(native={self.qk_nope_head_dim + self.qk_rope_head_dim * 2 + 8}), "
+            f"bit_uniform={bit_uniform}"
+        )
+
+        self.bytes_per_full_token = self._get_bytes_per_full_token()
+        if self.is_speculative:
+            draft_layers = 1
+            target_layers = self.num_layers_total
+            self.bytes_per_full_token *= (target_layers + draft_layers) / target_layers
+
+    def _get_bytes_per_full_token(self) -> float:
+        if not hasattr(self, "packed_kv_bytes"):
+            return super()._get_bytes_per_full_token()
+
+        native_kv_bytes = self.qk_nope_head_dim + self.qk_rope_head_dim * 2 + 8
+        packed_kv_bytes = self.packed_kv_bytes
+
+        quant_block_size = 128
+        indexer_bytes = (
+            self.indexer_head_dim + self.indexer_head_dim // quant_block_size * 4
+        )
+
+        attn_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        state_dtype_size = 4
+        c4_state_bytes = 2 * 2 * attn_head_dim * state_dtype_size
+        c128_online = envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
+        c128_state_bytes = (
+            (3 if c128_online else 2 * 1) * attn_head_dim * state_dtype_size
+        )
+        c4_indexer_state_bytes = 2 * 2 * self.indexer_head_dim * state_dtype_size
+
+        c4_state_ratio = self.c4_ring_size / self.swa_page_size
+        c128_state_ratio = self.c128_ring_size / self.swa_page_size
+
+        c4_frac = 1 / (4 * self.c4_shrink_factor)
+        return (
+            self.swa_ratio * packed_kv_bytes * self.num_layers_total
+            + c4_frac * native_kv_bytes * self.num_layers_ca4
+            + 1 / 128 * native_kv_bytes * self.num_layers_ca128
+            + 1 / 4 * indexer_bytes * self.num_layers_ca4
+            + self.swa_ratio * c4_state_ratio * c4_state_bytes * self.num_layers_ca4
+            + self.swa_ratio
+            * c128_state_ratio
+            * c128_state_bytes
+            * self.num_layers_ca128
+            + self.swa_ratio
+            * c4_state_ratio
+            * c4_indexer_state_bytes
+            * self.num_layers_ca4
+        )
+
+
 def create_memory_pool_configurator(
     mr: ModelRunner,
 ) -> MemoryPoolConfigurator:
     """Factory: select the right configurator for the model architecture."""
     if is_deepseek_v4(mr.model_config.hf_config) and mr.is_hybrid_swa:
+        if (
+            mr.server_args.rotated_kv_quant_mode == "wall"
+            and os.environ.get("SGLANG_RQ_WALL_DROP_SHADOW", "0") == "1"
+        ):
+            return RotatedDSV4PoolConfigurator(mr)
         return DSV4PoolConfigurator(mr)
     if mr.is_hybrid_swa:
         return HybridSWAPoolConfigurator(mr)

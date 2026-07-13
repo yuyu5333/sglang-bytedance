@@ -449,6 +449,35 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         enable_hisparse: bool = False,
         mode: Mode = "eval",
     ):
+        if mode == "wall" and _wall_drop_shadow_enabled():
+            from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
+                _MLA_NOPE_DIM,
+                _ROPE_BYTES,
+                _UNIFORM_HEADER_BYTES,
+            )
+
+            bit_uniform_env = os.environ.get("SGLANG_RQ_BIT_UNIFORM")
+            if bit_uniform_env and int(bit_uniform_env) > 0:
+                bit_uniform = int(bit_uniform_env)
+            else:
+                bit_uniform = 3
+            row_bytes_nope = (_MLA_NOPE_DIM * bit_uniform + 7) // 8
+            packed_bpt = row_bytes_nope + _UNIFORM_HEADER_BYTES + _ROPE_BYTES
+            native_bpt = _DSV4_NATIVE_BPT
+            scale_factor = native_bpt / packed_bpt
+
+            self._wall_prescaled_swa_size = swa_size
+            prescaled_pages = swa_size // page_size
+            native_pages = int(prescaled_pages / scale_factor)
+            swa_size = native_pages * page_size
+            logger.warning(
+                f"wall-storage prescaled swa_size: "
+                f"prescaled={self._wall_prescaled_swa_size} -> "
+                f"native_super={swa_size} "
+                f"(scale={scale_factor:.3f}x), "
+                f"avoiding super().__init__ OOM from oversized native allocation"
+            )
+
         super().__init__(
             max_num_reqs=max_num_reqs,
             swa_size=swa_size,
@@ -599,18 +628,37 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # Capacity amplification: packed bytes_per_page is smaller
             # than native, so the same memory budget can hold more pages.
             # Only apply to SWA pool (c4/c128 stay on native layout).
+            # Two paths:
+            #   (a) prescaled: pool_configurator already computed swa_size
+            #       using packed bytes_per_token (RotatedDSV4PoolConfigurator).
+            #       Use _wall_prescaled_swa_size directly; no second scaling.
+            #   (b) on-the-fly: configurator used native bytes. Scale up
+            #       native_num_pages by shadow/packed ratio (legacy path).
             if kind == "swa" and not _wall_drop_packed_enabled():
-                scale_factor = shadow_bytes_per_page / packed_bytes_per_page
-                num_pages = int(native_num_pages * scale_factor)
-                new_size = num_pages * page_size
-                logger.warning(
-                    f"wall-storage capacity amplification: "
-                    f"swa native_num_pages={native_num_pages} -> "
-                    f"packed_num_pages={num_pages} "
-                    f"(scale={scale_factor:.3f}x), "
-                    f"tokens: {pool.size} -> {new_size}"
-                )
-                pool.size = new_size
+                prescaled = getattr(self, "_wall_prescaled_swa_size", None)
+                if prescaled is not None:
+                    num_pages = prescaled // page_size
+                    new_size = num_pages * page_size
+                    logger.warning(
+                        f"wall-storage capacity amplification (prescaled): "
+                        f"swa native_num_pages={native_num_pages} -> "
+                        f"packed_num_pages={num_pages} "
+                        f"(prescaled from configurator), "
+                        f"tokens: {pool.size} -> {new_size}"
+                    )
+                    pool.size = new_size
+                else:
+                    scale_factor = shadow_bytes_per_page / packed_bytes_per_page
+                    num_pages = int(native_num_pages * scale_factor)
+                    new_size = num_pages * page_size
+                    logger.warning(
+                        f"wall-storage capacity amplification (on-the-fly): "
+                        f"swa native_num_pages={native_num_pages} -> "
+                        f"packed_num_pages={num_pages} "
+                        f"(scale={scale_factor:.3f}x), "
+                        f"tokens: {pool.size} -> {new_size}"
+                    )
+                    pool.size = new_size
             else:
                 num_pages = native_num_pages
 
