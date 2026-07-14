@@ -479,15 +479,16 @@ class DeepGemmRunnerCore(MoeRunnerCore):
                 gran_k_b=32,
             )
 
-            # print(
-            #     "[g128-debug] gemm0-input",
-            #     "lhs_act=", tuple(hidden_states.shape),
-            #     "lhs_scale=", tuple(hidden_states_scale.shape) if hidden_states_scale is not None else None,
-            #     "rhs_weight=", tuple(w13_weight.shape),
-            #     "rhs_scale=", tuple(w13_scale_for_gemm.shape),
-            #     "expected_rhs_scale_kgroups=", (k + 32 - 1) // 32,
-            #     flush=True,
-            # )
+            print(
+                "[g128-debug] gemm0-input",
+                "rhs_weight_dtype=", w13_weight.dtype,
+                "rhs_weight_shape=", tuple(w13_weight.shape),
+                "rhs_scale_dtype=", w13_scale_for_gemm.dtype,
+                "rhs_scale_shape=", tuple(w13_scale_for_gemm.shape),
+                "rhs_scale_stride=", w13_scale_for_gemm.stride(),
+                "e8m0_is_none=", quant_info.w13_scale_e8m0 is None,
+                flush=True,
+            )
 
             deep_gemm_wrapper.grouped_gemm_nt_f8fp4bf16_masked(
                 (hidden_states, hidden_states_scale),
