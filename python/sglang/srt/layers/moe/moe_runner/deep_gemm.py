@@ -479,17 +479,6 @@ class DeepGemmRunnerCore(MoeRunnerCore):
                 gran_k_b=32,
             )
 
-            print(
-                "[g128-debug] gemm0-input",
-                "rhs_weight_dtype=", w13_weight.dtype,
-                "rhs_weight_shape=", tuple(w13_weight.shape),
-                "rhs_scale_dtype=", w13_scale_for_gemm.dtype,
-                "rhs_scale_shape=", tuple(w13_scale_for_gemm.shape),
-                "rhs_scale_stride=", w13_scale_for_gemm.stride(),
-                "e8m0_is_none=", quant_info.w13_scale_e8m0 is None,
-                flush=True,
-            )
-
             deep_gemm_wrapper.grouped_gemm_nt_f8fp4bf16_masked(
                 (hidden_states, hidden_states_scale),
                 (w13_weight, w13_scale_for_gemm),
@@ -602,17 +591,6 @@ class DeepGemmRunnerCore(MoeRunnerCore):
                 gran_k_b=32,
             )
 
-            print(
-                "[g128-debug] gemm1-input",
-                "rhs_weight_dtype=", w2_weight.dtype,
-                "rhs_weight_shape=", tuple(w2_weight.shape),
-                "rhs_scale_dtype=", w2_scale_for_gemm.dtype,
-                "rhs_scale_shape=", tuple(w2_scale_for_gemm.shape),
-                "rhs_scale_stride=", w2_scale_for_gemm.stride(),
-                "e8m0_is_none=", quant_info.w2_scale_e8m0 is None,
-                flush=True,
-            )
-            
             deep_gemm_return_value = deep_gemm_wrapper.grouped_gemm_nt_f8fp4bf16_masked(
                 (down_input, down_input_scale),
                 (w2_weight, w2_scale_for_gemm),
@@ -1031,8 +1009,7 @@ def _varlen_deep_gemm_silu_mul_quant(
         dtype=torch.float8_e4m3fn,
     )
 
-    if envs.SGLANG_OPT_USE_JIT_EP_ACTIVATION.get():
-        assert N % 4 == 0 and G % 4 == 0
+    if envs.SGLANG_OPT_USE_JIT_EP_ACTIVATION.get() and N % 4 == 0 and G % 4 == 0:
         packed_ue8m0 = deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
         down_input_scale = torch.empty(
             (E, G // 4, N) if packed_ue8m0 else (E, N, G),
@@ -1054,12 +1031,17 @@ def _varlen_deep_gemm_silu_mul_quant(
         if packed_ue8m0:
             down_input_scale = down_input_scale.transpose(-1, -2)
     else:
-        assert (
-            swiglu_limit is None
-        ), "swiglu_limit (DeepSeek V4) requires SGLANG_OPT_USE_JIT_EP_ACTIVATION=True"
+        # Fallback path when the JIT EP activation kernel's N%4==G%4==0
+        # requirement is not met (e.g., DSV4 FP4 with num_local_experts=256
+        # where G=intermediate_size/2/group_size=2). Apply swiglu clamp
+        # separately, then use the generic non-packed silu+mul+quant kernel.
+        if swiglu_limit is not None:
+            reshape = gateup_output.reshape(E * N, -1)
+            reshape = _apply_swiglu_limit(reshape, swiglu_limit=swiglu_limit)
+            gateup_output = reshape.reshape(E, N, -1)
         assert (
             not swizzle
-        ), "SGLANG_OPT_FIX_MEGA_MOE_MEMORY requires SGLANG_OPT_USE_JIT_EP_ACTIVATION=True"
+        ), "SGLANG_OPT_FIX_MEGA_MOE_MEMORY requires SGLANG_OPT_USE_JIT_EP_ACTIVATION packed path"
         down_input_scale = torch.empty(
             (E, N, G),
             device=hidden_states_device,
