@@ -156,18 +156,24 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         self,
         scale: torch.Tensor,
         weight_packed: torch.Tensor,
-    ) -> torch.Tensor:
+    ):
         """Expand a g=group_size, UE8M0-uint8 scale to the layout expected
         by DeepGEMM (K indexed with gran_k=32, TMA-aligned MN dim).
 
-        Returns a uint8 tensor whose values are the same UE8M0 exponents
-        the checkpoint stored, but reshaped/re-strided for the kernel.
+        Mirrors fp8.py's FP4 branch: repeat_interleave -> transform_sf_into_required_layout
+        -> empty_strided(uint8) + UE8M0 re-encode.
+
+        Returns (scale_data_float, e8m0_scale_uint8). scale_data_float is the
+        kernel-layout float tensor (attached as .data on the scale Parameter);
+        e8m0_scale_uint8 is the TMA-strided uint8 UE8M0 view kernel expects.
         """
         if not self._scale_is_ue8m0_uint8:
             raise NotImplementedError(
                 "CompressedTensorsW4A8Fp8MoE currently only handles UE8M0 "
                 "(uint8) on-disk scales."
             )
+
+        from deep_gemm import transform_sf_into_required_layout
 
         num_experts, n, k_groups_loaded = scale.shape
         k = weight_packed.shape[2] * 2  # 2 fp4 items per packed byte
@@ -179,7 +185,15 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
                 f"group_size={self.group_size}"
             )
 
-        runtime_scale = scale.repeat_interleave(self.expand_ratio, dim=2).contiguous()
+        # Decode UE8M0 uint8 exponent to float: scale_float = 2^(uint8 - 127).
+        scale_float = torch.pow(
+            torch.tensor(2.0, device=scale.device, dtype=torch.float32),
+            scale.to(torch.float32) - 127.0,
+        )
+
+        runtime_scale = scale_float.repeat_interleave(
+            self.expand_ratio, dim=2
+        ).contiguous()
         expected_runtime_k_groups = k // _DEEPGEMM_GRAN_K
         if runtime_scale.shape[2] != expected_runtime_k_groups:
             raise ValueError(
@@ -188,17 +202,30 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
                 f"for k={k}, deepgemm_gran_k={_DEEPGEMM_GRAN_K}"
             )
 
-        # Re-lay uint8 scale into TMA-aligned strided form:
-        # shape (E, n, k_groups_runtime), strides (n_aligned*k_groups, 1, n_aligned).
-        tma_aligned_n = ((n + 15) // 16) * 16
-        e8m0_scale = torch.empty_strided(
-            runtime_scale.shape,
-            (tma_aligned_n * runtime_scale.shape[2], 1, tma_aligned_n),
-            device=runtime_scale.device,
+        scale_data = transform_sf_into_required_layout(
+            runtime_scale,
+            mn=n,
+            k=k,
+            recipe=(1, _DEEPGEMM_GRAN_K),
+            num_groups=num_experts,
+            disable_ue8m0_cast=False,
+        )
+
+        tma_aligned_n_e8m0 = ((n + 15) // 16) * 16
+        e8m0_scale_data = torch.empty_strided(
+            scale_data.shape,
+            (
+                tma_aligned_n_e8m0 * scale_data.shape[2],
+                1,
+                tma_aligned_n_e8m0,
+            ),
+            device=scale_data.device,
             dtype=torch.uint8,
         )
-        e8m0_scale.copy_(runtime_scale)
-        return e8m0_scale
+        e8m0_scale_data.copy_(
+            (torch.floor(torch.log2(scale_data.float())) + 127).to(torch.uint8)
+        )
+        return scale_data, e8m0_scale_data
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Re-view packed uint8 weights as int8 to satisfy DeepGEMM's kPackedFP4
@@ -216,22 +243,21 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
                 "UE8M0 scale-B support (DEEPGEMM_FP4_SCALE_B_UE8M0)."
             )
 
-        w13_scale_e8m0 = self._prepare_scale_for_deepgemm(
+        w13_scale_data, w13_scale_e8m0 = self._prepare_scale_for_deepgemm(
             layer.w13_weight_scale.data, layer.w13_weight.data
         )
-        w2_scale_e8m0 = self._prepare_scale_for_deepgemm(
+        w2_scale_data, w2_scale_e8m0 = self._prepare_scale_for_deepgemm(
             layer.w2_weight_scale.data, layer.w2_weight.data
         )
 
-        # DeepGemmMoeQuantInfo consumes both the "packed" scale on w*_scale
-        # and the TMA-strided uint8 scale via w*_scale_e8m0. We keep the
-        # runtime-expanded scale as the parameter and attach the e8m0 view
-        # so both are addressable from apply_weights.
+        # DeepGemmMoeQuantInfo consumes both the float "packed" scale on
+        # w*_scale (kernel-required layout via transform_sf_into_required_layout)
+        # and the TMA-strided uint8 UE8M0 view via w*_scale_e8m0.
         layer.w13_weight_scale = torch.nn.Parameter(
-            w13_scale_e8m0, requires_grad=False
+            w13_scale_data, requires_grad=False
         )
         layer.w2_weight_scale = torch.nn.Parameter(
-            w2_scale_e8m0, requires_grad=False
+            w2_scale_data, requires_grad=False
         )
         layer.w13_weight_scale.scale_e8m0_data = w13_scale_e8m0
         layer.w2_weight_scale.scale_e8m0_data = w2_scale_e8m0
