@@ -237,12 +237,6 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         delattr(layer, "w13_weight_packed")
         delattr(layer, "w2_weight_packed")
 
-        if not deep_gemm_wrapper.DEEPGEMM_FP4_SCALE_B_UE8M0:
-            raise RuntimeError(
-                "CompressedTensorsW4A8Fp8MoE requires a DeepGEMM build with "
-                "UE8M0 scale-B support (DEEPGEMM_FP4_SCALE_B_UE8M0)."
-            )
-
         w13_scale_data, w13_scale_e8m0 = self._prepare_scale_for_deepgemm(
             layer.w13_weight_scale.data, layer.w13_weight.data
         )
@@ -250,19 +244,28 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
             layer.w2_weight_scale.data, layer.w2_weight.data
         )
 
-        # DeepGemmMoeQuantInfo consumes both the float "packed" scale on
-        # w*_scale (kernel-required layout via transform_sf_into_required_layout)
-        # and the TMA-strided uint8 UE8M0 view via w*_scale_e8m0.
+        # DeepGemmMoeQuantInfo consumes the float "packed" scale on w*_scale
+        # (kernel-required layout via transform_sf_into_required_layout).
+        # The extra UE8M0 uint8 view on w*_scale_e8m0 is only meaningful when
+        # DeepGEMM was built with UE8M0 scale-B support; otherwise leave it
+        # None and let the kernel take the float sfb path (matches fp8.py's
+        # DSV4 FP4 branch behavior).
         layer.w13_weight_scale = torch.nn.Parameter(
             w13_scale_data, requires_grad=False
         )
         layer.w2_weight_scale = torch.nn.Parameter(
             w2_scale_data, requires_grad=False
         )
-        layer.w13_weight_scale.scale_e8m0_data = w13_scale_e8m0
-        layer.w2_weight_scale.scale_e8m0_data = w2_scale_e8m0
-        layer.w13_weight_scale.format_ue8m0 = True
-        layer.w2_weight_scale.format_ue8m0 = True
+        if deep_gemm_wrapper.DEEPGEMM_FP4_SCALE_B_UE8M0:
+            layer.w13_weight_scale.scale_e8m0_data = w13_scale_e8m0
+            layer.w2_weight_scale.scale_e8m0_data = w2_scale_e8m0
+            layer.w13_weight_scale.format_ue8m0 = True
+            layer.w2_weight_scale.format_ue8m0 = True
+        else:
+            layer.w13_weight_scale.scale_e8m0_data = None
+            layer.w2_weight_scale.scale_e8m0_data = None
+            layer.w13_weight_scale.format_ue8m0 = False
+            layer.w2_weight_scale.format_ue8m0 = False
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
