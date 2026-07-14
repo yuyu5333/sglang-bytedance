@@ -28,15 +28,9 @@ __all__ = ["CompressedTensorsW4A8Fp8MoE"]
 # along K, regardless of the checkpoint's stored group_size.
 _DEEPGEMM_GRAN_K = 32
 
-
-def _require_fp4_dtype() -> torch.dtype:
-    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-    if fp4_dtype is None:
-        raise RuntimeError(
-            "compressed-tensors W4A8 FP4 experts require "
-            "torch.float4_e2m1fn_x2 support in the current torch build."
-        )
-    return fp4_dtype
+# DeepGEMM's kPackedFP4 corresponds to a signed int8 view of the packed
+# 2-fp4-per-byte buffer on CUDA. Matches the non-AIter path in fp8.py.
+_FP4_WEIGHT_VIEW_DTYPE = torch.int8
 
 
 class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
@@ -207,11 +201,10 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         return e8m0_scale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Re-view packed uint8 weights as fp4 to match DeepGEMM kernel ABI.
-        fp4_weight_dtype = _require_fp4_dtype()
-
-        w13_data = layer.w13_weight_packed.data.view(fp4_weight_dtype)
-        w2_data = layer.w2_weight_packed.data.view(fp4_weight_dtype)
+        # Re-view packed uint8 weights as int8 to satisfy DeepGEMM's kPackedFP4
+        # scalar_type check on the SM90 fp8xfp4 kernel.
+        w13_data = layer.w13_weight_packed.data.view(_FP4_WEIGHT_VIEW_DTYPE)
+        w2_data = layer.w2_weight_packed.data.view(_FP4_WEIGHT_VIEW_DTYPE)
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
         delattr(layer, "w13_weight_packed")
