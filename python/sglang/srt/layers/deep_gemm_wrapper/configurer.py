@@ -39,7 +39,12 @@ DEEPGEMM_SM90_SCALE_B_UE8M0 = (
     ENABLE_JIT_DEEPGEMM
     and _is_cuda
     and get_device_sm() == 90
-    and os.getenv("DEEPGEMM_SM90_SCALE_B_UE8M0", "0") != "0"
+    and (
+        os.getenv("DEEPGEMM_SM90_SCALE_B_UE8M0", "0") != "0"
+        # DSV4 FP4 (MXFP4 group128) experts always need UE8M0 scale-B on SM90;
+        # the compressed-tensors W4A8Fp8 MoE scheme depends on this being True.
+        or os.getenv("SGLANG_DSV4_FP4_EXPERTS", "0") != "0"
+    )
 )
 DEEPGEMM_BLACKWELL = ENABLE_JIT_DEEPGEMM and is_sm100_supported()
 DEEPGEMM_SCALE_UE8M0 = DEEPGEMM_BLACKWELL
