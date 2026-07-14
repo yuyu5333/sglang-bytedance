@@ -44,6 +44,18 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 logger = logging.getLogger(__name__)
 
 
+def _is_compressed_tensors_w4a8_fp8_moe_scheme(scheme) -> bool:
+    if scheme is None:
+        return False
+    try:
+        from sglang.srt.layers.quantization.compressed_tensors.schemes import (
+            CompressedTensorsW4A8Fp8MoE,
+        )
+    except Exception:
+        return False
+    return isinstance(scheme, CompressedTensorsW4A8Fp8MoE)
+
+
 class DeepEPMoE(FusedMoE):
     """
     MoE Expert Parallel Impl based on DeepEP (https://github.com/deepseek-ai/DeepEP/tree/main)
@@ -87,6 +99,10 @@ class DeepEPMoE(FusedMoE):
             self.deprecate_flag = True
         elif deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and isinstance(
             quant_config, Fp8Config
+        ):
+            self.deprecate_flag = True
+        elif deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and _is_compressed_tensors_w4a8_fp8_moe_scheme(
+            getattr(self, "scheme", None)
         ):
             self.deprecate_flag = True
         elif (
