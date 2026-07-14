@@ -759,6 +759,136 @@ def triton_fused_refresh_shadow_scatter(
     )
 
 
+# ---------------------------------------------------------------------------
+# T_store_fused (bu4): single-kernel packed store for the uniform 4-bit path.
+#
+# Replaces the ~14 eager op tail of ``rotated_store_to_packed`` (reshape →
+# amin → amax → range → step → round → clamp → cast → triton_bitpack →
+# header fp16 stack → cat → index_select → where → index_copy_) with ONE
+# Triton launch. Only the ``nope @ R`` matmul stays outside (a single
+# efficient cublas gemm).
+#
+# Per-token program (grid = (N,)):
+#   1. sentinel gate: loc = indices[t]; if loc < 0 → return (capture-safe,
+#      no read / no write — same pattern proven correct by
+#      _scatter_tokens_to_shadow_kernel).
+#   2. for each of 7 groups of 64 dims:
+#        - min/max over the 64 lanes → per-token×group affine
+#        - codes = clamp(round((x - min)/step), 0, 15)   (step = range/15)
+#        - nibble-pack 2 codes/byte → 32 bytes → cache[loc*bpt + g*32 + ..]
+#        - fp16(min), fp16(range) → 4 header bytes at cache[loc*bpt+224+g*4]
+#   3. copy 128 raw rope bytes → cache[loc*bpt + 252 + ..]
+#
+# Byte layout (bu4): [224 nope codes][28 fp16 header][128 rope] = 380 bpt,
+# bit-identical to the legacy cat() path (LSB-first nibble pack, header =
+# stack(fp16 min, fp16 range) per group).
+# ---------------------------------------------------------------------------
+@triton.jit
+def _fused_store_bu4_kernel(
+    k_rot_ptr,      # [N, 448] fp32 (already nope @ R)
+    rope_u8_ptr,    # [N, 128] uint8 (raw bf16 rope bytes)
+    cache_ptr,      # [num_pages * bpt] uint8 (flat)
+    indices_ptr,    # [N] integer (int32/int64), -1 sentinel for invalid
+    N,
+    BPT,            # bytes per token (constexpr-like runtime int)
+    NOPE_CODE_BYTES: tl.constexpr,   # 224
+    HEADER_OFF: tl.constexpr,        # 224
+    ROPE_OFF: tl.constexpr,          # 252
+    GROUPS: tl.constexpr,            # 7
+    GROUP_DIM: tl.constexpr,         # 64
+    GROUP_BYTES: tl.constexpr,       # 32 (64 dims * 4 bit / 8)
+    ROPE_BYTES: tl.constexpr,        # 128
+):
+    t = tl.program_id(0)
+    if t >= N:
+        return
+    loc = tl.load(indices_ptr + t).to(tl.int64)
+    if loc < 0:
+        return  # capture-safe: invalid token does nothing
+
+    row_base = loc * BPT
+    L_f = 15.0
+
+    for g in range(GROUPS):
+        lane = tl.arange(0, GROUP_DIM)
+        in_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + lane
+        x = tl.load(k_rot_ptr + in_off)  # [64] fp32
+        mn = tl.min(x, axis=0)
+        mx = tl.max(x, axis=0)
+        rng = tl.maximum(mx - mn, 1e-8)
+        step = rng / L_f
+
+        # even/odd nibble halves (stride-2 gather via masked reload)
+        blane = tl.arange(0, GROUP_BYTES)  # [32]
+        lo_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + 2 * blane
+        hi_off = lo_off + 1
+        xlo = tl.load(k_rot_ptr + lo_off)
+        xhi = tl.load(k_rot_ptr + hi_off)
+        clo = tl.floor((xlo - mn) / step + 0.5)
+        chi = tl.floor((xhi - mn) / step + 0.5)
+        clo = tl.minimum(tl.maximum(clo, 0.0), L_f).to(tl.int32)
+        chi = tl.minimum(tl.maximum(chi, 0.0), L_f).to(tl.int32)
+        byte_val = (clo | (chi << 4)).to(tl.uint8)
+        tl.store(cache_ptr + row_base + g * GROUP_BYTES + blane, byte_val)
+
+        # fp16 header: min then range, 2 bytes each (LSB-first)
+        mn_h = mn.to(tl.float16).to(tl.uint16, bitcast=True)
+        rng_h = rng.to(tl.float16).to(tl.uint16, bitcast=True)
+        hb = row_base + HEADER_OFF + g * 4
+        tl.store(cache_ptr + hb + 0, (mn_h & 0xFF).to(tl.uint8))
+        tl.store(cache_ptr + hb + 1, ((mn_h >> 8) & 0xFF).to(tl.uint8))
+        tl.store(cache_ptr + hb + 2, (rng_h & 0xFF).to(tl.uint8))
+        tl.store(cache_ptr + hb + 3, ((rng_h >> 8) & 0xFF).to(tl.uint8))
+
+    # rope: raw byte copy
+    rlane = tl.arange(0, ROPE_BYTES)
+    rv = tl.load(rope_u8_ptr + t * ROPE_BYTES + rlane)
+    tl.store(cache_ptr + row_base + ROPE_OFF + rlane, rv)
+
+
+def triton_fused_store_bu4(
+    k_rot: torch.Tensor,     # [N, 448] fp32 (nope @ R)
+    rope_u8: torch.Tensor,   # [N, 128] uint8
+    cache: torch.Tensor,     # [num_pages, bpt] uint8
+    indices: torch.Tensor,   # [N] int32/int64 (-1 sentinel)
+    *,
+    bpt: int,
+) -> None:
+    """Fused bu4 packed store: one Triton launch for the whole store tail.
+
+    ``cache`` is written in place at ``cache.view(-1)[loc*bpt : loc*bpt+bpt]``
+    for each valid ``loc``; ``loc < 0`` tokens are skipped (capture-safe).
+    """
+    assert k_rot.is_cuda and rope_u8.is_cuda and cache.is_cuda and indices.is_cuda
+    assert k_rot.dtype == torch.float32, f"k_rot must be fp32, got {k_rot.dtype}"
+    assert rope_u8.dtype == torch.uint8 and cache.dtype == torch.uint8
+    assert indices.dtype in (torch.int32, torch.int64)
+    N = int(k_rot.shape[0])
+    if N == 0:
+        return
+    assert k_rot.shape[1] == _MLA_NOPE_DIM, f"k_rot dim {k_rot.shape[1]} != 448"
+    assert rope_u8.shape == (N, 128), f"rope_u8 {tuple(rope_u8.shape)} != ({N},128)"
+    if not k_rot.is_contiguous():
+        k_rot = k_rot.contiguous()
+    if not rope_u8.is_contiguous():
+        rope_u8 = rope_u8.contiguous()
+    if not indices.is_contiguous():
+        indices = indices.contiguous()
+    cache_flat = cache.view(-1)
+    _fused_store_bu4_kernel[(N,)](
+        k_rot, rope_u8, cache_flat, indices,
+        N, int(bpt),
+        NOPE_CODE_BYTES=224,
+        HEADER_OFF=224,
+        ROPE_OFF=252,
+        GROUPS=7,
+        GROUP_DIM=64,
+        GROUP_BYTES=32,
+        ROPE_BYTES=128,
+        num_warps=4,
+    )
+
+
 __all__ = [
     "rotated_dequant_to_fp8_layout",
     "triton_bitpack_rowwise",
@@ -766,6 +896,7 @@ __all__ = [
     "triton_scatter_tokens_to_shadow",
     "triton_fused_norm_rope",
     "triton_fused_refresh_shadow_scatter",
+    "triton_fused_store_bu4",
     "_MLA_NOPE_DIM",
     "_MLA_HEAD_DIM",
     "_MLA_TILE_SIZE",

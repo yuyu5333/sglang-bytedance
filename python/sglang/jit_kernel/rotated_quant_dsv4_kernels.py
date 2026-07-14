@@ -281,6 +281,29 @@ def rotated_store_to_packed(
 
     K_rot = nope.to(torch.float32) @ R  # [N, 448]
 
+    # [T_store_fused] bu4 single-kernel store fast path.
+    #   When SGLANG_RQ_FUSED_STORE=1 AND the layout is the uniform 4-bit
+    #   packed row (bit_uniform==4, bpt==380), fuse the entire store tail
+    #   (per-group affine min/max/round/clamp + nibble pack + fp16 header +
+    #   rope byte copy + sentinel-safe scatter) into ONE Triton launch,
+    #   replacing the ~14 eager ops below. The nope@R matmul above is the
+    #   only op left outside. Byte layout is bit-identical to the legacy
+    #   cat() path (verified by the shared 224/28/128 offsets).
+    if (
+        _os.environ.get("SGLANG_RQ_FUSED_STORE", "0") == "1"
+        and int(cfg.bit_uniform) == 4
+        and bpt == 380
+        and row_bytes_nope == 224
+    ):
+        from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
+            triton_fused_store_bu4,
+        )
+        rope_u8 = rope.contiguous().view(torch.uint8).reshape(N, _ROPE_BYTES)
+        triton_fused_store_bu4(
+            K_rot, rope_u8, cache, indices, bpt=bpt,
+        )
+        return
+
     # Route G uniform path: per-token × per-group(64) dynamic affine.
     # The per-dim calib (scale,zero,levels) is bypassed in favor of a
     # per-token header (fp16 min + fp16 range, 7 groups × 4 B = 28 B)
