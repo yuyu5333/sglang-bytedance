@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -48,6 +49,30 @@ logger = logging.getLogger(__name__)
 COMPRESS_RATIO_NEXTN_LAYER = 0
 
 
+def _nextn_projection_quant_config(quant_config):
+    """Checkpoints for DeepSeek-V4-Flash MXFP4 mark the MTP/NextN projection
+    layers (`e_proj`, `h_proj`) as ignored via `re:^mtp\..*` in the
+    compressed-tensors config. The corresponding modules in sglang live under
+    `model.e_proj` / `model.h_proj`, so `should_ignore_layer` does not detect
+    them and falls back to the linear quant scheme, which does not support the
+    `fp4g128-pack-quantized` linear case. If the config explicitly ignores the
+    `mtp.` namespace, honor that intent by loading these projections as
+    unquantized modules."""
+    if quant_config is None:
+        return quant_config
+    ignore = getattr(quant_config, "ignore", None)
+    if not ignore:
+        return quant_config
+    for target in ignore:
+        if target.startswith("re:"):
+            pattern = target[3:]
+            if re.match(pattern, "mtp.placeholder"):
+                return None
+        elif target.startswith("mtp."):
+            return None
+    return quant_config
+
+
 class DeepseekV4ModelNextN(nn.Module):
     def __init__(
         self,
@@ -79,18 +104,20 @@ class DeepseekV4ModelNextN(nn.Module):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
+        proj_quant_config = _nextn_projection_quant_config(quant_config)
+
         self.e_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=proj_quant_config,
             prefix=add_prefix("e_proj", prefix),
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=proj_quant_config,
             prefix=add_prefix("h_proj", prefix),
         )
 
