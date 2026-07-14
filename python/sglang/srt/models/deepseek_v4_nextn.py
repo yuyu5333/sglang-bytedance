@@ -123,10 +123,17 @@ class DeepseekV4ModelNextN(nn.Module):
 
         layer_name = "decoder"
 
+        # When the checkpoint ignores the `mtp.` namespace, the MTP decoder's
+        # experts/linears are stored as unquantized BF16 tensors. Building the
+        # decoder with the main model's quant_config would create packed FP4
+        # parameter names (e.g. `w13_weight_packed`), causing the BF16 weight
+        # loader to fail with "w13_weight not found in params_dict.".
+        decoder_quant_config = _nextn_projection_quant_config(quant_config)
+
         self.decoder = DeepseekV4DecoderLayer(
             config,
             layer_id=0,
-            quant_config=quant_config,
+            quant_config=decoder_quant_config,
             is_nextn=True,
             prefix=add_prefix(layer_name, prefix),
             alt_streams=None,
