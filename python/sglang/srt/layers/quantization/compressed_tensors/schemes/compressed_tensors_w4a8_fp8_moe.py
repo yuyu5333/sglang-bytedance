@@ -284,6 +284,15 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         # DeepGEMM fp8xfp4 kernels use recipe_a=(1,128)/recipe_b=(1,32) for
         # contiguous, and gran_k_a=128/gran_k_b=32 for masked. The runner
         # picks the recipe from is_fp4_experts=True.
+        #
+        # NOTE: We intentionally *do not* pass w*_scale_e8m0 here. The SM90
+        # fp8xfp4 kernel only accepts uint8 UE8M0 sfb when its
+        # scale_b_direct_load gate is on (expected_m <= 16 OR
+        # bm32_skew_fast_path). Under CUDA-graph capture with cuda_graph_max_bs
+        # up to 64, the gate is not universally satisfied and the kernel
+        # then requires float sfb. Passing float scale keeps the path stable
+        # across all captured batch sizes; the uint8 view is kept only as an
+        # attribute for future opt-in use.
         block_shape: List[int] = [self.group_size, self.group_size]
         quant_info = DeepGemmMoeQuantInfo(
             w13_weight=layer.w13_weight,
@@ -291,8 +300,8 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
             use_fp8=True,
             w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w13_scale_e8m0=getattr(layer.w13_weight_scale, "scale_e8m0_data", None),
-            w2_scale_e8m0=getattr(layer.w2_weight_scale, "scale_e8m0_data", None),
+            w13_scale_e8m0=None,
+            w2_scale_e8m0=None,
             block_shape=block_shape,
             is_fp4_experts=True,
         )
