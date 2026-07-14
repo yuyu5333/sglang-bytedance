@@ -602,15 +602,16 @@ class DeepGemmRunnerCore(MoeRunnerCore):
                 gran_k_b=32,
             )
 
-            # print(
-            #     "[g128-debug] gemm1-input",
-            #     "lhs_act=", tuple(down_input.shape),
-            #     "lhs_scale=", tuple(down_input_scale.shape) if down_input_scale is not None else None,
-            #     "rhs_weight=", tuple(w2_weight.shape),
-            #     "rhs_scale=", tuple(w2_scale_for_gemm.shape),
-            #     "expected_rhs_scale_kgroups=", (down_k + 32 - 1) // 32,
-            #     flush=True,
-            # )
+            print(
+                "[g128-debug] gemm1-input",
+                "rhs_weight_dtype=", w2_weight.dtype,
+                "rhs_weight_shape=", tuple(w2_weight.shape),
+                "rhs_scale_dtype=", w2_scale_for_gemm.dtype,
+                "rhs_scale_shape=", tuple(w2_scale_for_gemm.shape),
+                "rhs_scale_stride=", w2_scale_for_gemm.stride(),
+                "e8m0_is_none=", quant_info.w2_scale_e8m0 is None,
+                flush=True,
+            )
             
             deep_gemm_return_value = deep_gemm_wrapper.grouped_gemm_nt_f8fp4bf16_masked(
                 (down_input, down_input_scale),
