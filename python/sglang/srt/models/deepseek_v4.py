@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import time
 from contextlib import nullcontext
 from typing import (
@@ -1823,6 +1824,7 @@ class DeepseekV4ForCausalLM(nn.Module):
     def remap_weight_name_to_dpsk_hf_format(
         name: str, is_nextn: bool = False, num_hidden_layers: Optional[int] = None
     ) -> str:
+        original_name = name
         if name == "embed.weight":
             return "model.embed_tokens.weight"
         if name == "head.weight":
@@ -1877,6 +1879,18 @@ class DeepseekV4ForCausalLM(nn.Module):
         name = name.replace(".w3.", ".up_proj.")
         if "mlp" in name:
             name = name.replace(".scale", ".weight_scale_inv")
+
+        if os.environ.get("SGLANG_DSV4_REMAP_DEBUG") == "1" and (
+            "experts" in original_name
+            or "weight_packed" in original_name
+            or "weight_scale" in original_name
+        ):
+            logger.warning(
+                "[DSv4-remap][debug] %r -> %r (is_nextn=%s)",
+                original_name,
+                name,
+                is_nextn,
+            )
 
         return name
 
@@ -2041,6 +2055,16 @@ class DeepseekV4ForCausalLM(nn.Module):
                         loaded_params.add(name)
                         break
                     else:
+                        _dbg_expert = (
+                            os.environ.get("SGLANG_DSV4_REMAP_DEBUG") == "1"
+                            and (
+                                "experts" in name
+                                or "weight_packed" in name
+                                or "weight_scale" in name
+                            )
+                        )
+                        _dbg_pre = name
+                        matched_expert = False
                         for mapping in expert_params_mapping:
                             param_name, weight_name, expert_id, shard_id = mapping
                             if weight_name not in name:
@@ -2068,8 +2092,24 @@ class DeepseekV4ForCausalLM(nn.Module):
                                 },
                             )
                             loaded_params.add(name)
+                            matched_expert = True
+                            if _dbg_expert:
+                                logger.warning(
+                                    "[DSv4-load][debug] EXPERT-MATCH %r via wn=%r pn=%r shard=%s expert_id=%s -> params_dict[%r]",
+                                    _dbg_pre,
+                                    weight_name,
+                                    param_name,
+                                    shard_id,
+                                    expert_id,
+                                    name,
+                                )
                             break
                         else:
+                            if _dbg_expert:
+                                logger.warning(
+                                    "[DSv4-load][debug] EXPERT-NOMATCH %r (fell through mapping)",
+                                    _dbg_pre,
+                                )
                             if name.endswith(".bias") and name not in params_dict:
                                 continue
                             if (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -31,6 +32,55 @@ _DEEPGEMM_GRAN_K = 32
 # DeepGEMM's kPackedFP4 corresponds to a signed int8 view of the packed
 # 2-fp4-per-byte buffer on CUDA. Matches the non-AIter path in fp8.py.
 _FP4_WEIGHT_VIEW_DTYPE = torch.int8
+
+# --- debug knobs (kept tight so they never impact perf when disabled) ---
+_DEBUG_ENABLED = os.environ.get("SGLANG_W4A8FP8_MOE_DEBUG", "0") == "1"
+_DEBUG_CREATE_LOG_LIMIT = 4
+_DEBUG_POST_LOAD_LOG_LIMIT = 4
+_DEBUG_PREP_SCALE_LOG_LIMIT = 8
+_DEBUG_APPLY_LOG_LIMIT = 4
+_debug_create_count = 0
+_debug_post_load_count = 0
+_debug_prep_scale_count = 0
+_debug_apply_count = 0
+
+
+def _debug(fmt, *args):
+    if _DEBUG_ENABLED:
+        logger.warning("[W4A8Fp8MoE][debug] " + fmt, *args)
+
+
+def _tensor_stats(name: str, t: torch.Tensor, sample: int = 8) -> str:
+    if t is None:
+        return f"{name}=None"
+    try:
+        flat = t.reshape(-1)
+        if flat.numel() == 0:
+            return f"{name}=empty"
+        if t.dtype in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+            as_i64 = flat.to(torch.int64)
+            mn = int(as_i64.min())
+            mx = int(as_i64.max())
+            mean = float(as_i64.float().mean())
+            first = flat[:sample].detach().cpu().tolist()
+            return (
+                f"{name} shape={tuple(t.shape)} dtype={t.dtype} "
+                f"min={mn} max={mx} mean={mean:.3f} first{sample}={first}"
+            )
+        as_f = flat.detach().float()
+        nan_ct = int(torch.isnan(as_f).sum())
+        inf_ct = int(torch.isinf(as_f).sum())
+        mn = float(as_f.min())
+        mx = float(as_f.max())
+        mean = float(as_f.mean())
+        first = flat[:sample].detach().cpu().tolist()
+        return (
+            f"{name} shape={tuple(t.shape)} dtype={t.dtype} "
+            f"min={mn:.4g} max={mx:.4g} mean={mean:.4g} nan={nan_ct} inf={inf_ct} "
+            f"first{sample}={first}"
+        )
+    except Exception as e:
+        return f"{name} <stats-failed: {e!r}>"
 
 
 class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
@@ -64,6 +114,16 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         scale_dtype_str = str(getattr(weight_quant, "scale_dtype", "") or "").lower()
         # On-disk scale is UE8M0 packed into uint8 for this checkpoint family.
         self._scale_is_ue8m0_uint8 = "uint8" in scale_dtype_str
+        _debug(
+            "__init__ group_size=%d expand_ratio=%d scale_dtype_str=%r "
+            "ue8m0_uint8=%s weight_quant=%r input_quant=%r",
+            self.group_size,
+            self.expand_ratio,
+            scale_dtype_str,
+            self._scale_is_ue8m0_uint8,
+            getattr(weight_quant, "__dict__", weight_quant),
+            getattr(input_quant, "__dict__", input_quant),
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -152,6 +212,23 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
+        global _debug_create_count
+        if _debug_create_count < _DEBUG_CREATE_LOG_LIMIT:
+            _debug_create_count += 1
+            _debug(
+                "create_weights layer=%s num_experts=%d hidden=%d N=%d "
+                "params_dtype=%s w13_packed=%s w2_packed=%s w13_scale=%s w2_scale=%s",
+                getattr(layer, "layer_id", "?"),
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                params_dtype,
+                tuple(layer.w13_weight_packed.shape),
+                tuple(layer.w2_weight_packed.shape),
+                tuple(layer.w13_weight_scale.shape),
+                tuple(layer.w2_weight_scale.shape),
+            )
+
     def _prepare_scale_for_deepgemm(
         self,
         scale: torch.Tensor,
@@ -175,6 +252,16 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
 
         from deep_gemm import transform_sf_into_required_layout
 
+        global _debug_prep_scale_count
+        do_log = _debug_prep_scale_count < _DEBUG_PREP_SCALE_LOG_LIMIT
+        if do_log:
+            _debug_prep_scale_count += 1
+            _debug(
+                "_prepare_scale INPUT %s | %s",
+                _tensor_stats("scale_in", scale),
+                _tensor_stats("weight_packed", weight_packed),
+            )
+
         num_experts, n, k_groups_loaded = scale.shape
         k = weight_packed.shape[2] * 2  # 2 fp4 items per packed byte
         expected_loaded_k_groups = k // self.group_size
@@ -190,6 +277,11 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
             torch.tensor(2.0, device=scale.device, dtype=torch.float32),
             scale.to(torch.float32) - 127.0,
         )
+        if do_log:
+            _debug(
+                "_prepare_scale DECODED %s",
+                _tensor_stats("scale_float(2^(u8-127))", scale_float),
+            )
 
         runtime_scale = scale_float.repeat_interleave(
             self.expand_ratio, dim=2
@@ -225,11 +317,32 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
         e8m0_scale_data.copy_(
             (torch.floor(torch.log2(scale_data.float())) + 127).to(torch.uint8)
         )
+        if do_log:
+            _debug(
+                "_prepare_scale OUT %s | %s | n=%d k=%d tma_aligned_n=%d",
+                _tensor_stats("scale_data", scale_data),
+                _tensor_stats("e8m0_scale", e8m0_scale_data),
+                n,
+                k,
+                tma_aligned_n_e8m0,
+            )
         return scale_data, e8m0_scale_data
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Re-view packed uint8 weights as int8 to satisfy DeepGEMM's kPackedFP4
         # scalar_type check on the SM90 fp8xfp4 kernel.
+        global _debug_post_load_count
+        do_log = _debug_post_load_count < _DEBUG_POST_LOAD_LOG_LIMIT
+        if do_log:
+            _debug_post_load_count += 1
+            _debug(
+                "post_load ENTER layer=%s | %s | %s | %s | %s",
+                getattr(layer, "layer_id", "?"),
+                _tensor_stats("w13_packed_raw", layer.w13_weight_packed.data),
+                _tensor_stats("w2_packed_raw", layer.w2_weight_packed.data),
+                _tensor_stats("w13_scale_raw", layer.w13_weight_scale.data),
+                _tensor_stats("w2_scale_raw", layer.w2_weight_scale.data),
+            )
         w13_data = layer.w13_weight_packed.data.view(_FP4_WEIGHT_VIEW_DTYPE)
         w2_data = layer.w2_weight_packed.data.view(_FP4_WEIGHT_VIEW_DTYPE)
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
@@ -266,6 +379,14 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
             layer.w2_weight_scale.scale_e8m0_data = None
             layer.w13_weight_scale.format_ue8m0 = False
             layer.w2_weight_scale.format_ue8m0 = False
+        if do_log:
+            _debug(
+                "post_load EXIT layer=%s DEEPGEMM_FP4_SCALE_B_UE8M0=%s | %s | %s",
+                getattr(layer, "layer_id", "?"),
+                deep_gemm_wrapper.DEEPGEMM_FP4_SCALE_B_UE8M0,
+                _tensor_stats("w13_weight_int8", layer.w13_weight.data),
+                _tensor_stats("w2_weight_int8", layer.w2_weight.data),
+            )
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
@@ -308,4 +429,23 @@ class CompressedTensorsW4A8Fp8MoE(CompressedTensorsMoEScheme):
             block_shape=block_shape,
             is_fp4_experts=True,
         )
+        global _debug_apply_count
+        if _debug_apply_count < _DEBUG_APPLY_LOG_LIMIT:
+            _debug_apply_count += 1
+            hs_in = getattr(dispatch_output, "hidden_states", None)
+            topk_ids = getattr(dispatch_output, "topk_ids", None)
+            _debug(
+                "apply_weights[%d] layer=%s DEEPGEMM_FP4_SCALE_B_UE8M0=%s "
+                "block_shape=%s | %s | %s | %s | %s | %s | %s",
+                _debug_apply_count,
+                getattr(layer, "layer_id", "?"),
+                deep_gemm_wrapper.DEEPGEMM_FP4_SCALE_B_UE8M0,
+                block_shape,
+                _tensor_stats("hs_in", hs_in) if isinstance(hs_in, torch.Tensor) else f"hs_in_type={type(hs_in).__name__}",
+                _tensor_stats("topk_ids", topk_ids) if isinstance(topk_ids, torch.Tensor) else f"topk_ids_type={type(topk_ids).__name__}",
+                _tensor_stats("w13_weight", layer.w13_weight.data),
+                _tensor_stats("w2_weight", layer.w2_weight.data),
+                _tensor_stats("w13_scale", layer.w13_weight_scale.data),
+                _tensor_stats("w2_scale", layer.w2_weight_scale.data),
+            )
         return self.runner.run(dispatch_output, quant_info)
