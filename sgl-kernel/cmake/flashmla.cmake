@@ -116,16 +116,16 @@ include(FetchContent)
 #   NOTE: 2fe729c also carries the d557790 dense-salad revert (ccbfc65,
 #   WG0-does-PV consumer) that the previous dfe5666 build was MISSING —
 #   so this bump additionally fixes dense token salad on the cgon path.
-# f49cd1a = b4ff128 + Route H step4c: FMLA_FOLD_ROT_PROBE2 fold-rotation
-#   ceiling probe ENABLED. Producer writes raw unpacked x straight to sK,
-#   skipping fill_sR + R@X wgmma + scatter (producer 47%). Output is salad
-#   (Q not folded) -- decode-tps CEILING measurement only. If tps jumps vs
-#   the b4ff128 step4b baseline, implement the full Q@R fold; if flat, the
-#   R@X removal buys nothing and the fold surgery is skipped.
+# 809f259 = b4ff128 + Route H step4d production path: disable the
+#   FMLA_FOLD_ROT_PROBE2 salad probe and pair adjacent bu4 nibble lanes
+#   with xor-1 shuffle so d=(2m,2m+1) share one packed byte before low/high
+#   nibble select. This targets the measured FlashMLA packed consumer
+#   bit-unpack/read path bottleneck; performance must be validated by
+#   remote build + smoke/gsm8k/decode bench before being treated as KEEP.
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG f49cd1a
+    GIT_TAG 809f259
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)
