@@ -8,10 +8,11 @@ import torch
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.moe.moe_runner.deep_gemm import DeepGemmMoeQuantInfo
+from sglang.srt.layers.moe.utils import get_deepep_mode, get_moe_a2a_backend
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsMoEScheme,
 )
-from sglang.srt.utils import set_weight_attrs
+from sglang.srt.utils import is_sm100_supported, set_weight_attrs
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -31,6 +32,64 @@ _DEEPGEMM_GRAN_K = 32
 # DeepGEMM's kPackedFP4 corresponds to a signed int8 view of the packed
 # 2-fp4-per-byte buffer on CUDA. Matches the non-AIter path in fp8.py.
 _FP4_WEIGHT_VIEW_DTYPE = torch.int8
+
+
+def _need_bf16_dequant_fallback() -> bool:
+    """SM90 contiguous-path FP4 fallback.
+
+    DeepGEMM's contiguous fp8xfp4 kernel is Blackwell-only
+    (`ab.scalar_type()==kPackedFP4 and arch_major==10`). On Hopper the
+    contiguous path is only reachable via DeepEP normal dispatch (prefill).
+    In that combination we materialize bf16 dense weights so the runner
+    dispatches to `_run_bf16_contiguous_gemm`. Masked path on SM90 keeps
+    the fused FP4 kernel.
+    """
+    if is_sm100_supported():
+        return False
+    if not get_moe_a2a_backend().is_deepep():
+        return False
+    return get_deepep_mode().enable_normal()
+
+
+def _dequantize_mxfp4_packed_to_bf16(
+    packed_weight: torch.Tensor,
+    scale_ue8m0: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    """MXFP4 packed weight + UE8M0 uint8 scale -> bf16 dense weight.
+
+    packed_weight: [E, N, K/2] uint8/int8, two fp4 codes per byte along K.
+    scale_ue8m0  : [E, N, K/group_size] uint8, UE8M0 exponent.
+    Returns      : [E, N, K] bf16.
+
+    Dequant is done expert-by-expert to bound the fp32 intermediate peak.
+    """
+    from sglang.srt.layers.quantization.mxfp4_tensor import MXFP4QuantizeUtil
+
+    packed_u8 = packed_weight.view(torch.uint8)
+    E, N, half_K = packed_u8.shape
+    K = half_K * 2
+
+    if scale_ue8m0.shape != (E, N, K // group_size):
+        raise ValueError(
+            f"Unexpected FP4 scale shape {tuple(scale_ue8m0.shape)}, "
+            f"expected ({E}, {N}, {K // group_size}) for group_size={group_size}."
+        )
+
+    out = torch.empty(
+        (E, N, K),
+        dtype=torch.bfloat16,
+        device=packed_u8.device,
+    )
+    for e in range(E):
+        deq = MXFP4QuantizeUtil.dequantize(
+            packed_u8[e],
+            torch.bfloat16,
+            scale_ue8m0[e],
+            block_sizes=[group_size],
+        )
+        out[e].copy_(deq.view(N, K))
+    return out
 
 
 class CompressedTensorsWMXFP4AFP8MoE(CompressedTensorsMoEScheme):
@@ -228,6 +287,42 @@ class CompressedTensorsWMXFP4AFP8MoE(CompressedTensorsMoEScheme):
         return scale_data, e8m0_scale_data
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._bf16_dequant_fallback = _need_bf16_dequant_fallback()
+
+        if self._bf16_dequant_fallback:
+            if not self._scale_is_ue8m0_uint8:
+                raise NotImplementedError(
+                    "CompressedTensorsWMXFP4AFP8MoE bf16 fallback requires "
+                    "UE8M0 (uint8) on-disk scales."
+                )
+            logger.info(
+                "CompressedTensorsWMXFP4AFP8MoE: dequantizing MXFP4 experts "
+                "to bf16 for SM90 DeepEP-normal contiguous path."
+            )
+            w13_bf16 = _dequantize_mxfp4_packed_to_bf16(
+                layer.w13_weight_packed.data,
+                layer.w13_weight_scale.data,
+                self.group_size,
+            )
+            w2_bf16 = _dequantize_mxfp4_packed_to_bf16(
+                layer.w2_weight_packed.data,
+                layer.w2_weight_scale.data,
+                self.group_size,
+            )
+            layer.w13_weight = torch.nn.Parameter(w13_bf16, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_bf16, requires_grad=False)
+            delattr(layer, "w13_weight_packed")
+            delattr(layer, "w2_weight_packed")
+            delattr(layer, "w13_weight_scale")
+            delattr(layer, "w2_weight_scale")
+            torch.cuda.empty_cache()
+
+            if hasattr(layer, "dispatcher"):
+                layer.dispatcher.set_quant_config(
+                    {"dispatcher_output_dtype": "bf16"}
+                )
+            return
+
         # Re-view packed uint8 weights as int8 to satisfy DeepGEMM's kPackedFP4
         # scalar_type check on the SM90 fp8xfp4 kernel.
         w13_data = layer.w13_weight_packed.data.view(_FP4_WEIGHT_VIEW_DTYPE)
@@ -283,6 +378,20 @@ class CompressedTensorsWMXFP4AFP8MoE(CompressedTensorsMoEScheme):
                 f"CompressedTensorsWMXFP4AFP8MoE only supports the DeepGEMM MoE "
                 f"runner backend, got {self.runner.runner_backend}."
             )
+
+        if getattr(self, "_bf16_dequant_fallback", False):
+            quant_info = DeepGemmMoeQuantInfo(
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                use_fp8=False,
+                w13_scale=None,
+                w2_scale=None,
+                w13_scale_e8m0=None,
+                w2_scale_e8m0=None,
+                block_shape=None,
+                is_fp4_experts=False,
+            )
+            return self.runner.run(dispatch_output, quant_info)
 
         # DeepGEMM fp8xfp4 kernels use recipe_a=(1,128)/recipe_b=(1,32) for
         # contiguous, and gran_k_a=128/gran_k_b=32 for masked. The runner
