@@ -1102,13 +1102,16 @@ class DeepseekV4AttnBackend(
             if _os.environ.get("SGLANG_RQ_FORCE_DENSE_PATH", "0") == "1":
                 packed_kwargs = {}
 
-            identity_tail_bypass = False
-            if (
-                packed_kwargs
+            # build_hadamard(448) has a 192-dim identity tail. The packed
+            # kernel can skip R@X for those tail blocks without changing math.
+            identity_tail_bypass = (
+                bool(packed_kwargs)
                 and int(packed_kwargs.get("bit_uniform", 0)) > 0
-                and _os.environ.get("SGLANG_RQ_IDENTITY_TAIL_BYPASS", "0") == "1"
-            ):
-                identity_tail_bypass = True
+                and _os.environ.get(
+                    "SGLANG_RQ_DISABLE_IDENTITY_TAIL_BYPASS", "0"
+                )
+                != "1"
+            )
 
             # [c4c128-packed] When SWA packed path is active and this layer
             # is a c4/c128 sink, also expose the extra pool's packed byte
