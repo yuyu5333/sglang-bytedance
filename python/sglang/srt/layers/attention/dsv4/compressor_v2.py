@@ -10,7 +10,7 @@ from sglang.jit_kernel.dsv4 import (
     compress_forward,
     compress_norm_rope_store,
 )
-from sglang.jit_kernel.deepseek_v4 import compress_fused_norm_rope_inplace
+from sglang.jit_kernel.deepseek_v4 import fused_norm_rope_inplace
 from sglang.srt.environ import envs
 
 if TYPE_CHECKING:
@@ -58,9 +58,25 @@ class CompressorBackendMixin:
             return out_loc[valid]
 
         plan_c = plan.plan_c.view(torch.int32).view(-1, 4)
-        ragged_id = plan_c[:, 0]
-        valid = ragged_id >= 0
+        seq_len = plan_c[:, 0]
+        ragged_and_buf = plan_c[:, 1]
+        ragged_id = ragged_and_buf & 0xFFFF
+        valid = seq_len >= 0
         return out_loc[ragged_id[valid].to(torch.int64)]
+
+    def _get_wall_compress_positions(
+        self, compress_ratio: int
+    ) -> torch.Tensor:
+        plan = self._get_paged_compress_metadata(compress_ratio)
+        if plan.is_decode:
+            seq_lens = self.forward_metadata.seq_lens.to(torch.int64)
+            valid = (seq_lens % compress_ratio) == 0
+            return seq_lens[valid] - compress_ratio
+
+        plan_c = plan.plan_c.view(torch.int32).view(-1, 4)
+        seq_len = plan_c[:, 0].to(torch.int64)
+        valid = seq_len >= 0
+        return seq_len[valid] - compress_ratio
 
     def _forward_compress_to_bf16(
         self,
@@ -94,12 +110,19 @@ class CompressorBackendMixin:
             head_dim=head_dim,
             is_online=is_online,
         )
-        compress_fused_norm_rope_inplace(
+        positions = self._get_wall_compress_positions(compress_ratio)
+        if positions.numel() != kv_compressed.shape[0]:
+            raise ValueError(
+                "wall packed extra position count mismatch: "
+                f"positions={positions.numel()} vs rows={kv_compressed.shape[0]} "
+                f"(compress_ratio={compress_ratio})"
+            )
+        fused_norm_rope_inplace(
             kv_compressed,
             norm.weight,
             norm.variance_epsilon,
             freqs_cis_cache,
-            plan,
+            positions,
         )
         if rotate:
             from sglang.srt.layers.attention.nsa.nsa_indexer import rotate_activation
