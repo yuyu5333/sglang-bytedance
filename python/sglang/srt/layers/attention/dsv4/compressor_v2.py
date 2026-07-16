@@ -80,6 +80,15 @@ class CompressorBackendMixin:
         valid = seq_len >= 0
         return seq_len[valid] - compress_ratio
 
+    def _get_wall_decode_valid_mask(
+        self, compress_ratio: int
+    ) -> Optional[torch.Tensor]:
+        plan = self._get_paged_compress_metadata(compress_ratio)
+        if not plan.is_decode:
+            return None
+        seq_lens = self.forward_metadata.core_metadata.seq_lens_casual
+        return (seq_lens % compress_ratio) == 0
+
     def _forward_compress_to_bf16(
         self,
         *,
@@ -112,6 +121,11 @@ class CompressorBackendMixin:
             head_dim=head_dim,
             is_online=is_online,
         )
+        valid_mask = self._get_wall_decode_valid_mask(compress_ratio)
+        if valid_mask is not None:
+            kv_compressed = kv_compressed[valid_mask]
+            if kv_compressed.numel() == 0:
+                return kv_compressed
         positions = self._get_wall_compress_positions(compress_ratio)
         if positions.numel() != kv_compressed.shape[0]:
             raise ValueError(
