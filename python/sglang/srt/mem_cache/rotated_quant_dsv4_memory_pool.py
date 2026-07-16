@@ -1686,11 +1686,18 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         cfg = self._nope_cfgs[layer_id]
 
         swa_pages = getattr(core_attn_metadata, "swa_page_indices", None)
-        _diag_first = not hasattr(self, "_diag_prologue_count")
-        if _diag_first:
-            self._diag_prologue_count = 0
-        self._diag_prologue_count += 1
-        if self._diag_prologue_count <= 6 and layer_id == 0:
+        if os.environ.get("SGLANG_RQ_PROLOGUE_DIAG", "0") == "1":
+            _diag_first = not hasattr(self, "_diag_prologue_count")
+            if _diag_first:
+                self._diag_prologue_count = 0
+            self._diag_prologue_count += 1
+        else:
+            self._diag_prologue_count = 999999
+        if (
+            self._diag_prologue_count <= 6
+            and layer_id == 0
+            and not torch.cuda.is_current_stream_capturing()
+        ):
             entry0 = self._wall_pools.get("swa")
             if entry0 is not None:
                 _sh = entry0.shadow_buffers[0]
