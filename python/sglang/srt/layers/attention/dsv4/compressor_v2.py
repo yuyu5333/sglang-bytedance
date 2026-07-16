@@ -53,7 +53,7 @@ class CompressorBackendMixin:
         plan = self._get_paged_compress_metadata(compress_ratio)
         out_loc = self._get_out_loc(compress_ratio)
         if plan.is_decode:
-            seq_lens = self.forward_metadata.seq_lens
+            seq_lens = self.forward_metadata.core_metadata.seq_lens_casual
             valid = (seq_lens % compress_ratio) == 0
             return out_loc[valid]
 
@@ -69,7 +69,9 @@ class CompressorBackendMixin:
     ) -> torch.Tensor:
         plan = self._get_paged_compress_metadata(compress_ratio)
         if plan.is_decode:
-            seq_lens = self.forward_metadata.seq_lens.to(torch.int64)
+            seq_lens = self.forward_metadata.core_metadata.seq_lens_casual.to(
+                torch.int64
+            )
             valid = (seq_lens % compress_ratio) == 0
             return seq_lens[valid] - compress_ratio
 
