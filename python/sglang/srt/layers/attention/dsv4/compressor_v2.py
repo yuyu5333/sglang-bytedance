@@ -10,6 +10,7 @@ from sglang.jit_kernel.dsv4 import (
     compress_forward,
     compress_norm_rope_store,
 )
+from sglang.jit_kernel.deepseek_v4 import compress_fused_norm_rope_inplace
 from sglang.srt.environ import envs
 
 if TYPE_CHECKING:
@@ -45,6 +46,51 @@ class CompressorBackendMixin:
     def _get_out_loc(self, compress_ratio: int) -> torch.Tensor:
         attr_name = f"c{compress_ratio}_out_loc"
         return getattr(self.forward_metadata.core_metadata, attr_name)
+
+    def _forward_compress_to_bf16(
+        self,
+        *,
+        kv_score_buffer: torch.Tensor,
+        kv_score_input: torch.Tensor,
+        ape: torch.Tensor,
+        head_dim: int,
+        norm: RMSNorm,
+        freqs_cis_cache: torch.Tensor,
+        rotate: bool,
+        compress_ratio: int,
+    ) -> torch.Tensor:
+        assert compress_ratio == 4 or compress_ratio == 128
+
+        plan = self._get_paged_compress_metadata(compress_ratio)
+        is_online = _use_online_compress(compress_ratio)
+        if is_online:
+            kv_score_buffer = kv_score_buffer.view(-1, 1, head_dim * 3)
+        else:
+            coff = 2 if is_overlap_compress(compress_ratio) else 1
+            last_dim = 2 * head_dim * coff
+            assert kv_score_buffer.shape[-1] == last_dim
+            kv_score_buffer = kv_score_buffer.view(-1, compress_ratio, last_dim)
+        kv_compressed = compress_forward(
+            kv_score_buffer=kv_score_buffer,
+            kv_score_input=kv_score_input,
+            ape=ape.view(-1, head_dim),
+            plan=plan,
+            compress_ratio=compress_ratio,
+            head_dim=head_dim,
+            is_online=is_online,
+        )
+        compress_fused_norm_rope_inplace(
+            kv_compressed,
+            norm.weight,
+            norm.variance_epsilon,
+            freqs_cis_cache,
+            plan,
+        )
+        if rotate:
+            from sglang.srt.layers.attention.nsa.nsa_indexer import rotate_activation
+
+            kv_compressed = rotate_activation(kv_compressed)
+        return kv_compressed
 
     def _forward_compress_all_in_one(
         self,
@@ -109,6 +155,33 @@ class CompressorBackendMixin:
         token_to_kv_pool = cast("DeepSeekV4TokenToKVPool", token_to_kv_pool)
         kv_score_input = compressor.compute_kv_score(x, forward_batch)
         state_pool = compressor.get_state_pool(forward_batch)
+
+        # Wall-mode extra pools need a REAL packed writer. compressor_v2's
+        # direct FP8 store writes into get_extra_key_buffer() (shadow/native
+        # layout), which leaves entry.packed_buffers unreadable for the
+        # FlashMLA extra_packed_kcache path. c4 accuracy drops much harder
+        # than c128 because c4 contributes many more extra blocks.
+        if not compressor.is_in_indexer and getattr(token_to_kv_pool, "mode", None) == "wall":
+            wall_pools = getattr(token_to_kv_pool, "_wall_pools", {})
+            wall_kind = "c4" if compressor.ratio == 4 else "c128"
+            if wall_kind in wall_pools:
+                kv_compressed = self._forward_compress_to_bf16(
+                    kv_score_buffer=state_pool.kv_score_buffer.kv_score,
+                    kv_score_input=kv_score_input,
+                    ape=compressor.ape,
+                    head_dim=compressor.head_dim,
+                    norm=compressor.norm,
+                    freqs_cis_cache=compressor.freqs_cis,
+                    rotate=compressor.rotate,
+                    compress_ratio=compressor.ratio,
+                )
+                token_to_kv_pool.set_extra_key_buffer_fused(
+                    layer_id=layer_id,
+                    loc=self._get_out_loc(compressor.ratio),
+                    cache_k=kv_compressed,
+                )
+                return
+
         if compressor.is_in_indexer:
             kv_cache = token_to_kv_pool.get_index_k_with_scale_buffer(layer_id)
             page_size = token_to_kv_pool.get_index_k_page_size()
