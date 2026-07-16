@@ -508,7 +508,7 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
   - quantize-dequantize roundtrip 在 b̄∈{2,3,4} 上的相对 L2 误差曲线
 
 
-## 当前状态总览（截至 M3.c.4 sparse packed 性能优化，2026-07-10）
+## 当前状态总览（截至 M3.c.4 三池 bu4 去 shadow 显存闭环，2026-07-16）
 
 ### 里程碑进度
 
@@ -522,11 +522,11 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
 | M3.c.1 — DSv4 wall-storage swa 池真替换 + canary | ✅ 完成 | swa_kv_pool packed buffer + `dequant_swa_to_fp8_layout` shim | 5/5 canary，wall ratio 2.18× (swa 池) |
 | M3.c.2 — attention prologue 接入 + c4/c128 同步替换 | ✅ 完成 | 三池同步 wall + `_rotated_quant_attention_prologue` hook | 7/7 canary、12/12 regression（**单层 cosine ≥ 0.95；token-level 解码端到端在 c.3 才暴露 SNR 不足**） |
 | M3.c.3 — bit-pack/unpack Triton 化（性能化） | ⚠️ **partial pass / R+affine 框架终判证伪** | T3/T5/T6 Triton kernel 全部 capture-safe；perf 侧 85× decode 提速；但 R+affine 数学链 b̄=8u 上限仍 token salad → 必须切换技术路线 | 性能侧 PASS（drop_packed=1 等价 baseline 配置）；精度侧在 R+affine 框架内 **不可达** |
-| **M3.c.4 — FlashMLA fork + packed sparse-path 接入** | 🔥 **in_progress（性能优化阶段）** | DSv4 sparse `flash_mla_with_kvcache` 已接入 packed wall buffer，`drop_packed=0` 真 forward；当前最新 pass 为 `IDENTITY_TAIL_BYPASS`（sglang `3355a4851` / FlashMLA `405aa29`） | curl 无 salad；gsm8k 200ex **0.955**；ncu packed sparse kernel Duration **1.49ms→956.58us** |
+| **M3.c.4 — FlashMLA fork + packed sparse-path 接入** | ✅ **三池 bu4 显存收益闭环；性能优化继续** | DSv4 sparse `flash_mla_with_kvcache` 已接入 `swa/c4/c128` packed wall buffer；`f16e099c7` 去掉 c4/c128 full FP8 shadow，改为 tiny `extra_kv` shape dummy + `extra_packed_kcache` 真读 | all-pools bu4 smoke 正常；gsm8k 50ex **0.980**；`Memory pool end avail≈22.35GB` / `nvidia-smi used≈75.2-75.7GB`，优于 native FP8 `avail≈18.45GB / used≈79.6GB`；bench `in2048/out512 rate32 conc32 np64` Output **136.06 tok/s** / Median TPOT **165.68ms** |
 
 ### M3.c.4 一句话总结
 
-M3.c.4 已从“无 sparse forward 出口”推进到 `drop_packed=0` 真 forward + 性能优化阶段。当前最新可保留优化是 `IDENTITY_TAIL_BYPASS`：利用 `build_hadamard(448)` 的 256-dim Hadamard prefix + 192-dim identity tail 结构，只对 tail dim blocks 跳过 K-side `fill_sR + R@X + scatter`，前 256 维保持原 BF16 舍入路径。probe 逐位等价（`max_abs=0, cos=1.0`），ncu `--set full` 显示 packed sparse kernel Duration **1.49ms→956.58us**、Executed Instructions **27.84M→18.41M**，端到端模板 E cgoff curl 无 salad、gsm8k 200ex **Score 0.955 / latency 582.135s / output throughput 174.564 tok/s**。全量 `Q@R fold` 已因真实 Hadamard R 下 BF16 舍入路径不等价被拒绝（`cos≈0.475` + curl smoke fail）。2026-07-10 追加 ncu source-counter 定位：shared excessive wavefronts 主要来自 `sR_tile(j,d)` 写入，global/long-scoreboard 主要来自 `fill_sX` packed byte loads；直接把 R scratch tile 从 `INTER` 切到 `SW128` 虽将 shared excessive **51%→25%**，但 ptxas spill **872/924→1288/1744**、Duration **955.33us→997.98us**，已回滚并标记 `RTILE_SW128_REJECT`。随后 `fill_sX` 对齐 `uint32_t __ldg` 替换 2x byte-load 的 A/B 在 ncu 上看似大幅正收益（Duration **955.33us→646.46us**、inst **18.39M→17.02M**、global excessive **21%→17%**），curl 也无 salad，但 gsm8k 200ex **Score=0.900** 低于硬阈值，已回滚并标记 `U32LOAD_REJECT`；关键教训是现有 `PROBE_COMPARE` 只比较同一新 load 逻辑下 identity-tail on/off，不能证明 new-load vs old-byte-load 等价。已新增默认关闭的 `U32LOAD_ORACLE` 工具：`FLASH_MLA_ENABLE_U32_LOAD_ORACLE=1` build + `PROBE_COMPARE_U32_LOAD=1` 能在 standalone 阶段直接捕获该非等价（`max_abs=0.214111, cos=0.107816108`）；默认 build 不启用宏，ptxas 恢复 cleanup 值。后续任何 packed load 改写必须先过 oracle，再进入 ncu/curl/gsm8k。
+M3.c.4 已从“无 sparse forward 出口”推进到 `swa/c4/c128 + bu4` 真 packed forward，并在 `f16e099c7` 完成运行时显存收益闭环。关键修复：c4/c128 不再保留完整 FP8 shadow；`drop_shadow=1` 下只保留 tiny `[num_pages,page_size]` `extra_kv` shape dummy，真实 extra 数据由 FlashMLA `IS_EXTRA_BLOCK` 分支从 `extra_packed_kcache_ptr` 读取；backend 对 `extra_bpt==1 && extra_packed_kcache is None` fail-fast，避免 dummy 被 dense fallback 误读。实测同机同容器：失败版 `e71af0c99` all-pools bu4 `avail≈11.07GB / used≈87.2GB`，修复后 `avail≈22.35GB / used≈75.2-75.7GB`，优于 native FP8 `avail≈18.45GB / used≈79.6GB`；gsm8k 50ex **0.980**，短 bench `random-ids in2048/out512 rate32 conc32 np64` Output **136.06 tok/s**、Mean TTFT **32080.66ms**、Median TPOT **165.68ms**。结论：三池 bu4 的“精度 + 运行时显存收益”已经成立；性能主线仍需继续攻 packed decode TPOT/吞吐。历史性能优化经验仍有效：`IDENTITY_TAIL_BYPASS` 是已验证可保留优化；`U32LOAD_REJECT` 证明任何 packed load 改写必须先过 `U32LOAD_ORACLE`，再进入 ncu/curl/gsm8k。
 
 ### M3.c.3 R+affine 框架终判（重要，不再追求）
 
