@@ -336,6 +336,22 @@ def _wall_drop_shadow_enabled() -> bool:
     return os.environ.get("SGLANG_RQ_WALL_DROP_SHADOW", "0") == "1"
 
 
+def _wall_drop_shadow_for_kind(kind: str) -> bool:
+    """Whether a wall sub-pool can drop its full FP8 shadow allocation."""
+    if not _wall_drop_shadow_enabled():
+        return False
+    if os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1":
+        return False
+    # Dense-read diagnostics consume shadow/native FP8 bytes, so keep the
+    # full shadow in those modes. The packed-only production path must leave
+    # both flags off.
+    if os.environ.get("SGLANG_RQ_FORCE_DENSE_READ", "0") == "1":
+        return False
+    if os.environ.get("SGLANG_RQ_FORCE_DENSE_PATH", "0") == "1":
+        return False
+    return kind in ("swa", "c4", "c128")
+
+
 def _native_bytes_per_page(page_size: int) -> int:
     """DSv4 native paged FP8 layout: ``ceil(584 * P / 576) * 576``."""
     return ((_DSV4_NATIVE_BPT * page_size + _DSV4_SLOT_BYTES - 1) //
@@ -723,26 +739,32 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             ]
             # Shadow stays zero-initialised; prologue refills before each
             # FlashMLA call using the indices it will read.
-            # [M3.c.4 Stage-5 / B-step3] drop_shadow knob: when sparse-
-            # path forwards all 6 packed_kwargs to FlashMLA use_packed=
-            # true branch, shadow is dead memory. Replace with 1-byte
-            # sentinels to recover the full FP8-layout HBM cost.
-            # IMPORTANT: drop_shadow is only safe on the swa pool. c4/c128
-            # pools still feed the compressor_v2 store kernel which writes
-            # FP8 strides directly into kv_buffer; aliasing those to packed
-            # layout breaks compress_norm_rope_store stride checks. Keep
-            # c4/c128 shadow + native pool.kv_buffer.
-            # Diagnostic compatibility: bypass_quant writes native FP8 bytes
-            # directly into the SWA shadow buffer, so SWA cannot drop shadow
-            # in that mode even if drop_shadow=1 is requested.
-            drop_shadow_for_kind = (
-                _wall_drop_shadow_enabled()
-                and kind == "swa"
-                and os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") != "1"
-            )
-            if drop_shadow_for_kind:
+            #
+            # drop_shadow production path:
+            # * SWA: 1-byte sentinel; get_swa_key_buffer_radix returns the
+            #   packed buffer because packed kwargs make FlashMLA ignore
+            #   k_cache contents.
+            # * c4/c128: tiny 2-D dummy [num_pages, page_size]. FlashMLA's
+            #   current ABI still requires extra_kv to derive
+            #   extra_num_blocks/extra_page_block_size and validate
+            #   extra_packed_kcache rows, but the IS_EXTRA_BLOCK packed
+            #   branch reads extra_packed_kcache_ptr, not extra_kv bytes.
+            #   Keeping only 1 byte per slot removes the full FP8 shadow
+            #   while preserving shape metadata.
+            drop_shadow_for_kind = _wall_drop_shadow_for_kind(kind)
+            if drop_shadow_for_kind and kind == "swa":
                 shadow_buffers = [
                     torch.zeros(1, dtype=torch.uint8, device=device)
+                    for _ in range(pool.layer_num)
+                ]
+            elif drop_shadow_for_kind:
+                shadow_buffers = [
+                    torch.zeros(
+                        num_pages,
+                        page_size,
+                        dtype=torch.uint8,
+                        device=device,
+                    )
                     for _ in range(pool.layer_num)
                 ]
             else:
@@ -808,14 +830,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # pool.kv_buffer 别名到 shadow_buffers，否则任何走 super()
             # 路径或 attention backend 直接 reshape kv_buffer 的代码会
             # 拿到错的 shape，触发 OOB 读写。
-            # [M3.c.4 Stage-5] drop_shadow 模式下 shadow=1B 占位，主存储
-            # 必须是 packed_buffers；attention backend 的 view 现在按
-            # 实际 row width 推导 bpt（268 vs 584），无需 bytes_per_page_padded
-            # 配合，所以这里安全。
-            # [M3.c.4 Stage-5] drop_shadow 模式（仅 swa）：shadow=1B 占位，
-            # 主存储必须是 packed_buffers；attention backend 的 view 按实际
-            # row width 推 bpt（268 vs 584）。c4/c128 池保持 shadow alias，
-            # 与 compressor_v2 store kernel 的 FP8 stride 写路径兼容。
+            # [M3.c.4 Stage-5] drop_shadow 模式下主存储必须是
+            # packed_buffers。SWA 返回 packed buffer 作为 k_cache shim；
+            # c4/c128 返回 tiny shadow dummy 作为 extra_kv shape shim，
+            # 真实数据都由 packed kwargs / extra_packed_kcache 读取。
             if drop_shadow_for_kind:
                 pool.kv_buffer = packed_buffers  # type: ignore[assignment]
             elif _wall_drop_packed_enabled():
@@ -1406,7 +1424,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # the FlashMLA sparse-path use_packed=true branch (which ignores
         # k_cache content but still reads its layout) sees the real
         # packed paged bytes.
-        if _wall_drop_shadow_enabled():
+        if _wall_drop_shadow_for_kind("swa"):
             return self._wall_pools["swa"].packed_buffers[local_layer_id]
         return self._wall_pools["swa"].shadow_buffers[local_layer_id]
 
@@ -1419,9 +1437,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # SGLANG_RQ_WALL_KINDS excluded this kind; native FP8 buffer
             # is intact, fall back to parent.
             return super().get_extra_key_buffer(layer_id)
-        # [M3.c.4 Stage-5] drop_shadow only applies to swa pool. c4/c128
-        # keep shadow allocated so this read returns the FP8-layout buffer
-        # that FlashMLA dense-path expects.
+        # In the all-packed drop_shadow path:
+        # * swa returns packed via get_swa_key_buffer_radix().
+        # * c4/c128 return a tiny 2-D dummy shadow. FlashMLA uses it only
+        #   to derive extra_num_blocks/extra_page_block_size; the packed
+        #   IS_EXTRA_BLOCK branch reads extra_packed_kcache_ptr for data.
+        # Dense-read diagnostics disable _wall_drop_shadow_for_kind() and
+        # therefore keep a full FP8 shadow here.
         if _wall_drop_shadow_enabled() and kind == "swa":
             return self._wall_pools[kind].packed_buffers[local_layer_id]
         return self._wall_pools[kind].shadow_buffers[local_layer_id]

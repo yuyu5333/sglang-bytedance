@@ -1016,17 +1016,17 @@ class DeepseekV4AttnBackend(
                 swa_k_cache.shape[0], swa_window_size, 1, swa_bpt
             )
 
+            extra_bpt = None
             if extra_k_cache is not None:
                 page_sizes = {
                     4: token_to_kv_pool.page_size // 4,
                     128: token_to_kv_pool.page_size // 128,
                 }
-                # c4/c128 sink keeps native FP8 layout (drop_shadow only
-                # applies to swa). Slice off any 576-byte page padding so
-                # extra_bpt matches the kernel's native bytes_per_token
-                # (584). Mirror swa logic only when buffer width is exactly
-                # divisible by num_slots into 584 -- otherwise we'd be
-                # passing padded byte_per_token (e.g. 585) to FlashMLA.
+                # c4/c128 may be either a full native FP8 shadow or, in
+                # drop_shadow packed-only mode, a tiny [num_pages, page_size]
+                # dummy used only to carry extra_page_block_size metadata.
+                # In the dummy case extra_bpt becomes 1 and the kernel must
+                # receive extra_packed_kcache below; otherwise fail fast.
                 num_slots = page_sizes[compress_ratio]
                 extra_bpt_native = k_cache_total_dim
                 if extra_k_cache.shape[1] >= num_slots * extra_bpt_native:
@@ -1132,6 +1132,15 @@ class DeepseekV4AttnBackend(
                 _extra_pk = _packed_getter(layer_id, _extra_kind)
                 if _extra_pk is not None:
                     extra_packed_kcache = _extra_pk["packed_kcache"]
+            if (
+                extra_k_cache is not None
+                and extra_bpt == 1
+                and extra_packed_kcache is None
+            ):
+                raise RuntimeError(
+                    "packed-only c4/c128 extra_k_cache dummy requires "
+                    "extra_packed_kcache; dense fallback would read dummy bytes"
+                )
 
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
