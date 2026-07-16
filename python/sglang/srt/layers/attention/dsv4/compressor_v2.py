@@ -47,6 +47,21 @@ class CompressorBackendMixin:
         attr_name = f"c{compress_ratio}_out_loc"
         return getattr(self.forward_metadata.core_metadata, attr_name)
 
+    def _get_wall_packed_write_locs(
+        self, compress_ratio: int
+    ) -> torch.Tensor:
+        plan = self._get_paged_compress_metadata(compress_ratio)
+        out_loc = self._get_out_loc(compress_ratio)
+        if plan.is_decode:
+            seq_lens = self.forward_metadata.seq_lens
+            valid = (seq_lens % compress_ratio) == 0
+            return out_loc[valid]
+
+        plan_c = plan.plan_c.view(torch.int32).view(-1, 4)
+        ragged_id = plan_c[:, 0]
+        valid = ragged_id >= 0
+        return out_loc[ragged_id[valid].to(torch.int64)]
+
     def _forward_compress_to_bf16(
         self,
         *,
@@ -175,9 +190,16 @@ class CompressorBackendMixin:
                     rotate=compressor.rotate,
                     compress_ratio=compressor.ratio,
                 )
+                packed_loc = self._get_wall_packed_write_locs(compressor.ratio)
+                if packed_loc.numel() != kv_compressed.shape[0]:
+                    raise ValueError(
+                        "wall packed extra store loc count mismatch: "
+                        f"locs={packed_loc.numel()} vs rows={kv_compressed.shape[0]} "
+                        f"(compress_ratio={compressor.ratio})"
+                    )
                 token_to_kv_pool.set_extra_key_buffer_fused(
                     layer_id=layer_id,
-                    loc=self._get_out_loc(compressor.ratio),
+                    loc=packed_loc,
                     cache_k=kv_compressed,
                 )
                 return
