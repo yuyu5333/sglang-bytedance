@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import functools
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -241,11 +242,12 @@ class DSV4AttnMetadata:
             )
 
     def init_flashmla_related(self):
-        # c4_sparse_topk is set from model_config.index_topk per-model
-        # (small model: 512, large model: 1024).
-        assert self.c4_sparse_topk in (512, 1024), (
+        # c4_sparse_topk is normally set from model_config.index_topk
+        # per-model (small model: 512, large model: 1024). Performance
+        # experiments may lower it via SGLANG_DSV4_C4_TOPK_OVERRIDE.
+        assert self.c4_sparse_topk in (64, 128, 256, 512, 1024), (
             f"unexpected c4_sparse_topk={self.c4_sparse_topk}; "
-            "supported: 512 (small) or 1024 (large)"
+            "supported: 64/128/256/512/1024"
         )
         assert self.c4_topk_lengths_clamp1 is not None
         self.c4_sparse_topk_lengths = torch.clamp(
@@ -362,6 +364,20 @@ class DeepseekV4AttnBackend(
         self.c4_topk = getattr(
             model_runner.model_config.hf_text_config, "index_topk", C4_TOPK
         )
+        c4_topk_override = os.environ.get("SGLANG_DSV4_C4_TOPK_OVERRIDE")
+        if c4_topk_override:
+            self.c4_topk = int(c4_topk_override)
+            if self.c4_topk not in (64, 128, 256, 512, 1024):
+                raise ValueError(
+                    "SGLANG_DSV4_C4_TOPK_OVERRIDE must be one of "
+                    "64,128,256,512,1024; got "
+                    f"{self.c4_topk}"
+                )
+            logger.warning(
+                "Overriding DSv4 c4 sparse topk to %s via "
+                "SGLANG_DSV4_C4_TOPK_OVERRIDE",
+                self.c4_topk,
+            )
 
         self.topk = model_runner.server_args.speculative_eagle_topk or 0
         assert self.topk in [0, 1], "MTP Topk > 1 not supported for DeepSeek V4"
