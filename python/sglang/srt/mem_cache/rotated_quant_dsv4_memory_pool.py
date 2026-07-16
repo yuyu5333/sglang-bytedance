@@ -629,6 +629,34 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                     sorted(_extra_kinds),
                 )
                 wall_kinds -= _extra_kinds
+        # [M3.c c4-hisparse-leak fix] c4 pool has TWO writers:
+        #   (a) compressor set_extra_key_buffer_fused → wall-managed (packed);
+        #   (b) hisparse_coordinator.swap_in_selected_pages → writes native
+        #       FP8 bytes DIRECTLY into c4_kv_pool.kv_buffer[layer_id] via
+        #       load_cache_to_device_buffer_dsv4_mla (bypasses our wrapper).
+        # Wall replaces kv_buffer with packed layout (bpt=380 vs native 584),
+        # so path (b) then writes FP8-sized rows into packed-sized rows →
+        # corrupted content + OOB writes → gsm8k salad (bisect: swa=0.96,
+        # swa+c4=0.66, swa+c128=0.98). Auto-exclude c4 from wall when the
+        # c4 pool is HiSparseC4DevicePool. c128 pool is DeepSeekV4SingleKVPool
+        # (no hisparse swap-in), so it is safe.
+        _force_hisparse_c4 = os.environ.get(
+            "SGLANG_RQ_WALL_FORCE_HISPARSE_C4", "0"
+        ) == "1"
+        if "c4" in wall_kinds and not _force_hisparse_c4:
+            from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+                HiSparseC4DevicePool,
+            )
+            if isinstance(self.c4_kv_pool, HiSparseC4DevicePool):
+                logger.warning(
+                    "wall-storage: excluding 'c4' from wall storage because "
+                    "c4_kv_pool is HiSparseC4DevicePool. hisparse_coordinator."
+                    "swap_in_selected_pages writes native FP8 bytes directly "
+                    "into c4_kv_pool.kv_buffer[i] and would corrupt the packed "
+                    "layout. Set SGLANG_RQ_WALL_FORCE_HISPARSE_C4=1 to override "
+                    "(dev only)."
+                )
+                wall_kinds.discard("c4")
         logger.warning(
             "wall-storage install scope: SGLANG_RQ_WALL_KINDS=%s",
             sorted(wall_kinds),
