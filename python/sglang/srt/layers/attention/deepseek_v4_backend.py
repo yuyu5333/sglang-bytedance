@@ -1110,6 +1110,29 @@ class DeepseekV4AttnBackend(
             ):
                 identity_tail_bypass = True
 
+            # [c4c128-packed] When SWA packed path is active and this layer
+            # is a c4/c128 sink, also expose the extra pool's packed byte
+            # buffer so the kernel IS_EXTRA_BLOCK branch reads bu4 packed
+            # rows (fused dequant with the SHARED SWA calib) instead of the
+            # dense FP8 shadow/native path. The extra pool's calib is
+            # identical to SWA (build_synthetic_dsv4_calibration builds one
+            # R/scale/zero/bit_uniform for all layers), so only the packed
+            # byte buffer differs; scale/R/zero/dim_of_bit/bitpos/bit_uniform
+            # in packed_kwargs are reused verbatim. get_rotated_packed_kwargs
+            # returns None when the kind is not under wall storage (e.g.
+            # auto-excluded without SGLANG_RQ_WALL_FORCE_EXTRA_PACKED=1), in
+            # which case extra stays on the dense path (byte-identical).
+            extra_packed_kcache = None
+            if (
+                packed_kwargs
+                and extra_k_cache is not None
+                and _packed_getter is not None
+            ):
+                _extra_kind = "c4" if compress_ratio == 4 else "c128"
+                _extra_pk = _packed_getter(layer_id, _extra_kind)
+                if _extra_pk is not None:
+                    extra_packed_kcache = _extra_pk["packed_kcache"]
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
@@ -1126,6 +1149,7 @@ class DeepseekV4AttnBackend(
                 extra_indices_in_kvcache=extra_indices,
                 extra_topk_length=extra_topk_lengths,
                 identity_tail_bypass=identity_tail_bypass,
+                extra_packed_kcache=extra_packed_kcache,
                 **packed_kwargs,
             )[0]
 
