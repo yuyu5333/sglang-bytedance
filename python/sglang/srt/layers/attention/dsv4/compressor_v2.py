@@ -48,13 +48,16 @@ class CompressorBackendMixin:
         return getattr(self.forward_metadata.core_metadata, attr_name)
 
     def _get_wall_packed_write_locs(
-        self, compress_ratio: int
+        self, compress_ratio: int, scratch_loc: Optional[int] = None
     ) -> torch.Tensor:
         plan = self._get_paged_compress_metadata(compress_ratio)
         out_loc = self._get_out_loc(compress_ratio)
         if plan.is_decode:
             seq_lens = self.forward_metadata.core_metadata.seq_lens_casual
             valid = (seq_lens % compress_ratio) == 0
+            if scratch_loc is not None:
+                scratch = torch.full_like(out_loc, int(scratch_loc))
+                return torch.where(valid, out_loc, scratch)
             return out_loc[valid]
 
         plan_c = plan.plan_c.view(torch.int32).view(-1, 4)
@@ -73,7 +76,8 @@ class CompressorBackendMixin:
                 torch.int64
             )
             valid = (seq_lens % compress_ratio) == 0
-            return seq_lens[valid] - compress_ratio
+            positions = seq_lens - compress_ratio
+            return torch.where(valid, positions, torch.zeros_like(positions))
 
         plan_c = plan.plan_c.view(torch.int32).view(-1, 4)
         seq_len = plan_c[:, 0].to(torch.int64)
@@ -121,11 +125,6 @@ class CompressorBackendMixin:
             head_dim=head_dim,
             is_online=is_online,
         )
-        valid_mask = self._get_wall_decode_valid_mask(compress_ratio)
-        if valid_mask is not None:
-            kv_compressed = kv_compressed[valid_mask]
-            if kv_compressed.numel() == 0:
-                return kv_compressed
         positions = self._get_wall_compress_positions(compress_ratio)
         if positions.numel() != kv_compressed.shape[0]:
             raise ValueError(
@@ -229,7 +228,10 @@ class CompressorBackendMixin:
                     rotate=compressor.rotate,
                     compress_ratio=compressor.ratio,
                 )
-                packed_loc = self._get_wall_packed_write_locs(compressor.ratio)
+                scratch_loc = token_to_kv_pool.get_wall_extra_scratch_loc(wall_kind)
+                packed_loc = self._get_wall_packed_write_locs(
+                    compressor.ratio, scratch_loc=scratch_loc
+                )
                 if packed_loc.numel() != kv_compressed.shape[0]:
                     raise ValueError(
                         "wall packed extra store loc count mismatch: "

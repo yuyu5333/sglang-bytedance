@@ -939,6 +939,11 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return loc
         return translate(loc)
 
+    def get_wall_extra_scratch_loc(self, kind: str) -> int:
+        """Return a valid but unread extra slot for graph-safe masked stores."""
+        entry = self._wall_pools[kind]
+        return entry.num_pages * entry.page_size - 1
+
     # ------------------------------------------------------------------
     # T3 dirty-page tracking
     # ------------------------------------------------------------------
