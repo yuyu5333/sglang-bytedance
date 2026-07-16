@@ -602,33 +602,16 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                         f"SGLANG_RQ_WALL_KINDS contains unknown kind {k!r}; "
                         f"allowed: swa,c4,c128 (or 'none' for native FP8)"
                     )
-        # [M3.c.4 Stage-5 dataflow fix] When drop_shadow=1, c4/c128 cannot
-        # safely use wall storage: the FlashMLA kernel hard-codes
-        # use_packed=false for IS_EXTRA_BLOCK (c4/c128) and reads from
-        # extra_k_cache = shadow_buffers, but drop_shadow=1 skips the
-        # prologue shadow refresh by default (SGLANG_RQ_SKIP_EXTRA_SHADOW_
-        # REFRESH=1) and the fused store path writes to packed_buffers,
-        # not shadow_buffers. Net effect: shadow stays zeros -> kernel
-        # reads garbage; plus packed_buffers+shadow_buffers are DOUBLE
-        # allocated, wasting ~7GB GPU mem. Auto-exclude c4/c128 from
-        # wall_kinds so they fall back to native FP8 (correct data +
-        # no wasted memory). Override with SGLANG_RQ_WALL_FORCE_EXTRA_
-        # PACKED=1 for development of future c4/c128 packed read path.
-        _force_extra = os.environ.get(
-            "SGLANG_RQ_WALL_FORCE_EXTRA_PACKED", "0"
-        ) == "1"
-        if _wall_drop_shadow_enabled() and not _force_extra:
-            _extra_kinds = {"c4", "c128"} & wall_kinds
-            if _extra_kinds:
-                logger.warning(
-                    "wall-storage: drop_shadow=1 excludes %s from wall "
-                    "storage (kernel IS_EXTRA_BLOCK does not support "
-                    "use_packed yet; falling back to native FP8 for "
-                    "correctness + memory savings). Set "
-                    "SGLANG_RQ_WALL_FORCE_EXTRA_PACKED=1 to override.",
-                    sorted(_extra_kinds),
-                )
-                wall_kinds -= _extra_kinds
+        # [c4c128-packed] FlashMLA kernel IS_EXTRA_BLOCK branch DOES support
+        # use_packed=true when extra_packed_kcache_ptr is set (see
+        # splitkv_mla.cuh:843-845, 866-881). The historical auto-exclude
+        # here (drop_shadow=1 -> exclude c4/c128) was based on a stale
+        # assumption that the kernel hard-coded use_packed=false for
+        # IS_EXTRA_BLOCK; it does not. Backend now forwards
+        # extra_packed_kcache via _packed_getter(layer_id, 'c4'|'c128'),
+        # so c4/c128 packed rows are read on the fused-dequant path.
+        # SGLANG_RQ_WALL_FORCE_EXTRA_PACKED remains recognized as a no-op
+        # for legacy launch scripts.
         # [M3.c c4-hisparse-leak fix] c4 pool has TWO writers:
         #   (a) compressor set_extra_key_buffer_fused → wall-managed (packed);
         #   (b) hisparse_coordinator.swap_in_selected_pages → writes native
