@@ -732,7 +732,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # FP8 strides directly into kv_buffer; aliasing those to packed
             # layout breaks compress_norm_rope_store stride checks. Keep
             # c4/c128 shadow + native pool.kv_buffer.
-            drop_shadow_for_kind = _wall_drop_shadow_enabled() and kind == "swa"
+            # Diagnostic compatibility: bypass_quant writes native FP8 bytes
+            # directly into the SWA shadow buffer, so SWA cannot drop shadow
+            # in that mode even if drop_shadow=1 is requested.
+            drop_shadow_for_kind = (
+                _wall_drop_shadow_enabled()
+                and kind == "swa"
+                and os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") != "1"
+            )
             if drop_shadow_for_kind:
                 shadow_buffers = [
                     torch.zeros(1, dtype=torch.uint8, device=device)
@@ -1392,6 +1399,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             return super().get_swa_key_buffer_radix(layer_id)
         self.wait_layer_transfer(layer_id)
         local_layer_id = self._swa_local_layer_id(layer_id)
+        if os.environ.get("SGLANG_RQ_WALL_BYPASS_QUANT", "0") == "1":
+            return self._wall_pools["swa"].shadow_buffers[local_layer_id]
         # [M3.c.4 Stage-5 / B-step3] In drop_shadow mode, shadow_buffers
         # is a 1-byte sentinel; return the packed_buffer instead so that
         # the FlashMLA sparse-path use_packed=true branch (which ignores
