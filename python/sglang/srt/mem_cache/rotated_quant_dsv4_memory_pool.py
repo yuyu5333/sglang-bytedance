@@ -1634,6 +1634,23 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         cfg = self._nope_cfgs[layer_id]
 
         swa_pages = getattr(core_attn_metadata, "swa_page_indices", None)
+        _diag_first = not hasattr(self, "_diag_prologue_count")
+        if _diag_first:
+            self._diag_prologue_count = 0
+        self._diag_prologue_count += 1
+        if self._diag_prologue_count <= 6 and layer_id == 0:
+            entry0 = self._wall_pools.get("swa")
+            if entry0 is not None:
+                _sh = entry0.shadow_buffers[0]
+                _pk = entry0.packed_buffers[0]
+                logger.warning(
+                    f"[DIAG] layer0 prologue #{self._diag_prologue_count} "
+                    f"mode={self._mode} swa_pages={'set' if swa_pages is not None else 'None'} "
+                    f"bypass_quant={bypass_quant} skip_swa={skip_swa_shadow_refresh} "
+                    f"shadow_shape={tuple(_sh.shape) if _sh.numel()>1 else 'sentinel'} "
+                    f"packed_shape={tuple(_pk.shape) if _pk.numel()>1 else 'sentinel'} "
+                    f"shadow_first16={_sh.reshape(-1)[:16].tolist() if _sh.numel()>1 else []}"
+                )
         if (
             swa_pages is not None
             and "swa" in self._wall_pools
