@@ -894,6 +894,15 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             )
         return kv.contiguous()
 
+    def _extra_store_loc(self, kind: str, loc: torch.Tensor) -> torch.Tensor:
+        """Mirror native c4/c128 pool address translation before writing wall rows."""
+        if kind != "c4":
+            return loc
+        translate = getattr(self.c4_kv_pool, "translate_loc_to_hisparse_device", None)
+        if translate is None:
+            return loc
+        return translate(loc)
+
     # ------------------------------------------------------------------
     # T3 dirty-page tracking
     # ------------------------------------------------------------------
@@ -1321,13 +1330,14 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         kind, local_layer_id = self._layer_id_for_extra(layer_id)
         entry = self._wall_pools[kind]
         cfg = self._nope_cfgs[layer_id]
+        store_loc = self._extra_store_loc(kind, loc)
         # drop_packed 模式跳过 rotated_store_to_packed（packed_buffers 是
         # 1B 占位，prologue 整体 short-circuit，无人读这块字节）。
         if not _wall_drop_packed_enabled():
             rotated_store_to_packed(
                 self._wall_kv_input(cache_k),
                 entry.packed_buffers[local_layer_id],
-                loc,
+                store_loc,
                 page_size=entry.page_size,
                 cfg=cfg,
             )
@@ -1336,12 +1346,12 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         if _wall_token_shadow_enabled():
             self._write_tokens_to_shadow(
                 entry, local_layer_id,
-                self._wall_kv_input(cache_k), loc,
+                self._wall_kv_input(cache_k), store_loc,
             )
         # T3: mark dirty pages
-        self._mark_pages_dirty_from_loc(entry, local_layer_id, loc)
+        self._mark_pages_dirty_from_loc(entry, local_layer_id, store_loc)
         # T_packed_only (β)
-        self._mark_slots_valid_from_loc(entry, local_layer_id, loc)
+        self._mark_slots_valid_from_loc(entry, local_layer_id, store_loc)
 
     def set_extra_key_buffer(
         self,
