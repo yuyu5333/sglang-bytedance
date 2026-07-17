@@ -468,8 +468,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         if mode == "wall" and _wall_drop_shadow_enabled():
             from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
                 _MLA_NOPE_DIM,
-                _ROPE_BYTES,
-                _UNIFORM_HEADER_BYTES,
+                packed_bytes_per_token,
             )
 
             bit_uniform_env = os.environ.get("SGLANG_RQ_BIT_UNIFORM")
@@ -478,7 +477,9 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             else:
                 bit_uniform = 3
             row_bytes_nope = (_MLA_NOPE_DIM * bit_uniform + 7) // 8
-            packed_bpt = row_bytes_nope + _UNIFORM_HEADER_BYTES + _ROPE_BYTES
+            packed_bpt = packed_bytes_per_token(
+                row_bytes_nope, bit_uniform
+            )
             native_bpt = _DSV4_NATIVE_BPT
             scale_factor = native_bpt / packed_bpt
 

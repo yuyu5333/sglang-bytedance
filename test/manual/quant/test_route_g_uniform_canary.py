@@ -105,19 +105,19 @@ class TestRouteGUniformPacked(unittest.TestCase):
         cls.m0, cls.kernels = _load_modules()
 
     # ------------------------------------------------------------------
-    # T1: byte accounting — uniform header adds 28 B, legacy keeps 268 B
+    # T1: uniform rows include the 28 B header and 16 B stride alignment.
     # ------------------------------------------------------------------
     def test_01_packed_bytes_per_token_accounting(self):
         kk = self.kernels
-        # uniform 3-bit: 448 * 3 / 8 = 168 nope + 28 hdr + 128 rope = 324
+        # uniform 3-bit: 168 nope + 28 hdr + 128 rope = 324 -> 336 aligned
         self.assertEqual(kk.uniform_row_bytes_nope(3), 168)
-        self.assertEqual(kk.packed_bytes_per_token(168, bit_uniform=3), 324)
-        # uniform 4-bit: 448 * 4 / 8 = 224 nope + 28 hdr + 128 rope = 380
+        self.assertEqual(kk.packed_bytes_per_token(168, bit_uniform=3), 336)
+        # uniform 4-bit: 224 nope + 28 hdr + 128 rope = 380 -> 384 aligned
         self.assertEqual(kk.uniform_row_bytes_nope(4), 224)
-        self.assertEqual(kk.packed_bytes_per_token(224, bit_uniform=4), 380)
-        # uniform 2-bit: 448 * 2 / 8 = 112 nope + 28 hdr + 128 rope = 268
+        self.assertEqual(kk.packed_bytes_per_token(224, bit_uniform=4), 384)
+        # uniform 2-bit: 112 nope + 28 hdr + 128 rope = 268 -> 272 aligned
         self.assertEqual(kk.uniform_row_bytes_nope(2), 112)
-        self.assertEqual(kk.packed_bytes_per_token(112, bit_uniform=2), 268)
+        self.assertEqual(kk.packed_bytes_per_token(112, bit_uniform=2), 272)
         # legacy (variable bits, b_mean=2.5 -> 140 row_bytes): 140 + 128 = 268
         self.assertEqual(kk.packed_bytes_per_token(140), 268)
         self.assertEqual(kk.packed_bytes_per_token(140, bit_uniform=0), 268)
@@ -170,6 +170,10 @@ class TestRouteGUniformPacked(unittest.TestCase):
         )
         rope_bytes = rope.view(torch.uint8).reshape(N, kk._ROPE_BYTES)
         full_row = torch.cat([packed, header_bytes, rope_bytes], dim=1)
+        if full_row.shape[1] < bpt:
+            full_row = torch.nn.functional.pad(
+                full_row, (0, bpt - full_row.shape[1])
+            )
         assert full_row.shape == (N, bpt), f"{full_row.shape} vs ({N},{bpt})"
 
         cache_flat = cache.view(-1, bpt)
