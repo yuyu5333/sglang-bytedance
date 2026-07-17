@@ -475,7 +475,8 @@ class RotatedDSV4PoolConfigurator(DSV4PoolConfigurator):
         super().__init__(mr)
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             _MLA_NOPE_DIM,
-            packed_bytes_per_token,
+            _ROPE_BYTES,
+            _UNIFORM_HEADER_BYTES,
         )
 
         bit_uniform_env = os.environ.get("SGLANG_RQ_BIT_UNIFORM")
@@ -485,9 +486,7 @@ class RotatedDSV4PoolConfigurator(DSV4PoolConfigurator):
             bit_uniform = 3
 
         row_bytes_nope = (_MLA_NOPE_DIM * bit_uniform + 7) // 8
-        self.packed_kv_bytes = packed_bytes_per_token(
-            row_bytes_nope, bit_uniform
-        )
+        self.packed_kv_bytes = row_bytes_nope + _UNIFORM_HEADER_BYTES + _ROPE_BYTES
         logger.warning(
             f"RotatedDSV4PoolConfigurator: swa packed kv_bytes={self.packed_kv_bytes} "
             f"(native={self.qk_nope_head_dim + self.qk_rope_head_dim * 2 + 8}), "

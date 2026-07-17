@@ -62,7 +62,6 @@ _ROPE_BYTES = _MLA_TILE_SIZE * 2  # 64 elements * 2 = 128 B
 _UNIFORM_GROUPS = _MLA_NOPE_DIM // _MLA_TILE_SIZE  # 7
 _UNIFORM_HEADER_BYTES_PER_GROUP = 4  # fp16 min + fp16 range
 _UNIFORM_HEADER_BYTES = _UNIFORM_GROUPS * _UNIFORM_HEADER_BYTES_PER_GROUP  # 28 B
-_UNIFORM_ROW_ALIGNMENT = 16
 
 
 def uniform_row_bytes_nope(bit_uniform: int) -> int:
@@ -87,12 +86,8 @@ def packed_bytes_per_token(row_bytes_nope: int, bit_uniform: int = 0) -> int:
     header is what makes the wall path dynamic per-token affine instead
     of the legacy static per-dim ``(scale, zero)`` from calib.
     """
-    if int(bit_uniform) > 0:
-        payload = int(row_bytes_nope) + _UNIFORM_HEADER_BYTES + _ROPE_BYTES
-        return (
-            (payload + _UNIFORM_ROW_ALIGNMENT - 1) // _UNIFORM_ROW_ALIGNMENT
-        ) * _UNIFORM_ROW_ALIGNMENT
-    return int(row_bytes_nope) + _ROPE_BYTES
+    extra = _UNIFORM_HEADER_BYTES if int(bit_uniform) > 0 else 0
+    return int(row_bytes_nope) + extra + _ROPE_BYTES
 
 
 def _build_pack_meta_from_bits(
@@ -297,7 +292,7 @@ def rotated_store_to_packed(
     if (
         _os.environ.get("SGLANG_RQ_FUSED_STORE", "0") == "1"
         and int(cfg.bit_uniform) == 4
-        and bpt == 384
+        and bpt == 380
         and row_bytes_nope == 224
     ):
         from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
@@ -511,10 +506,6 @@ def rotated_store_to_packed(
             .reshape(N, _UNIFORM_HEADER_BYTES)
         )
         full_row = torch.cat([packed, header_bytes, rope_bytes], dim=1)
-        if full_row.shape[1] < bpt:
-            full_row = torch.nn.functional.pad(
-                full_row, (0, bpt - full_row.shape[1])
-            )
     else:
         full_row = torch.cat([packed, rope_bytes], dim=1)  # [N, bpt]
 
@@ -648,7 +639,7 @@ def rotated_load_to_fp8_layout(
         chunk_idx = indices_i64[start:end]
         chunk_rows = cache_flat.index_select(0, chunk_idx)  # [chunk, bpt]
         chunk_packed = chunk_rows[:, :row_bytes_nope].contiguous()
-        chunk_rope = chunk_rows[:, rope_off : rope_off + _ROPE_BYTES].contiguous()
+        chunk_rope = chunk_rows[:, rope_off:].contiguous()
         # GPU bitunpack → codes_i32 (ch, 448) int32 (bits is GPU-cached)
         codes_chunk = triton_bitunpack_rowwise(chunk_packed, bits_gpu)
         ch = end - start
@@ -717,7 +708,7 @@ def rotated_load_to_fp8_layout_cpu_ref(
         kmin_g = hdr_fp16[..., 0].to(torch.float32).unsqueeze(-1)   # [M, 7, 1]
         krange_g = hdr_fp16[..., 1].to(torch.float32).unsqueeze(-1)
         step_g = krange_g / L_f
-        rope_bytes = rows[:, rope_off : rope_off + _ROPE_BYTES].contiguous()
+        rope_bytes = rows[:, rope_off:].contiguous()
         bits_cpu = cfg.bits.to(torch.int32)
         codes = bitunpack_rowwise(packed_nope, bits_cpu, dim=_MLA_NOPE_DIM)
         codes_g = codes.reshape(M, _UNIFORM_GROUPS, _MLA_TILE_SIZE).to(torch.float32)
