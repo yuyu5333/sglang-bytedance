@@ -1166,6 +1166,27 @@ class DeepseekV4AttnBackend(
                     "extra_packed_kcache; dense fallback would read dummy bytes"
                 )
 
+            q_nope_is_folded = (
+                bool(packed_kwargs)
+                and int(packed_kwargs.get("bit_uniform", 0)) == 4
+                and identity_tail_bypass
+                and (
+                    extra_k_cache is None
+                    or extra_packed_kcache is not None
+                )
+                and _os.environ.get("SGLANG_RQ_FOLD_Q_FHT", "0") == "1"
+            )
+            if q_nope_is_folded:
+                from sglang.jit_kernel.hadamard import hadamard_transform
+
+                q = torch.cat(
+                    (
+                        hadamard_transform(q[..., :256], scale=0.0625),
+                        q[..., 256:],
+                    ),
+                    dim=-1,
+                )
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
@@ -1181,6 +1202,7 @@ class DeepseekV4AttnBackend(
                 extra_k_cache=extra_k_cache,
                 extra_indices_in_kvcache=extra_indices,
                 extra_topk_length=extra_topk_lengths,
+                q_nope_is_folded=q_nope_is_folded,
                 identity_tail_bypass=identity_tail_bypass,
                 extra_packed_kcache=extra_packed_kcache,
                 **packed_kwargs,
