@@ -87,6 +87,17 @@ def _create_flashmla_metadata():
     return flash_mla.get_mla_metadata()[0]
 
 
+def _hadamard256_inplace(x: torch.Tensor) -> None:
+    from sglang.jit_kernel.hadamard import _jit_hadamard_module
+
+    rows = x.view(-1, x.shape[-1])
+    prefix = rows.as_strided(
+        (rows.shape[0], 256),
+        (rows.stride(0), rows.stride(1)),
+    )
+    _jit_hadamard_module(x.dtype).hadamard_transform(prefix, prefix, 0.0625)
+
+
 def _create_dummy_paged_compress_data(compress_ratio: int):
     return None
 
@@ -1177,15 +1188,7 @@ class DeepseekV4AttnBackend(
                 and _os.environ.get("SGLANG_RQ_FOLD_Q_FHT", "0") == "1"
             )
             if q_nope_is_folded:
-                from sglang.jit_kernel.hadamard import hadamard_transform
-
-                q = torch.cat(
-                    (
-                        hadamard_transform(q[..., :256], scale=0.0625),
-                        q[..., 256:],
-                    ),
-                    dim=-1,
-                )
+                _hadamard256_inplace(q)
 
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
@@ -1207,6 +1210,8 @@ class DeepseekV4AttnBackend(
                 extra_packed_kcache=extra_packed_kcache,
                 **packed_kwargs,
             )[0]
+            if q_nope_is_folded:
+                _hadamard256_inplace(o)
 
             o = o.squeeze(1)
             return o
