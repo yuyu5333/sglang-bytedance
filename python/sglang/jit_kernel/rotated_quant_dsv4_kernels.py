@@ -282,10 +282,18 @@ def rotated_store_to_packed(
     # production default remains the FP32 reference; enable this isolated
     # experiment with SGLANG_RQ_BF16_ROTATE=1.
     if _os.environ.get("SGLANG_RQ_BF16_ROTATE", "0") == "1":
-        if _os.environ.get("SGLANG_RQ_BF16_ROTATE_MM", "0") == "1":
+        rotate_impl = _os.environ.get("SGLANG_RQ_BF16_ROTATE_IMPL", "matmul")
+        if rotate_impl == "linear":
+            K_rot = torch._C._nn.linear(nope, R_bf16.t()).to(torch.float32)
+        elif rotate_impl == "mm":
             K_rot = torch.mm(nope, R_bf16).to(torch.float32)
-        else:
+        elif rotate_impl == "matmul":
             K_rot = (nope @ R_bf16).to(torch.float32)
+        else:
+            raise ValueError(
+                "SGLANG_RQ_BF16_ROTATE_IMPL must be matmul,mm,linear, "
+                f"got {rotate_impl}"
+            )
     else:
         K_rot = nope.to(torch.float32) @ R  # [N, 448]
 
