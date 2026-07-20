@@ -272,11 +272,19 @@ def rotated_store_to_packed(
     # 所有 GPU constants，后续每次 store 直接复用。
     cfg_gpu = _get_cached_cfg_gpu(cfg, input_bf16.device)
     R = cfg_gpu["R"]
+    R_bf16 = cfg_gpu["R_bf16"]
     scale = cfg_gpu["scale"]
     zero = cfg_gpu["zero"]
     levels_f = cfg_gpu["levels"]
 
-    K_rot = nope.to(torch.float32) @ R  # [N, 448]
+    # [P3 experiment] Use BF16 Tensor Core GEMM for the rotation and promote
+    # only its result to FP32 for the existing affine/packing path. The
+    # production default remains the FP32 reference; enable this isolated
+    # experiment with SGLANG_RQ_BF16_ROTATE=1.
+    if _os.environ.get("SGLANG_RQ_BF16_ROTATE", "0") == "1":
+        K_rot = (nope @ R_bf16).to(torch.float32)
+    else:
+        K_rot = nope.to(torch.float32) @ R  # [N, 448]
 
     # [T_store_fused] bu4 single-kernel store fast path.
     #   When SGLANG_RQ_FUSED_STORE=1 AND the layout is the uniform 4-bit
