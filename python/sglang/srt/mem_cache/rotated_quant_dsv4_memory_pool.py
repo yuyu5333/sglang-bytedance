@@ -336,6 +336,33 @@ def _wall_drop_shadow_enabled() -> bool:
     return os.environ.get("SGLANG_RQ_WALL_DROP_SHADOW", "0") == "1"
 
 
+def _wall_marks_are_dead() -> bool:
+    """[P-C] Whether ``dirty_pages`` / ``valid_slots`` marking is pure dead work.
+
+    Both ``_mark_pages_dirty_from_loc`` and ``_mark_slots_valid_from_loc`` write
+    into buffers (``entry.dirty_pages`` / ``entry.valid_slots``) that are
+    consumed **only** inside ``_refresh_shadow_pages`` (see L1507 / L1572). In
+    the production drop_shadow packed-only route the prologue short-circuits
+    the entire refresh chain for BOTH the SWA main window
+    (``SGLANG_RQ_SKIP_SHADOW_REFRESH=1``, default) and the c4/c128 extra pools
+    (``SGLANG_RQ_SKIP_EXTRA_SHADOW_REFRESH``, default=1 when drop_shadow=1).
+
+    When both refreshes are skipped, the per-layer × per-decode-step int64
+    ``.to(int64)`` + ``//`` + ``%`` + ``clamp`` + ``index_fill_`` orchestration
+    these two functions run produces data that nobody ever reads — it is the
+    dominant contributor to the +98ms "elementwise sea" measured by the
+    per-kernel decode-trace diff (``BUnaryFunctor<long>`` / ``add<long>`` /
+    ``index_fill_kernel`` / ``FillFunctor<long>``). Skipping it changes no
+    stored bytes and no quant math, so gsm8k is unaffected.
+    """
+    skip_swa = os.environ.get("SGLANG_RQ_SKIP_SHADOW_REFRESH", "1") == "1"
+    _default_skip = "1" if _wall_drop_shadow_enabled() else "0"
+    skip_extra = (
+        os.environ.get("SGLANG_RQ_SKIP_EXTRA_SHADOW_REFRESH", _default_skip) == "1"
+    )
+    return skip_swa and skip_extra
+
+
 def _wall_drop_shadow_for_kind(kind: str) -> bool:
     """Whether a wall sub-pool can drop its full FP8 shadow allocation."""
     if not _wall_drop_shadow_enabled():
@@ -968,6 +995,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # 不稳定），又略提速。
         if _wall_token_shadow_enabled():
             return
+        # [P-C] dirty_pages is consumed ONLY by _refresh_shadow_pages. In the
+        # production drop_shadow packed-only route the refresh chain is fully
+        # short-circuited, so this int64 index_fill is pure dead work (top
+        # contributor to the +98ms elementwise sea). Skip it — no stored bytes
+        # change, gsm8k unaffected.
+        if _wall_marks_are_dead():
+            return
         if loc.numel() == 0:
             return
         dirty = entry.dirty_pages[local_layer_id]
@@ -997,6 +1031,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         kernel 时一并迁移到 capture-safe API。Step1 主要验证量化数学
         在 ``--disable-cuda-graph`` 下可达 gsm8k ≥ 0.94。
         """
+        # [P-C] valid_slots is consumed ONLY by _refresh_shadow_pages (L1572).
+        # In the drop_shadow packed-only route the refresh chain is fully
+        # short-circuited, so this int64 index_fill is pure dead work (top
+        # contributor to the +98ms elementwise sea). Skip it — no stored bytes
+        # change, gsm8k unaffected.
+        if _wall_marks_are_dead():
+            return
         if loc.numel() == 0:
             return
         valid = entry.valid_slots[local_layer_id]  # [num_pages, page_size] bool
