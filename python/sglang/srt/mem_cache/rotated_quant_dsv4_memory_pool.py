@@ -955,7 +955,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 f"wall packer expects [N, 512] bf16, got {tuple(kv.shape)} "
                 f"{kv.dtype}"
             )
-        return kv.contiguous()
+        # Most DSv4 fused norm+RoPE producers already return a contiguous
+        # [N, 512] BF16 tensor. Avoid launching a redundant device-to-device
+        # copy once the dtype and shape contract is satisfied.
+        return kv if kv.is_contiguous() else kv.contiguous()
 
     def _extra_store_loc(self, kind: str, loc: torch.Tensor) -> torch.Tensor:
         """Mirror native c4/c128 pool address translation before writing wall rows."""
