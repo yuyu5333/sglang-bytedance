@@ -336,6 +336,9 @@ def _wall_drop_shadow_enabled() -> bool:
     return os.environ.get("SGLANG_RQ_WALL_DROP_SHADOW", "0") == "1"
 
 
+_WALL_MARKS_DEAD: Optional[bool] = None
+
+
 def _wall_marks_are_dead() -> bool:
     """[P-C] Whether ``dirty_pages`` / ``valid_slots`` marking is pure dead work.
 
@@ -355,12 +358,19 @@ def _wall_marks_are_dead() -> bool:
     ``index_fill_kernel`` / ``FillFunctor<long>``). Skipping it changes no
     stored bytes and no quant math, so gsm8k is unaffected.
     """
-    skip_swa = os.environ.get("SGLANG_RQ_SKIP_SHADOW_REFRESH", "1") == "1"
-    _default_skip = "1" if _wall_drop_shadow_enabled() else "0"
-    skip_extra = (
-        os.environ.get("SGLANG_RQ_SKIP_EXTRA_SHADOW_REFRESH", _default_skip) == "1"
-    )
-    return skip_swa and skip_extra
+    global _WALL_MARKS_DEAD
+    if _WALL_MARKS_DEAD is None:
+        skip_swa = os.environ.get("SGLANG_RQ_SKIP_SHADOW_REFRESH", "1") == "1"
+        _default_skip = "1" if _wall_drop_shadow_enabled() else "0"
+        skip_extra = (
+            os.environ.get(
+                "SGLANG_RQ_SKIP_EXTRA_SHADOW_REFRESH",
+                _default_skip,
+            )
+            == "1"
+        )
+        _WALL_MARKS_DEAD = skip_swa and skip_extra
+    return _WALL_MARKS_DEAD
 
 
 def _wall_drop_shadow_for_kind(kind: str) -> bool:
