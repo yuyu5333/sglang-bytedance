@@ -798,6 +798,7 @@ def _fused_store_bu4_kernel(
     GROUP_DIM: tl.constexpr,         # 64
     GROUP_BYTES: tl.constexpr,       # 32 (64 dims * 4 bit / 8)
     ROPE_BYTES: tl.constexpr,        # 128
+    REUSE_LOADED: tl.constexpr,
 ):
     t = tl.program_id(0)
     if t >= N:
@@ -818,12 +819,19 @@ def _fused_store_bu4_kernel(
         rng = tl.maximum(mx - mn, 1e-8)
         step = rng / L_f
 
-        # even/odd nibble halves (stride-2 gather via masked reload)
+        # The reduction already loaded the complete group. Reusing it avoids
+        # a second 64-element global read, but is left as a compile-time
+        # canary because keeping the vector live can raise register pressure.
         blane = tl.arange(0, GROUP_BYTES)  # [32]
-        lo_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + 2 * blane
-        hi_off = lo_off + 1
-        xlo = tl.load(k_rot_ptr + lo_off)
-        xhi = tl.load(k_rot_ptr + hi_off)
+        if REUSE_LOADED:
+            x_pairs = tl.reshape(x, (GROUP_BYTES, 2))
+            xlo = x_pairs[:, 0]
+            xhi = x_pairs[:, 1]
+        else:
+            lo_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + 2 * blane
+            hi_off = lo_off + 1
+            xlo = tl.load(k_rot_ptr + lo_off)
+            xhi = tl.load(k_rot_ptr + hi_off)
         clo = tl.floor((xlo - mn) / step + 0.5)
         chi = tl.floor((xhi - mn) / step + 0.5)
         clo = tl.minimum(tl.maximum(clo, 0.0), L_f).to(tl.int32)
@@ -890,6 +898,7 @@ def triton_fused_store_bu4(
             "SGLANG_RQ_FUSED_STORE_STAGES must be one of 1,2,3,4, "
             f"got {num_stages}"
         )
+    reuse_loaded = os.environ.get("SGLANG_RQ_FUSED_STORE_REUSE_LOAD", "0") == "1"
     _fused_store_bu4_kernel[(N,)](
         k_rot, input_bf16, cache_flat, indices,
         N, int(bpt),
@@ -900,6 +909,7 @@ def triton_fused_store_bu4(
         GROUP_DIM=64,
         GROUP_BYTES=32,
         ROPE_BYTES=128,
+        REUSE_LOADED=reuse_loaded,
         num_warps=num_warps,
         num_stages=num_stages,
     )
