@@ -282,7 +282,10 @@ def rotated_store_to_packed(
     # production default remains the FP32 reference; enable this isolated
     # experiment with SGLANG_RQ_BF16_ROTATE=1.
     if _os.environ.get("SGLANG_RQ_BF16_ROTATE", "0") == "1":
-        K_rot = (nope @ R_bf16).to(torch.float32)
+        if _os.environ.get("SGLANG_RQ_BF16_ROTATE_MM", "0") == "1":
+            K_rot = torch.mm(nope, R_bf16).to(torch.float32)
+        else:
+            K_rot = (nope @ R_bf16).to(torch.float32)
     else:
         K_rot = nope.to(torch.float32) @ R  # [N, 448]
 
