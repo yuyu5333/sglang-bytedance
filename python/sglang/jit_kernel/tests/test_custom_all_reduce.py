@@ -190,6 +190,7 @@ def worker_test(
 
     run_fn = get_run_graph_fn() if use_graph else get_run_eager_fn()
     num_errors = 0
+    inp = None
     for _ in range(TEST_LOOP):
         # NOTE: 15 * 8 < 128, which is the precision limit for bf16
         inp = torch.randint(0, 16, (TEST_LAYERS, size), dtype=dtype, device=device)
@@ -203,6 +204,20 @@ def worker_test(
             f"Test failed for {size=}, {dtype=}, {algo=}, "
             f"{use_graph=} with {num_errors} errors. "
         )
+    if os.environ.get("SGLANG_CUSTOM_AR_FOCUSED_640K") == "1":
+        assert inp is not None
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(100):
+            run_fn(inp)
+        end.record()
+        end.synchronize()
+        if dist.get_rank() == 0:
+            print(
+                f"focused_640k {algo.name} "
+                f"{start.elapsed_time(end) * 10.0 / TEST_LAYERS:.3f} us/layer"
+            )
     return None
 
 
@@ -223,7 +238,16 @@ def worker_main() -> None:
                     AllReduceAlgo.ONE_SHOT_PUSH,
                     True,
                 ),
-            )
+            ),
+            (
+                1,
+                (
+                    FOCUSED_PUSH_SIZE,
+                    torch.bfloat16,
+                    AllReduceAlgo.TWO_SHOT_PULL,
+                    True,
+                ),
+            ),
         ]
     else:
         items = list(enumerate(TEST_CONFIG))
