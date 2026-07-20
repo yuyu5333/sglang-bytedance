@@ -878,6 +878,12 @@ def triton_fused_store_bu4(
     if not indices.is_contiguous():
         indices = indices.contiguous()
     cache_flat = cache.view(-1)
+    import os
+    num_warps = int(os.environ.get("SGLANG_RQ_FUSED_STORE_WARPS", "4"))
+    if num_warps not in (1, 2, 4, 8):
+        raise ValueError(
+            f"SGLANG_RQ_FUSED_STORE_WARPS must be one of 1,2,4,8, got {num_warps}"
+        )
     _fused_store_bu4_kernel[(N,)](
         k_rot, input_bf16, cache_flat, indices,
         N, int(bpt),
@@ -888,7 +894,7 @@ def triton_fused_store_bu4(
         GROUP_DIM=64,
         GROUP_BYTES=32,
         ROPE_BYTES=128,
-        num_warps=4,
+        num_warps=num_warps,
     )
 
 
