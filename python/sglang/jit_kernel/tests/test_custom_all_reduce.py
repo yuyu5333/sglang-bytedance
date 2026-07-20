@@ -72,6 +72,7 @@ USE_GRAPH_OPTIONS = [True, False]
 TEST_CONFIG = itertools.product(TEST_SIZES, TEST_DTYPES, SHOTS, USE_GRAPH_OPTIONS)
 TEST_LAYERS = 4
 TEST_LOOP = 16
+FOCUSED_PUSH_SIZE = 320 * 1024  # 640 KiB bf16, above TP8's default push limit.
 
 # ---------------------------------------------------------------------------
 # Test class (runs via pytest, launches torchrun subprocesses)
@@ -212,7 +213,20 @@ def worker_main() -> None:
     torch.cuda.set_stream(torch.cuda.Stream())
 
     logging.disable(logging.INFO)  # Suppress internal logging for cleaner test output
-    items = list(enumerate(TEST_CONFIG))
+    if os.environ.get("SGLANG_CUSTOM_AR_FOCUSED_640K") == "1":
+        items = [
+            (
+                0,
+                (
+                    FOCUSED_PUSH_SIZE,
+                    torch.bfloat16,
+                    AllReduceAlgo.ONE_SHOT_PUSH,
+                    True,
+                ),
+            )
+        ]
+    else:
+        items = list(enumerate(TEST_CONFIG))
     for i, (size, dtype, algo, use_graph) in items:
         error = worker_test(device, nccl_group, comm, size, dtype, use_graph, algo)
         if error is not None:

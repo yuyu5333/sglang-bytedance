@@ -1,5 +1,4 @@
 import logging
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, TypeVar
@@ -62,13 +61,6 @@ class CustomAllReduceV2:
         self.max_push_size = max_push_size
         self.max_size = max(max_pull_size, max_push_size)
         self.override_shot(None)  # set default config based on world size
-        if os.environ.get("SGLANG_CUSTOM_ALL_REDUCE_FORCE_SHOT") == "1":
-            self.override_shot(1)
-            log_info_on_rank0(
-                logger,
-                "Custom allreduce v2 forcing one-shot pull via "
-                "SGLANG_CUSTOM_ALL_REDUCE_FORCE_SHOT=1",
-            )
         self.override_algo: Optional[AllReduceAlgo] = None
         self.obj = get_custom_all_reduce_cls()(
             rank=self.rank,
