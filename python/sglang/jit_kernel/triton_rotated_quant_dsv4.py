@@ -786,7 +786,7 @@ def triton_fused_refresh_shadow_scatter(
 @triton.jit
 def _fused_store_bu4_kernel(
     k_rot_ptr,      # [N, 448] fp32 (already nope @ R)
-    rope_u8_ptr,    # [N, 128] uint8 (raw bf16 rope bytes)
+    input_bf16_ptr, # [N, 512] bf16 (raw rope starts at element 448)
     cache_ptr,      # [num_pages * bpt] uint8 (flat)
     indices_ptr,    # [N] integer (int32/int64), -1 sentinel for invalid
     N,
@@ -840,15 +840,19 @@ def _fused_store_bu4_kernel(
         tl.store(cache_ptr + hb + 2, (rng_h & 0xFF).to(tl.uint8))
         tl.store(cache_ptr + hb + 3, ((rng_h >> 8) & 0xFF).to(tl.uint8))
 
-    # rope: raw byte copy
-    rlane = tl.arange(0, ROPE_BYTES)
-    rv = tl.load(rope_u8_ptr + t * ROPE_BYTES + rlane)
-    tl.store(cache_ptr + row_base + ROPE_OFF + rlane, rv)
+    # Rope: read 64 BF16 values directly from the original contiguous input
+    # and write their two raw bytes. This avoids materializing a contiguous
+    # uint8 copy of the non-contiguous [N, 64] rope slice on every store.
+    rlane = tl.arange(0, ROPE_BYTES // 2)
+    rv = tl.load(input_bf16_ptr + t * (GROUPS * GROUP_DIM + ROPE_BYTES // 2) + 448 + rlane)
+    rv_u16 = rv.to(tl.uint16, bitcast=True)
+    tl.store(cache_ptr + row_base + ROPE_OFF + 2 * rlane, (rv_u16 & 0xFF).to(tl.uint8))
+    tl.store(cache_ptr + row_base + ROPE_OFF + 2 * rlane + 1, (rv_u16 >> 8).to(tl.uint8))
 
 
 def triton_fused_store_bu4(
     k_rot: torch.Tensor,     # [N, 448] fp32 (nope @ R)
-    rope_u8: torch.Tensor,   # [N, 128] uint8
+    input_bf16: torch.Tensor, # [N, 512] bf16, raw rope source
     cache: torch.Tensor,     # [num_pages, bpt] uint8
     indices: torch.Tensor,   # [N] int32/int64 (-1 sentinel)
     *,
@@ -859,24 +863,23 @@ def triton_fused_store_bu4(
     ``cache`` is written in place at ``cache.view(-1)[loc*bpt : loc*bpt+bpt]``
     for each valid ``loc``; ``loc < 0`` tokens are skipped (capture-safe).
     """
-    assert k_rot.is_cuda and rope_u8.is_cuda and cache.is_cuda and indices.is_cuda
+    assert k_rot.is_cuda and input_bf16.is_cuda and cache.is_cuda and indices.is_cuda
     assert k_rot.dtype == torch.float32, f"k_rot must be fp32, got {k_rot.dtype}"
-    assert rope_u8.dtype == torch.uint8 and cache.dtype == torch.uint8
+    assert input_bf16.dtype == torch.bfloat16 and cache.dtype == torch.uint8
     assert indices.dtype in (torch.int32, torch.int64)
     N = int(k_rot.shape[0])
     if N == 0:
         return
     assert k_rot.shape[1] == _MLA_NOPE_DIM, f"k_rot dim {k_rot.shape[1]} != 448"
-    assert rope_u8.shape == (N, 128), f"rope_u8 {tuple(rope_u8.shape)} != ({N},128)"
+    assert input_bf16.shape == (N, 512), f"input_bf16 {tuple(input_bf16.shape)} != ({N},512)"
     if not k_rot.is_contiguous():
         k_rot = k_rot.contiguous()
-    if not rope_u8.is_contiguous():
-        rope_u8 = rope_u8.contiguous()
+    assert input_bf16.is_contiguous(), "input_bf16 must be contiguous"
     if not indices.is_contiguous():
         indices = indices.contiguous()
     cache_flat = cache.view(-1)
     _fused_store_bu4_kernel[(N,)](
-        k_rot, rope_u8, cache_flat, indices,
+        k_rot, input_bf16, cache_flat, indices,
         N, int(bpt),
         NOPE_CODE_BYTES=224,
         HEADER_OFF=224,

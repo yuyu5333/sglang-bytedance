@@ -261,7 +261,6 @@ def rotated_store_to_packed(
     if indices.shape != (N,):
         raise ValueError(f"indices shape {tuple(indices.shape)} != ({N},)")
     nope = input_bf16[:, :_MLA_NOPE_DIM].contiguous()
-    rope = input_bf16[:, _MLA_NOPE_DIM:].contiguous()
 
     # --- T3: 整个 store 全 GPU 路径
     #   1) rotate + affine quant + round + clamp 全走 GPU torch
@@ -296,9 +295,8 @@ def rotated_store_to_packed(
         from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
             triton_fused_store_bu4,
         )
-        rope_u8 = rope.contiguous().view(torch.uint8).reshape(N, _ROPE_BYTES)
         triton_fused_store_bu4(
-            K_rot, rope_u8, cache, indices, bpt=bpt,
+            K_rot, input_bf16, cache, indices, bpt=bpt,
         )
         return
 
@@ -306,6 +304,7 @@ def rotated_store_to_packed(
     # Keep this conversion in the legacy path only; otherwise every fused
     # store paid for an unused int64 device copy before the early return.
     indices_i64 = indices.to(torch.int64)
+    rope = input_bf16[:, _MLA_NOPE_DIM:].contiguous()
 
     # Route G uniform path: per-token × per-group(64) dynamic affine.
     # The per-dim calib (scale,zero,levels) is bypassed in favor of a
