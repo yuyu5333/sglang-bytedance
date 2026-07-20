@@ -260,8 +260,6 @@ def rotated_store_to_packed(
         )
     if indices.shape != (N,):
         raise ValueError(f"indices shape {tuple(indices.shape)} != ({N},)")
-    indices_i64 = indices.to(torch.int64)
-
     nope = input_bf16[:, :_MLA_NOPE_DIM].contiguous()
     rope = input_bf16[:, _MLA_NOPE_DIM:].contiguous()
 
@@ -303,6 +301,11 @@ def rotated_store_to_packed(
             K_rot, rope_u8, cache, indices, bpt=bpt,
         )
         return
+
+    # The fused bu4 path accepts the original int32/int64 indices directly.
+    # Keep this conversion in the legacy path only; otherwise every fused
+    # store paid for an unused int64 device copy before the early return.
+    indices_i64 = indices.to(torch.int64)
 
     # Route G uniform path: per-token × per-group(64) dynamic affine.
     # The per-dim calib (scale,zero,levels) is bypassed in favor of a
