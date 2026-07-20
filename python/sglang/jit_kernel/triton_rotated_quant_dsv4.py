@@ -884,6 +884,12 @@ def triton_fused_store_bu4(
         raise ValueError(
             f"SGLANG_RQ_FUSED_STORE_WARPS must be one of 1,2,4,8, got {num_warps}"
         )
+    num_stages = int(os.environ.get("SGLANG_RQ_FUSED_STORE_STAGES", "2"))
+    if num_stages not in (1, 2, 3, 4):
+        raise ValueError(
+            "SGLANG_RQ_FUSED_STORE_STAGES must be one of 1,2,3,4, "
+            f"got {num_stages}"
+        )
     _fused_store_bu4_kernel[(N,)](
         k_rot, input_bf16, cache_flat, indices,
         N, int(bpt),
@@ -895,6 +901,7 @@ def triton_fused_store_bu4(
         GROUP_BYTES=32,
         ROPE_BYTES=128,
         num_warps=num_warps,
+        num_stages=num_stages,
     )
 
 
