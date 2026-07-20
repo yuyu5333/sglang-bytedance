@@ -147,6 +147,41 @@ def _mark_dynamic_forward_batch(forward_batch) -> None:
         _mark_dynamic_on_value(value, dims)
 
 
+def _raise_dynamo_recompile_limit(limit: int = 1024) -> None:
+    """Lift Dynamo's per-code recompile cap for the tc_piecewise path.
+
+    The tc_piecewise prefill path compiles ``language_model.model.forward``
+    once per capture shape (one entry per ``cuda_graph_config.prefill.bs``
+    bucket, e.g. 58 buckets for ``--cuda-graph-max-bs 64``). Each distinct
+    ``num_tokens`` re-triggers a Dynamo compile on the same code object, so
+    the number of recompiles equals the number of capture shapes.
+
+    Dynamo's default ``recompile_limit`` (aka ``cache_size_limit``) is 8.
+    Under ``fullgraph=True`` exceeding it raises
+    ``FailOnRecompileLimitHit`` and kills the scheduler during CUDA graph
+    capture. This path does NOT go through
+    ``torch_compile_decoration.set_torch_compile_config`` (that helper only
+    serves ``--enable-torch-compile``), so the cap must be raised here.
+
+    Mirrors the 1024 value already used by the decode-Full and CPU-graph
+    paths. Both ``recompile_limit`` and the legacy ``cache_size_limit``
+    alias are set for cross-version safety.
+    """
+    dynamo_config = torch._dynamo.config
+    if hasattr(dynamo_config, "recompile_limit"):
+        dynamo_config.recompile_limit = max(dynamo_config.recompile_limit, limit)
+    if hasattr(dynamo_config, "cache_size_limit"):
+        dynamo_config.cache_size_limit = max(dynamo_config.cache_size_limit, limit)
+    if hasattr(dynamo_config, "accumulated_recompile_limit"):
+        dynamo_config.accumulated_recompile_limit = max(
+            dynamo_config.accumulated_recompile_limit, limit
+        )
+    if hasattr(dynamo_config, "accumulated_cache_size_limit"):
+        dynamo_config.accumulated_cache_size_limit = max(
+            dynamo_config.accumulated_cache_size_limit, limit
+        )
+
+
 def install_torch_compiled(
     module: torch.nn.Module,
     *,
@@ -160,6 +195,10 @@ def install_torch_compiled(
     if not callable(unbound_fwd):
         raise TypeError("module.__class__.forward must be callable")
     original_code = unbound_fwd.__code__
+
+    # Per-shape compiles on this code object must not trip Dynamo's default
+    # recompile cap of 8 while capturing all prefill CUDA graph shapes.
+    _raise_dynamo_recompile_limit()
 
     dyn_map = dynamic_arg_dims or _infer_dynamic_arg_dims_from_annotations(unbound_fwd)
 
