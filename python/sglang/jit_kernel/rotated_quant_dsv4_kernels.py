@@ -260,9 +260,7 @@ def rotated_store_to_packed(
         )
     if indices.shape != (N,):
         raise ValueError(f"indices shape {tuple(indices.shape)} != ({N},)")
-    # The subsequent BF16->FP32 conversion already materializes a dense
-    # matrix for the GEMM. Do not first copy the non-contiguous nope slice.
-    nope = input_bf16[:, :_MLA_NOPE_DIM]
+    nope = input_bf16[:, :_MLA_NOPE_DIM].contiguous()
 
     # --- T3: 整个 store 全 GPU 路径
     #   1) rotate + affine quant + round + clamp 全走 GPU torch
