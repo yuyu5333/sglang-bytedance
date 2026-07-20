@@ -260,7 +260,17 @@ def rotated_store_to_packed(
         )
     if indices.shape != (N,):
         raise ValueError(f"indices shape {tuple(indices.shape)} != ({N},)")
-    nope = input_bf16[:, :_MLA_NOPE_DIM].contiguous()
+    # The BF16 GEMM can consume the strided nope view directly. Keep the
+    # contiguous materialization as the default because the FP32 reference
+    # path is sensitive to its input layout; the canary isolates only the
+    # BF16 rotation implementation.
+    if (
+        _os.environ.get("SGLANG_RQ_BF16_ROTATE", "0") == "1"
+        and _os.environ.get("SGLANG_RQ_BF16_ROTATE_NOCOPY", "0") == "1"
+    ):
+        nope = input_bf16[:, :_MLA_NOPE_DIM]
+    else:
+        nope = input_bf16[:, :_MLA_NOPE_DIM].contiguous()
 
     # --- T3: 整个 store 全 GPU 路径
     #   1) rotate + affine quant + round + clamp 全走 GPU torch
