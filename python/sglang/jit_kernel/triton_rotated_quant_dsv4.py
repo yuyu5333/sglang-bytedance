@@ -799,6 +799,7 @@ def _fused_store_bu4_kernel(
     GROUP_BYTES: tl.constexpr,       # 32 (64 dims * 4 bit / 8)
     ROPE_BYTES: tl.constexpr,        # 128
     REUSE_GROUP_LOAD: tl.constexpr,
+    VEC_HEADER: tl.constexpr,
 ):
     t = tl.program_id(0)
     if t >= N:
@@ -823,7 +824,6 @@ def _fused_store_bu4_kernel(
         # reduction form avoids Triton tensor column indexing, which is not
         # supported by the container's frontend.
         blane = tl.arange(0, GROUP_BYTES)  # [32]
-        reuse_load = tl.full((), 0, tl.int1)
         if REUSE_GROUP_LOAD:
             x_pairs = tl.reshape(x, (GROUP_BYTES, 2))
             pair_lane = tl.arange(0, 2)
@@ -845,10 +845,21 @@ def _fused_store_bu4_kernel(
         mn_h = mn.to(tl.float16).to(tl.uint16, bitcast=True)
         rng_h = rng.to(tl.float16).to(tl.uint16, bitcast=True)
         hb = row_base + HEADER_OFF + g * 4
-        tl.store(cache_ptr + hb + 0, (mn_h & 0xFF).to(tl.uint8))
-        tl.store(cache_ptr + hb + 1, ((mn_h >> 8) & 0xFF).to(tl.uint8))
-        tl.store(cache_ptr + hb + 2, (rng_h & 0xFF).to(tl.uint8))
-        tl.store(cache_ptr + hb + 3, ((rng_h >> 8) & 0xFF).to(tl.uint8))
+        if VEC_HEADER:
+            h_lane = tl.arange(0, 2)
+            mn_bytes = tl.where(
+                h_lane == 0, mn_h & 0xFF, (mn_h >> 8) & 0xFF
+            ).to(tl.uint8)
+            rng_bytes = tl.where(
+                h_lane == 0, rng_h & 0xFF, (rng_h >> 8) & 0xFF
+            ).to(tl.uint8)
+            tl.store(cache_ptr + hb + h_lane, mn_bytes)
+            tl.store(cache_ptr + hb + 2 + h_lane, rng_bytes)
+        else:
+            tl.store(cache_ptr + hb + 0, (mn_h & 0xFF).to(tl.uint8))
+            tl.store(cache_ptr + hb + 1, ((mn_h >> 8) & 0xFF).to(tl.uint8))
+            tl.store(cache_ptr + hb + 2, (rng_h & 0xFF).to(tl.uint8))
+            tl.store(cache_ptr + hb + 3, ((rng_h >> 8) & 0xFF).to(tl.uint8))
 
     # Rope: read 64 BF16 values directly from the original contiguous input
     # and write their two raw bytes. This avoids materializing a contiguous
@@ -912,6 +923,9 @@ def triton_fused_store_bu4(
         ROPE_BYTES=128,
         REUSE_GROUP_LOAD=bool(
             os.environ.get("SGLANG_RQ_FUSED_STORE_REUSE_LOAD", "0") == "1"
+        ),
+        VEC_HEADER=bool(
+            os.environ.get("SGLANG_RQ_FUSED_STORE_VEC_HEADER", "0") == "1"
         ),
         num_warps=num_warps,
         num_stages=num_stages,
