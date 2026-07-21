@@ -798,6 +798,7 @@ def _fused_store_bu4_kernel(
     GROUP_DIM: tl.constexpr,         # 64
     GROUP_BYTES: tl.constexpr,       # 32 (64 dims * 4 bit / 8)
     ROPE_BYTES: tl.constexpr,        # 128
+    REUSE_GROUP_LOAD: tl.constexpr,
 ):
     t = tl.program_id(0)
     if t >= N:
@@ -818,12 +819,21 @@ def _fused_store_bu4_kernel(
         rng = tl.maximum(mx - mn, 1e-8)
         step = rng / L_f
 
-        # even/odd nibble halves (stride-2 gather via masked reload)
+        # Reuse the 64 values loaded for min/max when requested. The
+        # reduction form avoids Triton tensor column indexing, which is not
+        # supported by the container's frontend.
         blane = tl.arange(0, GROUP_BYTES)  # [32]
-        lo_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + 2 * blane
-        hi_off = lo_off + 1
-        xlo = tl.load(k_rot_ptr + lo_off)
-        xhi = tl.load(k_rot_ptr + hi_off)
+        reuse_load = tl.full((), 0, tl.int1)
+        if REUSE_GROUP_LOAD:
+            x_pairs = tl.reshape(x, (GROUP_BYTES, 2))
+            pair_lane = tl.arange(0, 2)
+            xlo = tl.sum(tl.where(pair_lane == 0, x_pairs, 0.0), axis=1)
+            xhi = tl.sum(tl.where(pair_lane == 1, x_pairs, 0.0), axis=1)
+        else:
+            lo_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + 2 * blane
+            hi_off = lo_off + 1
+            xlo = tl.load(k_rot_ptr + lo_off)
+            xhi = tl.load(k_rot_ptr + hi_off)
         clo = tl.floor((xlo - mn) / step + 0.5)
         chi = tl.floor((xhi - mn) / step + 0.5)
         clo = tl.minimum(tl.maximum(clo, 0.0), L_f).to(tl.int32)
@@ -900,6 +910,9 @@ def triton_fused_store_bu4(
         GROUP_DIM=64,
         GROUP_BYTES=32,
         ROPE_BYTES=128,
+        REUSE_GROUP_LOAD=bool(
+            os.environ.get("SGLANG_RQ_FUSED_STORE_REUSE_LOAD", "0") == "1"
+        ),
         num_warps=num_warps,
         num_stages=num_stages,
     )
