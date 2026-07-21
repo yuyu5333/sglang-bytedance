@@ -579,12 +579,6 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
 
         # Wall-storage state.
         self._wall_pools: Dict[str, _WallPoolEntry] = {}
-        # Optional canary: packed rows and calibration views are immutable
-        # after wall storage installation, so they can be reused across
-        # decode steps instead of rebuilding the kwargs dict each layer.
-        self._packed_kwargs_cache: Dict[
-            Tuple[int, str], Dict[str, torch.Tensor]
-        ] = {}
 
         if self._mode == "wall":
             self._install_wall_storage()
@@ -1945,12 +1939,6 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             )
         if layer_id not in self._nope_cfgs:
             return None
-        cache_key = (int(layer_id), str(kind))
-        if (
-            os.environ.get("SGLANG_RQ_CACHE_PACKED_KWARGS", "0") == "1"
-            and cache_key in self._packed_kwargs_cache
-        ):
-            return self._packed_kwargs_cache[cache_key]
         cfg = self._nope_cfgs[layer_id]
         packed_page_buf = entry.packed_buffers[local_layer_id]
         device = packed_page_buf.device
@@ -2004,7 +1992,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                     print(f"[KDUMP5-read] dump failed: {_e}", flush=True)
 
         _bu = int(getattr(cfg, "bit_uniform", 0) or 0)
-        packed_kwargs = {
+        return {
             "packed_kcache": packed_rows,
             "scale_kcache": cfg_gpu["scale"],
             # [step3r] uniform-bit path (bit_uniform>0) consumes a BF16
@@ -2022,9 +2010,6 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             # fp16 affine header path in splitkv_mla.cuh.
             "bit_uniform": _bu,
         }
-        if os.environ.get("SGLANG_RQ_CACHE_PACKED_KWARGS", "0") == "1":
-            self._packed_kwargs_cache[cache_key] = packed_kwargs
-        return packed_kwargs
 
     # ------------------------------------------------------------------
     # Eval-mode interface (M3.b)
