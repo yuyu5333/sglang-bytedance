@@ -1349,19 +1349,6 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         freqs_cis: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-<<<<<<< HEAD
-        if _kv_dump_enabled():
-            _kv_dump_capture(
-                layer_id, kv, kv_weight, eps, freqs_cis, positions
-            )
-        if self._should_cache_swa:
-            if layer_id == self.start_layer or self.cached_loc is None:
-                self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
-            swa_loc = self.cached_loc
-        else:
-            swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
-=======
->>>>>>> upupstream/main
         fused_k_norm_rope_flashmla(
             kv=kv,
             kv_weight=kv_weight,
