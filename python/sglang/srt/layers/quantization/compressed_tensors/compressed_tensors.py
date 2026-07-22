@@ -143,42 +143,10 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "compressed_tensors"
 
-    def is_w4afp8_config(self) -> bool:
-        linear_scheme = self.target_scheme_map.get("Linear", {})
-        weight_quant = linear_scheme.get("weights")
-        input_quant = linear_scheme.get("input_activations")
-        if weight_quant is None or input_quant is None:
-            return False
-
-        weight_type = getattr(weight_quant.type, "value", weight_quant.type)
-        input_type = getattr(input_quant.type, "value", input_quant.type)
-        return (
-            self.quant_format == CompressionFormat.pack_quantized.value
-            and weight_quant.num_bits == 4
-            and weight_type == "int"
-            and input_quant.num_bits == 8
-            and input_type in ["float", "int"]
-            and input_quant.dynamic
-        )
-
-    def is_w4a16_config(self) -> bool:
-        linear_scheme = self.target_scheme_map.get("Linear", {})
-        weight_quant = linear_scheme.get("weights")
-        input_quant = linear_scheme.get("input_activations")
-        if weight_quant is None or input_quant is not None:
-            return False
-
-        weight_type = getattr(weight_quant.type, "value", weight_quant.type)
-        return (
-            self.quant_format == CompressionFormat.pack_quantized.value
-            and weight_quant.num_bits == 4
-            and weight_type == "int"
-        )
-
     def get_scaled_act_names(self) -> List[str]:
         return []
 
-    def apply_weight_name_mapper(self, hf_to_sglang_mapper: "WeightsMapper"):
+    def apply_weight_name_mapper(self, hf_to_sglang_mapper: WeightsMapper):
         self.target_scheme_map = hf_to_sglang_mapper.apply_dict(self.target_scheme_map)
         self.ignore = hf_to_sglang_mapper.apply_list(self.ignore)
         self.sparsity_scheme_map = hf_to_sglang_mapper.apply_dict(
@@ -399,18 +367,31 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_dynamic
         )
 
-    def _is_w4afp8(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
-        """Detect W4AFP8: INT4 weights + 8-bit dynamic per-token activations."""
+    def _is_wint4afp8(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
+        """Detect W4AFP8: packed INT4 weights + 8-bit dynamic per-token activations."""
         if weight_quant is None or input_quant is None:
             return False
         return (
-            weight_quant.num_bits == 4
+            self.quant_format == CompressionFormat.pack_quantized.value
+            and weight_quant.num_bits == 4
             and weight_quant.type == QuantizationType.INT
             and weight_quant.symmetric
             and not weight_quant.dynamic
             and input_quant.num_bits == 8
             and input_quant.type in [QuantizationType.FLOAT, QuantizationType.INT]
             and input_quant.dynamic  # currently not support static input scales
+        )
+
+    def _is_wint4abf16(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
+        """Detect W4A16: packed INT4 weights with no activation quantization (activations stay BF16)."""
+        if weight_quant is None or input_quant is not None:
+            return False
+        return (
+            self.quant_format == CompressionFormat.pack_quantized.value
+            and weight_quant.num_bits == 4
+            and weight_quant.type == QuantizationType.INT
+            and weight_quant.symmetric
+            and not weight_quant.dynamic
         )
 
     def _is_static_tensor_w8a8(
@@ -543,14 +524,16 @@ class CompressedTensorsConfig(QuantizationConfig):
         self, weight_quant: BaseModel, input_quant: BaseModel
     ) -> bool:
         input_quant_none = input_quant is None
-        is_symmetric = weight_quant.symmetric
         is_channel_group = (
             weight_quant.strategy == QuantizationStrategy.CHANNEL.value
             or weight_quant.strategy == QuantizationStrategy.GROUP.value
         )
         is_static = not weight_quant.dynamic
 
-        return is_channel_group and input_quant_none and is_symmetric and is_static
+        # Both symmetric and asymmetric weight quant are handled by
+        # CompressedTensorsWNA16 via the Marlin kernel path; asymmetric
+        # checkpoints carry a weight zero-point.
+        return is_channel_group and input_quant_none and is_static
 
     def _is_mxint4a16(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
@@ -602,6 +585,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
                     group_size=weight_quant.group_size,
+                    symmetric=weight_quant.symmetric,
                     actorder=weight_quant.actorder,
                 )
             else:
@@ -727,10 +711,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                     logger.info_once(
                         "Using CompressedTensorsMxInt4MoE with flashinfer_trtllm backend"
                     )
-                    return CompressedTensorsMxInt4MoE(self)
+                    return CompressedTensorsMxInt4MoE(self, weight_quant=weight_quant)
                 elif _is_hip:
                     logger.info_once("Using CompressedTensorsWNA16TritonMoE (ROCm)")
-                    return CompressedTensorsWNA16TritonMoE(self)
+                    return CompressedTensorsWNA16TritonMoE(
+                        self, weight_quant=weight_quant
+                    )
                 else:
                     moe_backend = get_moe_runner_backend()
                     if moe_backend.is_triton():
@@ -738,9 +724,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                             "Using CompressedTensorsWNA16TritonMoE "
                             "(moe_runner_backend=triton)"
                         )
-                        return CompressedTensorsWNA16TritonMoE(self)
+                        return CompressedTensorsWNA16TritonMoE(
+                            self, weight_quant=weight_quant
+                        )
                     logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
-                    return CompressedTensorsWNA16MoE(self)
+                    return CompressedTensorsWNA16MoE(self, weight_quant=weight_quant)
             else:
                 if (
                     self._is_dynamic_token_w4(weight_quant, input_quant)
@@ -762,12 +750,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                 raise NotImplementedError(
                     f"The W8A8Int8 Fused MoE scheme is implemented only for NPU for now."
                 )
-        elif self._is_w4afp8(weight_quant, input_quant):
+        elif self._is_wint4afp8(weight_quant, input_quant):
             # On NPU prefer the dedicated NPU W4A8Int8 path when activations are INT8.
-            if (
-                _is_npu
-                and self._is_dynamic_token_w4a8(weight_quant, input_quant)
-            ):
+            if _is_npu and self._is_dynamic_token_w4a8(weight_quant, input_quant):
                 logger.info_once("Using NPUCompressedTensorsW4A8Int8DynamicMoE")
                 return NPUCompressedTensorsW4A8Int8DynamicMoE(self)
             logger.info_once("Using CompressedTensorsW4AFP8MoE")
@@ -1081,7 +1066,6 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
         layer input.  See LinearMethodBase for param details
 
         """
-
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
