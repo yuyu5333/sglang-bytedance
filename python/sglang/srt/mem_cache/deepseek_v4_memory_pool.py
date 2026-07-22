@@ -634,7 +634,12 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         self._should_cache_swa = envs.SGLANG_OPT_CACHE_SWA_TRANSLATION.get()
 
     def register_mapping(self, full_to_swa_index_mapping: torch.Tensor):
-        self.full_to_swa_index_mapping = full_to_swa_index_mapping
+        # The mapping is immutable after pool construction and all translated
+        # locations are consumed as int32. Normalize it once instead of
+        # launching a dtype conversion for every layer and decode step.
+        self.full_to_swa_index_mapping = full_to_swa_index_mapping.to(
+            dtype=torch.int32
+        )
 
     def get_ring_size(self, compress_ratio: int) -> int:
         server_args = get_global_server_args()
@@ -644,7 +649,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
     def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor):
         assert self.full_to_swa_index_mapping is not None
 
-        return self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
+        return self.full_to_swa_index_mapping[kv_indices]
 
     def set_swa_loc(self, loc: torch.Tensor) -> None:
         # No-op: SWAKVPool's set_swa_loc precomputes SWA-translated loc once per
