@@ -84,7 +84,25 @@ class CompressorBackendMixin:
                 kv_score_buffer = kv_score_buffer.view(-1, compress_ratio, last_dim)
         else:
             plan = make_compressor_plan(compress_ratio, forward_batch)
-            metadata = (forward_batch.req_pool_indices.to(torch.int32), None, plan)
+            if (
+                envs.SGLANG_DSV4_CACHE_DECODE_METADATA.get()
+                and forward_batch.forward_mode.is_decode()
+            ):
+                req_pool_indices_i32 = getattr(
+                    forward_batch, "_dsv4_req_pool_indices_i32", None
+                )
+                if req_pool_indices_i32 is None:
+                    req_pool_indices_i32 = forward_batch.req_pool_indices.to(
+                        torch.int32
+                    )
+                    forward_batch._dsv4_req_pool_indices_i32 = (
+                        req_pool_indices_i32
+                    )
+            else:
+                req_pool_indices_i32 = forward_batch.req_pool_indices.to(
+                    torch.int32
+                )
+            metadata = (req_pool_indices_i32, None, plan)
         indices, extra_data, plan = metadata
 
         kv_compressed = compress_forward(
@@ -183,7 +201,15 @@ def make_compressor_plan(
     forward_batch: ForwardBatch,
 ) -> Union[CompressorDecodePlan, CompressorPrefillPlan]:
     if forward_batch.forward_mode.is_decode():
-        seq_lens_32 = forward_batch.seq_lens.to(torch.int32)
+        if envs.SGLANG_DSV4_CACHE_DECODE_METADATA.get():
+            seq_lens_32 = getattr(
+                forward_batch, "_dsv4_seq_lens_i32", None
+            )
+            if seq_lens_32 is None:
+                seq_lens_32 = forward_batch.seq_lens.to(torch.int32)
+                forward_batch._dsv4_seq_lens_i32 = seq_lens_32
+        else:
+            seq_lens_32 = forward_batch.seq_lens.to(torch.int32)
         return CompressorDecodePlan(compress_ratio, seq_lens_32)
     if forward_batch.forward_mode.is_prefill():
         assert not forward_batch.forward_mode.is_target_verify()
