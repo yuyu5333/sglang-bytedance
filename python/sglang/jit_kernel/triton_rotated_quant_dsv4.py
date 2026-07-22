@@ -785,7 +785,7 @@ def triton_fused_refresh_shadow_scatter(
 # ---------------------------------------------------------------------------
 @triton.jit
 def _fused_store_bu4_kernel(
-    k_rot_ptr,      # [N, 448] fp32 or bf16 (already nope @ R)
+    k_rot_ptr,      # [N, 448] fp32 (already nope @ R)
     input_bf16_ptr, # [N, 512] bf16 (raw rope starts at element 448)
     cache_ptr,      # [num_pages * bpt] uint8 (flat)
     indices_ptr,    # [N] integer (int32/int64), -1 sentinel for invalid
@@ -800,7 +800,6 @@ def _fused_store_bu4_kernel(
     ROPE_BYTES: tl.constexpr,        # 128
     REUSE_GROUP_LOAD: tl.constexpr,
     VEC_HEADER: tl.constexpr,
-    K_ROT_BF16: tl.constexpr,
 ):
     t = tl.program_id(0)
     if t >= N:
@@ -815,9 +814,7 @@ def _fused_store_bu4_kernel(
     for g in range(GROUPS):
         lane = tl.arange(0, GROUP_DIM)
         in_off = t * (GROUPS * GROUP_DIM) + g * GROUP_DIM + lane
-        x = tl.load(k_rot_ptr + in_off)
-        if K_ROT_BF16:
-            x = x.to(tl.float32)
+        x = tl.load(k_rot_ptr + in_off)  # [64] fp32
         mn = tl.min(x, axis=0)
         mx = tl.max(x, axis=0)
         rng = tl.maximum(mx - mn, 1e-8)
@@ -837,9 +834,6 @@ def _fused_store_bu4_kernel(
             hi_off = lo_off + 1
             xlo = tl.load(k_rot_ptr + lo_off)
             xhi = tl.load(k_rot_ptr + hi_off)
-            if K_ROT_BF16:
-                xlo = xlo.to(tl.float32)
-                xhi = xhi.to(tl.float32)
         clo = tl.floor((xlo - mn) / step + 0.5)
         chi = tl.floor((xhi - mn) / step + 0.5)
         clo = tl.minimum(tl.maximum(clo, 0.0), L_f).to(tl.int32)
@@ -891,9 +885,7 @@ def triton_fused_store_bu4(
     for each valid ``loc``; ``loc < 0`` tokens are skipped (capture-safe).
     """
     assert k_rot.is_cuda and input_bf16.is_cuda and cache.is_cuda and indices.is_cuda
-    assert k_rot.dtype in (torch.float32, torch.bfloat16), (
-        f"k_rot must be fp32 or bf16, got {k_rot.dtype}"
-    )
+    assert k_rot.dtype == torch.float32, f"k_rot must be fp32, got {k_rot.dtype}"
     assert input_bf16.dtype == torch.bfloat16 and cache.dtype == torch.uint8
     assert indices.dtype in (torch.int32, torch.int64)
     N = int(k_rot.shape[0])
@@ -935,7 +927,6 @@ def triton_fused_store_bu4(
         VEC_HEADER=bool(
             os.environ.get("SGLANG_RQ_FUSED_STORE_VEC_HEADER", "0") == "1"
         ),
-        K_ROT_BF16=k_rot.dtype == torch.bfloat16,
         num_warps=num_warps,
         num_stages=num_stages,
     )
