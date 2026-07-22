@@ -998,10 +998,9 @@ class DeepseekV4AttnBackend(
         if isinstance(core_attn_metadata, DSV4AttnMetadata):
             if save_kv_cache:
                 self.store_cache(layer_id, swa_k, forward_batch)
-            # M3.c.2: rotated-quant wall-storage hook. The pool packs nope into
-            # INT2/3/4 on store; this prologue dequants the pages this batch will
-            # actually read into a shadow FP8 buffer that FlashMLA can consume
-            # unchanged. No-op for non-rotated pools (duck-typed).
+            # Rotated wall-storage hook. In the production drop-shadow path
+            # the hook is a no-op because FlashMLA consumes packed rows
+            # directly. It remains available for legacy shadow/fallback modes.
             _rq_prologue = getattr(
                 token_to_kv_pool, "_rotated_quant_attention_prologue", None
             )

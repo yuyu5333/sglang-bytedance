@@ -584,9 +584,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             self._install_wall_storage()
             mode_msg = (
                 "WALL-STORAGE MODE: swa/c4/c128 main buffers replaced with "
-                "INT2/3/4 packed nope + raw BF16 rope; attention prologue "
-                "dequants + writes shadow FP8 buffers in DSv4-native layout "
-                "for FlashMLA. Indexer / compress_state remain native FP8."
+                "INT2/3/4 packed nope + raw BF16 rope; FlashMLA sparse "
+                "decode consumes packed rows directly in production "
+                "drop-shadow mode. Legacy shadow fallback remains available. "
+                "Indexer / compress_state remain native FP8."
             )
         else:
             mode_msg = (
