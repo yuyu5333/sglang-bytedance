@@ -55,6 +55,8 @@ class HttpServerEngineAdapter(EngineBase):
 
     def __init__(self, **kwargs):
         self.server_args = ServerArgs(**kwargs)
+        # Read host/port from the adapter's own args: no config is published yet
+        # in this process (publish happens in the child from launch_server_process).
         print(
             f"Launch HttpServerEngineAdapter at: {self.server_args.host}:{self.server_args.port}"
         )
@@ -115,6 +117,7 @@ class HttpServerEngineAdapter(EngineBase):
         lora_path=None,
         custom_logit_processor=None,
         priority=None,
+        session_id=None,
     ):
         payload = {
             "text": prompt,
@@ -128,6 +131,7 @@ class HttpServerEngineAdapter(EngineBase):
             "lora_path": lora_path,
             "custom_logit_processor": custom_logit_processor,
             "priority": priority,
+            "session_id": session_id,
         }
         # Filter out None values
         payload = {k: v for k, v in payload.items() if v is not None}
