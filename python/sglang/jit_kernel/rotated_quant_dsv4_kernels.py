@@ -294,18 +294,27 @@ def rotated_store_to_packed(
     if _os.environ.get("SGLANG_RQ_BF16_ROTATE", "0") == "1":
         rotate_impl = _os.environ.get("SGLANG_RQ_BF16_ROTATE_IMPL", "matmul")
         if rotate_impl == "linear":
-            K_rot = torch._C._nn.linear(nope, R_bf16.t()).to(torch.float32)
+            K_rot = torch._C._nn.linear(nope, R_bf16.t())
         elif rotate_impl == "mm":
-            K_rot = torch.mm(nope, R_bf16).to(torch.float32)
+            K_rot = torch.mm(nope, R_bf16)
         elif rotate_impl == "matmul":
-            K_rot = (nope @ R_bf16).to(torch.float32)
+            K_rot = nope @ R_bf16
         else:
             raise ValueError(
                 "SGLANG_RQ_BF16_ROTATE_IMPL must be matmul,mm,linear, "
                 f"got {rotate_impl}"
             )
+        keep_bf16_for_fused = (
+            _os.environ.get("SGLANG_RQ_FUSED_STORE", "0") == "1"
+            and _os.environ.get("SGLANG_RQ_FUSED_STORE_BF16_INPUT", "0") == "1"
+        )
+        K_rot_store = K_rot
+        if not keep_bf16_for_fused:
+            K_rot = K_rot.to(torch.float32)
+            K_rot_store = K_rot
     else:
         K_rot = nope.to(torch.float32) @ R  # [N, 448]
+        K_rot_store = K_rot
 
     # [T_store_fused] bu4 single-kernel store fast path.
     #   When SGLANG_RQ_FUSED_STORE=1 AND the layout is the uniform 4-bit
@@ -325,7 +334,7 @@ def rotated_store_to_packed(
             triton_fused_store_bu4,
         )
         triton_fused_store_bu4(
-            K_rot, input_bf16, cache, indices, bpt=bpt,
+            K_rot_store, input_bf16, cache, indices, bpt=bpt,
         )
         return
 
