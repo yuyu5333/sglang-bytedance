@@ -125,7 +125,14 @@ include(FetchContent)
 FetchContent_Declare(
     repo-flashmla
     GIT_REPOSITORY https://github.com/yuyu5333/FlashMLA
-    GIT_TAG f45de930aa8124749ac6f2777ee9e6a7f398da8f
+    # [kvbit M3.c.4] bump to fork kv2bit-dev HEAD (2592dc8): the csrc/api
+    # sparse_decode_fwd pybind already carries the packed-FP8 trailing kwargs
+    # (packed_kcache/scale_kcache/R_matrix/zero_point/dim_of_bit/bitpos_in_dim/
+    # bit_uniform/q_for_extra/q_nope_is_folded/identity_tail_bypass/
+    # debug_u32_packed_load/extra_packed_kcache). sgl_kernel.flash_mla wrapper
+    # forwards them; building sgl-kernel from this tag makes
+    # torch.ops.sgl_kernel.sparse_decode_fwd accept packed KV (wall mode).
+    GIT_TAG 2592dc8
     GIT_SHALLOW OFF
 )
 FetchContent_Populate(repo-flashmla)

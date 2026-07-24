@@ -103,6 +103,23 @@ def flash_mla_with_kvcache(
     extra_indices_in_kvcache: Optional[torch.Tensor] = None,
     topk_length: Optional[torch.Tensor] = None,
     extra_topk_length: Optional[torch.Tensor] = None,
+    # [kvbit M3.c.4] packed-FP8 device-side wiring (FlashMLA fork's
+    # sparse_decode_fwd trailing kwargs). All optional; when all-None the
+    # kernel runs the bit-exact native FP8 path. Forwarded verbatim to
+    # torch.ops.sgl_kernel.sparse_decode_fwd when built from the kvbit
+    # FlashMLA fork (flashmla.cmake -> yuyu5333/FlashMLA kv2bit-dev).
+    packed_kcache: Optional[torch.Tensor] = None,
+    scale_kcache: Optional[torch.Tensor] = None,
+    R_matrix: Optional[torch.Tensor] = None,
+    zero_point: Optional[torch.Tensor] = None,
+    dim_of_bit: Optional[torch.Tensor] = None,
+    bitpos_in_dim: Optional[torch.Tensor] = None,
+    bit_uniform: int = 0,
+    q_for_extra: Optional[torch.Tensor] = None,
+    q_nope_is_folded: bool = False,
+    identity_tail_bypass: bool = False,
+    debug_u32_packed_load: bool = False,
+    extra_packed_kcache: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
@@ -147,6 +164,18 @@ def flash_mla_with_kvcache(
             extra_indices_in_kvcache=extra_indices_in_kvcache,
             topk_length=topk_length,
             extra_topk_length=extra_topk_length,
+            packed_kcache=packed_kcache,
+            scale_kcache=scale_kcache,
+            R_matrix=R_matrix,
+            zero_point=zero_point,
+            dim_of_bit=dim_of_bit,
+            bitpos_in_dim=bitpos_in_dim,
+            bit_uniform=bit_uniform,
+            q_for_extra=q_for_extra,
+            q_nope_is_folded=q_nope_is_folded,
+            identity_tail_bypass=identity_tail_bypass,
+            debug_u32_packed_load=debug_u32_packed_load,
+            extra_packed_kcache=extra_packed_kcache,
         )
 
     assert num_splits is not None
@@ -216,6 +245,19 @@ def _flash_mla_with_kvcache_sched_meta(
     extra_indices_in_kvcache: Optional[torch.Tensor],
     topk_length: Optional[torch.Tensor],
     extra_topk_length: Optional[torch.Tensor],
+    # [kvbit M3.c.4] packed-FP8 wiring forwarded to sparse_decode_fwd.
+    packed_kcache: Optional[torch.Tensor] = None,
+    scale_kcache: Optional[torch.Tensor] = None,
+    R_matrix: Optional[torch.Tensor] = None,
+    zero_point: Optional[torch.Tensor] = None,
+    dim_of_bit: Optional[torch.Tensor] = None,
+    bitpos_in_dim: Optional[torch.Tensor] = None,
+    bit_uniform: int = 0,
+    q_for_extra: Optional[torch.Tensor] = None,
+    q_nope_is_folded: bool = False,
+    identity_tail_bypass: bool = False,
+    debug_u32_packed_load: bool = False,
+    extra_packed_kcache: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert num_splits is None, "num_splits must be None with FlashMLASchedMeta"
 
@@ -279,6 +321,22 @@ def _flash_mla_with_kvcache_sched_meta(
                 extra_topk_length,
                 head_dim_v,
                 softmax_scale,
+                # [kvbit M3.c.4] packed-FP8 trailing kwargs (FlashMLA fork).
+                # Order must match sparse_attn_decode_interface in
+                # FlashMLA/csrc/api/sparse_decode.h. All-None = bit-exact
+                # native FP8 path.
+                packed_kcache,
+                scale_kcache,
+                R_matrix,
+                zero_point,
+                dim_of_bit,
+                bitpos_in_dim,
+                bit_uniform,
+                q_for_extra,
+                q_nope_is_folded,
+                identity_tail_bypass,
+                debug_u32_packed_load,
+                extra_packed_kcache,
             )
         )
     else:
