@@ -73,7 +73,7 @@ from sglang.srt.utils import ceil_align, is_cuda, is_xpu
 from sglang.srt.utils.common import is_sm120_supported
 
 if TYPE_CHECKING:
-    from sgl_kernel.flash_mla import FlashMLASchedMeta
+    from flash_mla.flash_mla_interface import FlashMLASchedMeta
 
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
@@ -137,7 +137,7 @@ def _pad_last_dim(x: T, multiples_of: int = PAGE_INDEX_ALIGNED_SIZE) -> T:
 def _create_flashmla_metadata():
     if _is_sm120 or _is_xpu:
         return None
-    import sgl_kernel.flash_mla as flash_mla
+    import flash_mla
 
     return flash_mla.get_mla_metadata()[0]
 
@@ -1782,6 +1782,8 @@ class DeepseekV4AttnBackend(
                     core_attn_metadata=core_attn_metadata,
                     attn_sink=attn_sink,
                 )
+
+            import flash_mla
 
             # [M3.c.4 Stage-3] Wire RotatedQuant pool's packed buffer into
             # sparse-path. Pool returns None when not in wall mode / kind
