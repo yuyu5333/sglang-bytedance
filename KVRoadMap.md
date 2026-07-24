@@ -1,4 +1,27 @@
 
+# 当前文档入口（2026-07-22）
+
+当前 DSv4 运行时事实、direct-packed 数据流和代码归属以
+`docs/kv_cache/DSV4_PACKED_KV_CURRENT.md` 为准；历史 shadow-prologue、
+R+affine、dense packed API、失败 canary 和诊断脚本统一见
+`docs/kv_cache/archive/DSV4_PACKED_KV_LEGACY_ARCHIVE.md`。
+
+模型扩展路线已拆分为两条独立 roadmap，按优先级执行：
+
+1. [GLM5.2 KV Compression Roadmap](docs/kv_cache/GLM52_KV_COMPRESSION_ROADMAP.md)
+   —— 当前仓库没有专用 GLM5.2 实现，先获取模型事实并确认 MLA/DSA、
+   KV layout 和 sparse ABI。
+2. [Qwen3.5 KV Compression Roadmap](docs/kv_cache/QWEN35_KV_COMPRESSION_ROADMAP.md)
+   —— 当前仓库已有完整 hybrid 实现，先做 Full Attention 层 packed K/V，
+   再单独评估 GatedDeltaNet state compression。
+
+执行顺序固定为：**GLM5.2 → Qwen3.5**。在 GLM5.2 的 G0/G1
+模型事实尚未完成前，不启动 Qwen3.5 的代码实现任务。
+
+旧章节保留为历史研发记录，不再作为当前实现说明。尤其是其中“FlashMLA
+尚未直接消费 packed KV”或“生产 attention 仍依赖 FP8 shadow”的描述，
+已经被 M3.c.4 direct sparse-packed 接入取代。
+
 # 一、先把类比对齐
 图像水印（频域隐写）做的事：
 
@@ -508,7 +531,7 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
   - quantize-dequantize roundtrip 在 b̄∈{2,3,4} 上的相对 L2 误差曲线
 
 
-## 当前状态总览（截至 M3.c.4 三池 bu4 去 shadow 显存闭环，2026-07-16）
+## 当前状态总览（截至 M3.c.4 exact Q-FHT standalone 闭环，2026-07-20）
 
 ### 里程碑进度
 
@@ -522,11 +545,11 @@ python -m sglang.launch_server --model deepseek-ai/deepseek-v4 \
 | M3.c.1 — DSv4 wall-storage swa 池真替换 + canary | ✅ 完成 | swa_kv_pool packed buffer + `dequant_swa_to_fp8_layout` shim | 5/5 canary，wall ratio 2.18× (swa 池) |
 | M3.c.2 — attention prologue 接入 + c4/c128 同步替换 | ✅ 完成 | 三池同步 wall + `_rotated_quant_attention_prologue` hook | 7/7 canary、12/12 regression（**单层 cosine ≥ 0.95；token-level 解码端到端在 c.3 才暴露 SNR 不足**） |
 | M3.c.3 — bit-pack/unpack Triton 化（性能化） | ⚠️ **partial pass / R+affine 框架终判证伪** | T3/T5/T6 Triton kernel 全部 capture-safe；perf 侧 85× decode 提速；但 R+affine 数学链 b̄=8u 上限仍 token salad → 必须切换技术路线 | 性能侧 PASS（drop_packed=1 等价 baseline 配置）；精度侧在 R+affine 框架内 **不可达** |
-| **M3.c.4 — FlashMLA fork + packed sparse-path 接入** | ✅ **三池 bu4 显存收益闭环；性能优化继续** | DSv4 sparse `flash_mla_with_kvcache` 已接入 `swa/c4/c128` packed wall buffer；`f16e099c7` 去掉 c4/c128 full FP8 shadow，改为 tiny `extra_kv` shape dummy + `extra_packed_kcache` 真读 | all-pools bu4 smoke 正常；gsm8k 50ex **0.980**；`Memory pool end avail≈22.35GB` / `nvidia-smi used≈75.2-75.7GB`，优于 native FP8 `avail≈18.45GB / used≈79.6GB`；bench `in2048/out512 rate32 conc32 np64` Output **136.06 tok/s** / Median TPOT **165.68ms** |
+| **M3.c.4 — FlashMLA fork + packed sparse-path 接入** | 🔥 **三池 bu4 显存收益 + cgon + exact Q-FHT e2e 已闭环；通信优化进行中** | DSv4 sparse packed wall；c4/c128 shadow 删除；cgon capture 修通；warp-H256 + compile specialization + two-phase store；FlashMLA `dc7673e/2592dc8` exact folded-Q direct-K；SGLang `adcd7584a/12e60f9d3` strided in-place Q/O H256 | gsm8k 200 **0.960 / 978.471 tok/s / 99.977s**；较前有效值 **905.590 tok/s +8.0%**；packed-only avail **22.35GB**、graph **0.88GB**、max tokens **3,763,200**。剩余主因是 wall exact TP8 custom all-reduce two-shot：**108.644ms/2871 calls**；NCCL、one-shot-pull 与 640KiB one-shot-push（**22.683 vs 13.106us/layer**）均拒绝 |
 
 ### M3.c.4 一句话总结
 
-M3.c.4 已从“无 sparse forward 出口”推进到 `swa/c4/c128 + bu4` 真 packed forward，并在 `f16e099c7` 完成运行时显存收益闭环。关键修复：c4/c128 不再保留完整 FP8 shadow；`drop_shadow=1` 下只保留 tiny `[num_pages,page_size]` `extra_kv` shape dummy，真实 extra 数据由 FlashMLA `IS_EXTRA_BLOCK` 分支从 `extra_packed_kcache_ptr` 读取；backend 对 `extra_bpt==1 && extra_packed_kcache is None` fail-fast，避免 dummy 被 dense fallback 误读。实测同机同容器：失败版 `e71af0c99` all-pools bu4 `avail≈11.07GB / used≈87.2GB`，修复后 `avail≈22.35GB / used≈75.2-75.7GB`，优于 native FP8 `avail≈18.45GB / used≈79.6GB`；gsm8k 50ex **0.980**，短 bench `random-ids in2048/out512 rate32 conc32 np64` Output **136.06 tok/s**、Mean TTFT **32080.66ms**、Median TPOT **165.68ms**。结论：三池 bu4 的“精度 + 运行时显存收益”已经成立；性能主线仍需继续攻 packed decode TPOT/吞吐。历史性能优化经验仍有效：`IDENTITY_TAIL_BYPASS` 是已验证可保留优化；`U32LOAD_REJECT` 证明任何 packed load 改写必须先过 `U32LOAD_ORACLE`，再进入 ncu/curl/gsm8k。
+M3.c.4 已完成 `swa/c4/c128 + bu4` packed-only 显存、CUDA graph、exact Q-FHT 与端到端精度闭环。gsm8k 200 为 **score 0.960 / 978.471 tok/s / 99.977s**，相对前有效值 `905.590 tok/s` 提升 **8.0%**；显存保持 `avail≈22.35GB`、graph `0.88GB`、`max_total_num_tokens=3,763,200`。根因 trace 已从 FlashMLA 转移到通信：相同 2,871 个 TP all-reduce 调用中，native 合计 **14.582ms**，wall exact 为 **126.177ms**，其中 two-shot **108.644ms**。`--disable-custom-all-reduce` 的 NCCL ring 为 **156.304ms**；强制 custom one-shot-pull 为 **137.408ms**，均已拒绝。新增 TP8 640KiB BF16 CUDA Graph canary 在 16 轮 NCCL-reference 正确性全过后测得 `ONE_SHOT_PUSH=22.683us/layer`，劣于 `TWO_SHOT_PULL=13.106us/layer` **73.1%**，因此拒绝扩容 push buffer / 改阈值；下一轮直接调优 two-shot pull 的 launch/config 路径，禁止回退 packed-only/cgon/exact-QFHT 已得收益。
 
 ### M3.c.3 R+affine 框架终判（重要，不再追求）
 
@@ -559,6 +582,102 @@ M3.c.4 已从“无 sparse forward 出口”推进到 `swa/c4/c128 + bu4` 真 pa
 7. ✅ CPU helper 提到 kernels：`quant_fp8_layout_cpu_ref` 公共化，pool 与 canary 共享
 8. ✅ M3.c.1 layout bug 修复：保留 `bytes_per_page_padded` 为原 native FP8 size（packed 是物理存储，shadow 给读侧用），不再失配下游 view shape
 
-### 下一步（M3.c.4 sparse-path 接入，M3.c 唯一阻塞）
+### 下一步（M3.c.4 BU4 独有路径实证归因）
 
-详见 [KVPerfTaskList §3 T_M3c4_sparse_接入](KVPerfTaskList.md#3-task-拆分按依赖顺序逐条迭代) 与本文件上方 `M3.c.4` 段的设计选择二选一。**M3.c.3 R+affine 框架内的"bit-pack Triton 化 / fused norm+rope→packed / shadow ring buffer"已在 T3/T5/T6 完成 perf 侧；精度侧在 R+affine 数学链下不可达，由 M3.c.4 fused-dequant inner-loop 替代，不再追求 R+affine 路线。**
+保持 all-pools `swa+c4+c128 + bu4`、packed-only、CUDA graph ON 与原 topk
+不变。64000/c8 同口径 profile 已证明当前最大增量是
+`elementwise +36.596 ms` 和 `other +20.161 ms`，而不是
+`flashmla_sparse`（BU4 反而低 `5.399 ms`）。因此下一原子实验先拆
+elementwise/other 中的 direct_copy、索引、FHT 与 fused store；只有在当前
+exact Q-FHT 二进制上重新做 NCU、拿到 barrier/long-scoreboard/unpack 指标后，
+才能把 producer barrier 或 packed unpack/dequant 标为瓶颈。禁止再用历史
+3-bit NCU 结果替代当前 BU4 证据，禁止跨 token shuffle。
+
+### 2026-07-20 当前状态更新
+
+- P-C `994ce3477` 已删除 packed-only 路径中 `dirty_pages` / `valid_slots` 的死标记操作。profile elementwise **126.749→83.167ms**，decode TOTAL **576.606→532.540ms**，gsm8k 200 **0.960**，run_eval output **1159.414 tok/s**。
+- P-D `95aab3473` 已让 `_wall_kv_input()` 复用已连续的 `[N,512] BF16` 输入，避免无条件 D2D `contiguous()`。smoke 通过；gsm8k 200 **0.955 / 84.574s / 1182.290 tok/s**；同口径 short bench Median TPOT **15.04ms**。
+- 低风险下一步：继续拆解 `rotated_store_to_packed()` 中 `nope/rope` 分片 `.contiguous()` 的 direct-copy 来源，只优化确认冗余的复制，不改变 packed layout 或量化数学；随后再评估 `K_rot=nope@R` 的 SIMT SGEMM 是否能安全换成 BF16/TF32 高效路径。
+- P-D 第二个安全清理 `822308eaf` 已把 fused store 提前返回前未使用的 `indices.to(int64)` 延后到 legacy 分支。gsm8k 200 **0.975 / 81.907s / 1191.544 tok/s**；short bench Median TPOT **15.03ms**，P99 **17.04ms**。
+- 本轮至少三个 E2E 点已完成：P1 `52dc90283` rope direct-load 保留，gsm8k **0.950 / 81.395s / 1209.503 tok/s**、Median TPOT **14.90ms**；P2 `036b4c2a9` nope view copy 消除因 gsm8k **0.935** 低于软目标而由 `4211683a9` 回退；P3 `889655b08` BF16 rotation GEMM canary 保留，gsm8k **0.965 / 82.021s / 1244.500 tok/s**、Median TPOT **14.70ms**。
+- 当前可复现实验配置额外设置 `SGLANG_RQ_BF16_ROTATE=1`；它只替换 store-side `nope @ R` 的 GEMM dtype，packed layout、FlashMLA 路径和三池显存布局不变。当前距 1500 tok/s 仍约 **20.5%**，下一步需对 BF16 rotation 的数值稳定性做重复 run，并继续拆解剩余 store launch/调度开销。
+- 新一轮 fused-store launch 调参已完成 6 个 E2E 点：`num_warps=8/2/1` 分别 **1221.069/1207.311/1215.581 tok/s**；`num_stages=4/1/3` 分别 **1226.664/1175.471/1237.425 tok/s**。全部 gsm8k **0.950–0.960**，但均低于生产最佳 `warps=4,stages=2` 的 **1244.500 tok/s / gsm8k 0.965 / Median TPOT 14.70ms**，因此全部拒绝，代码保留有界调参接口，生产配置恢复为 4/2。
+- 本轮没有硬阻塞，已继续完成超过用户要求的三个端到端点；下一轮不再继续低杠杆 warp/stage 穷举，转向 `K_rot` GEMM 输出复用、store launch 合并和 `max_running_requests` 结构性瓶颈分析。
+- 继续执行的 P10 显式 `torch.mm` dispatch 对照结果为 **0.955 / 81.386s / 1229.811 tok/s / Median TPOT 14.72ms**，低于默认 `@` dispatch 的 **1244.500 tok/s**，已拒绝。当前生产配置固定为 `SGLANG_RQ_BF16_ROTATE=1`、`SGLANG_RQ_FUSED_STORE_WARPS=4`、`SGLANG_RQ_FUSED_STORE_STAGES=2`，不设置 `SGLANG_RQ_BF16_ROTATE_MM`。
+- 已关闭路线：读侧 `rotated_load_to_fp8_layout` 融合（生产 drop_shadow packed-only 下是死代码）、FlashMLA producer/consumer 内部手术、NCCL/one-shot-push 扩容、降低 c4 topk、`drop_packed=1`。
+- P11 `2d8e05407` 完成 BF16 rotation strided-nope canary：`linear+NOCOPY` 两次 gsm8k 200 为 **0.955/1245.007 tok/s**、**0.960/1243.233 tok/s**，`matmul+NOCOPY` 为 **0.960/1236.259 tok/s**；短 bench 分别为 **1796.27/1790.59 tok/s**，Median TPOT **14.49/14.63ms**。smoke、CUDA Graph、packed-only 显存口径均通过，未发现精度回归，但相对 `matmul` 最佳 **1244.500 tok/s** 无稳定超越，故只保留 canary，生产恢复 `SGLANG_RQ_BF16_ROTATE_NOCOPY=0`。
+- P11 profile `/tmp/1784554447.699444` 的 no-copy linear decode self-time 为 **504.516ms**（elementwise **57.021ms**），低于历史 linear trace **509.008ms**，但端到端重复未形成稳定收益；下一轮不再继续 dispatch/no-copy 穷举，转向 profile 中仍存活的 store launch 与 host orchestration。
+- P12 `712e2932b` 将 `_wall_marks_are_dead()` 的静态环境判定改为 lazy-cache；生产口径 `matmul + NOCOPY=0` 端到端 **gsm8k 0.955 / 1244.892 tok/s / 82.274s**，短 bench **1790.49 tok/s / Median TPOT 14.68ms**，smoke 与 CUDA Graph 通过。结果与前 best **1244.500 tok/s** 统计等价，确认无回归但不计独立正收益；代码保留，下一轮继续攻 store launch/orchestration。
+- P13 `4ac2dc532` 尝试在 fused bu4 store 中复用 min/max 前已加载的 64 元素，消除同组 nibble-pack 的第二次 `K_rot` 读取；真实 Triton 编译失败，错误为 `unsupported tensor index: constexpr[0]`，当前 Triton 前端不支持 `tl.reshape(...)[ :, 0]` 的列索引。未产生服务输出或精度数据，已由 `ea315fcb5` 最小回退，生产服务恢复且 CUDA Graph/packed-only 口径正常。此实现路线关闭，后续只能使用当前 Triton 支持的 block 操作或改从 launch/orchestration 继续。
+- 2026-07-21 `64000/c8/profile30` BU4/native 差分已落档：total
+  `409.889/336.562 ms`，gap `+73.327 ms`；`elementwise +36.596 ms`、
+  `other +20.161 ms` 合计解释 `77.4%`。`_fused_store_bu4_kernel`
+  `13.408 ms` 是真实局部增量（约 `18.3%`），但不是全部瓶颈。
+  `flashmla_sparse -5.399 ms`、`all_reduce +1.955 ms`、
+  `moe_marlin +1.349 ms`，均排除为主要 low-bit 增量。producer barrier
+  与当前 exact Q-FHT packed unpack 仍待 NCU，不能沿用旧 3-bit 结论。
+- 2026-07-21 当前 exact Q-FHT NCU 已完成：BU4 sparse kernel
+  `77.66 us` vs native `67.84 us`，指令数 `3.756M` vs `2.599M`，
+  shared load/store `25,856/273,152` vs `9,984/68,352`；两侧
+  registers/thread 均 `168`、occupancy 均 `18.8%`。BU4 barrier
+  `7.7 cycles`、long-scoreboard `6.2 cycles` 均低于 native
+  `10.0/8.0 cycles`，因此 producer barrier 已排除为额外主瓶颈。
+  `_fused_store_bu4_kernel` NCU（N=8192）为 `67.6 us`、30 registers、
+  100% theoretical occupancy，主要 stall 是 MIO short-scoreboard
+  `6.9 cycles/30.8%`。下一步优先拆解 `elementwise/other` 的
+  direct_copy、index 和 FHT orchestration，不先改 FlashMLA barrier。
+- 2026-07-21 对照口径纠正：P14/P15/P16 曾使用
+  `--cuda-graph-max-bs 128 --max-running-requests 128`，与生产基线
+  `32/32` 不一致，相关 gsm8k/bench 数值全部降级为 invalid comparison，
+  不参与性能判断。后续优化验收严格恢复 `32/32`，并逐项重跑。
+- 严格 `32/32` 重测：P16（reuse + vector header + no-copy）
+  `0.950 / 1276.965 tok/s / 82.444s`；P15（reuse + vector header）
+  `0.960 / 1212.385 tok/s / 82.376s`；P14（reuse）
+  `0.965 / 1205.530 tok/s / 80.965s`。三项均通过精度硬门槛，
+  但没有稳定超过生产 best `1244.892 tok/s`，因此均不计入性能
+  里程碑；canary 代码保留但生产环境关闭，下一步回到
+  `direct_copy/index/FHT orchestration` 的 profile-guided 优化。
+- P17 BF16 rotation no-copy 严格 `32/32` 两次 `run_eval` 为
+  `1313.633` 与 `1245.399 tok/s`，均值 `1279.516 tok/s`；相对
+  `1244.892 tok/s` 仅约 `2.8%` 且波动明显，暂不提升为生产默认。
+- P18 packed kwargs view/dict cache 严格 `32/32` 为
+  `gsm8k=0.930 / 1234.382 tok/s / 81.883s`，低于精度硬阈值
+  `0.94`，已由 `512b31164` 回滚至 `cc2be7f25`；该方向关闭。
+- P19 `SGLANG_RQ_BF16_ROTATE_IMPL=linear` 严格 `32/32` 为
+  `0.965 / 1230.001 tok/s / 81.716s`，短 bench
+  `1781.20 tok/s / Median TPOT 14.71ms`，低于默认 `matmul`
+  参考，拒绝切换。
+- P20 尝试让 fused store 直接接收 BF16 `K_rot`，消除 profile 中
+  两个 BF16→FP32 `direct_copy` 增量 kernel。两次严格 `32/32`
+  `run_eval` 为 `1212.466` 与 `1285.448 tok/s`，均值
+  `1248.957 tok/s`，仅比 `1244.892` 高约 `0.3%` 且波动明显；
+  已回滚代码 commit `0d9c4ddc4` 至 `cba7315d4`，该 canary 关闭。
+- P21 只打开 FP32 rotation 的 `SGLANG_RQ_BF16_ROTATE_NOCOPY=1`，
+  不改变 GEMM dtype；严格 `32/32` 为
+  `gsm8k=0.945 / 1198.262 tok/s / 82.711s`，短 bench
+  `1768.46 tok/s / Median TPOT 14.84ms`，明显低于生产 best；
+  已关闭并恢复 `NOCOPY=0`。单独删除 `nope.contiguous()` 不能作为
+  稳定优化。
+- P22 已完成 CPU+GPU activity profile，trace 为
+  `/tmp/1784698318.669327`。30 decode steps 的 TP0 trace 中，
+  `_fused_store_bu4_kernel` 共 `2520` 次，即 `84` 个
+  `grid=[32,1,1]` graph node/step，累计 GPU duration `13.977ms`
+  （约 `0.466ms/step`）；单次中位数约 `5.28us`。
+- 同一 trace 中 `triton/runtime/jit.py(709): run` 共 `60` 次、
+  `4.775ms`，不能解释 `other` 桶的主要增量；CPU metadata 操作
+  `aten::copy_/_to_copy/index/index_put_` 合计约 `13.7ms`，但输入
+  主要是 `[32]`、`[525]` 和映射表，尚未证明是 packed store 根因。
+- 下一原子方向改为设计跨 layer/pool 的批量 fused-store graph node
+  合并，并先做数值 canary；在没有 pointer/config 批量布局设计前，
+  不直接修改生产 kernel。
+- 补充取舍：2520 个 fused-store node 的累计 GPU duration 仅
+  `13.977ms`，即使理想化全部消除也不足以解释 `other` 与
+  `elementwise` 的完整增量；跨层 batching 暂列低优先级，不直接
+  进入生产实现。下一步优先追踪 CPU metadata 中
+  `aten::index/_to_copy/copy_` 的重复调用及源码调用点。
+- P24 对 `[3763457]` 的 `full_to_swa_index_mapping` 做了单变量 dtype
+  canary：注册时统一为 `int32`、查询时删除 `.to(int32)`。capture 在
+  `compressor_v2` 的 `plan_decode` ABI 处失败，`c_plan.cuh:641` 要求
+  `int64`，因此该共享映射不能直接改 dtype。提交 `99a246226` 已由
+  `dd6a8d8bc` 回滚；health/smoke 恢复通过，未产生可用性能数据。
+  后续保持 `int64` ABI，改做独立消费副本或更窄的 metadata 融合。
