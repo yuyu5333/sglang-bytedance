@@ -844,8 +844,8 @@ class RotatedDSV4PoolConfigurator(DSV4PoolConfigurator):
     native FP8 layout unchanged.
     """
 
-    def __init__(self, mr: ModelRunner):
-        super().__init__(mr)
+    def __init__(self, kvc: KVCacheConfigurator):
+        super().__init__(kvc)
         from sglang.jit_kernel.rotated_quant_dsv4_kernels import (
             _MLA_NOPE_DIM,
             _ROPE_BYTES,
@@ -914,6 +914,79 @@ class RotatedDSV4PoolConfigurator(DSV4PoolConfigurator):
         )
 
 
+class RotatedMLAPoolConfigurator(DefaultPoolConfigurator):
+    """Configurator for standard MLA + rotated-kv-quant (kvbit M3.a).
+
+    Packed bytes per token per layer = latent_row_bytes + rope_bytes, where
+    latent_row_bytes comes from the calibration file's per-coordinate bit
+    table (bits.sum() // 8) and rope_bytes = qk_rope_head_dim * dtype.itemsize
+    (rope stays raw). Replaces DefaultPoolConfigurator's native MLA cell_size.
+    """
+
+    def _compute_cell_size(self, kvc: KVCacheConfigurator, num_layers: int) -> int:
+        from sglang.srt.layers.cp.utils import (
+            get_glm_dsa_layer_split_effective_num_layers,
+        )
+        from sglang.srt.mem_cache.rotated_quant_mla_memory_pool import (
+            load_rotated_quant_mla_calibration,
+        )
+
+        model_config = kvc.model_config
+        effective_num_layers = get_glm_dsa_layer_split_effective_num_layers(
+            kvc, num_layers
+        )
+        calib_cfgs = load_rotated_quant_mla_calibration(
+            kvc.server_args.rotated_kv_quant_config,
+            layer_num=num_layers,
+            kv_lora_rank=model_config.kv_lora_rank,
+            qk_rope_head_dim=model_config.qk_rope_head_dim,
+        )
+        sample = next(iter(calib_cfgs.values()))
+        latent_row_bytes = (int(sample.bits.sum().item()) + 7) // 8
+        rope_bytes = model_config.qk_rope_head_dim * torch._utils._element_size(
+            kvc.kv_cache_dtype
+        )
+        return (latent_row_bytes + rope_bytes) * effective_num_layers
+
+
+class RotatedMHAPoolConfigurator(DefaultPoolConfigurator):
+    """Configurator for standard MHA + rotated-kv-quant (kvbit M1).
+
+    Packed bytes per token per layer = head_num * (row_bytes_k + row_bytes_v),
+    where row_bytes_{k,v} come from the calibration file's bit table. Replaces
+    DefaultPoolConfigurator's native MHA cell_size.
+    """
+
+    def _compute_cell_size(self, kvc: KVCacheConfigurator, num_layers: int) -> int:
+        from sglang.srt.layers.cp.utils import (
+            get_glm_dsa_layer_split_effective_num_layers,
+        )
+        from sglang.srt.mem_cache.rotated_quant_memory_pool import (
+            load_rotated_quant_calibration,
+        )
+
+        model_config = kvc.model_config
+        tp_size = get_parallel().attn_tp_size
+        head_num = model_config.get_num_kv_heads(tp_size)
+        effective_num_layers = get_glm_dsa_layer_split_effective_num_layers(
+            kvc, num_layers
+        )
+        calib_cfgs = load_rotated_quant_calibration(
+            kvc.server_args.rotated_kv_quant_config,
+            layer_num=num_layers,
+            head_dim=model_config.head_dim,
+            v_head_dim=(
+                model_config.v_head_dim
+                if model_config.v_head_dim is not None
+                else model_config.head_dim
+            ),
+        )
+        sample = next(iter(calib_cfgs.values()))
+        row_bytes_k = sample["k"].row_bytes
+        row_bytes_v = sample["v"].row_bytes
+        return head_num * (row_bytes_k + row_bytes_v) * effective_num_layers
+
+
 def create_memory_pool_configurator(
     kvc: KVCacheConfigurator,
 ) -> MemoryPoolConfigurator:
@@ -929,5 +1002,13 @@ def create_memory_pool_configurator(
         if SWAChunkCapPoolConfigurator.is_applicable(kvc):
             return SWAChunkCapPoolConfigurator(kvc)
         return HybridSWAPoolConfigurator(kvc)
+    # kvbit rotated-kv-quant (M1 / M3.a): MLA and MHA models use packed pools
+    # whose per-token bytes come from the calibration bit table, so they need
+    # dedicated configurators over DefaultPoolConfigurator. DSv4 is handled
+    # above via RotatedDSV4PoolConfigurator.
+    if kvc.server_args.rotated_kv_quant_config:
+        if kvc.use_mla_backend:
+            return RotatedMLAPoolConfigurator(kvc)
+        return RotatedMHAPoolConfigurator(kvc)
     # Future: MambaPoolConfigurator
     return DefaultPoolConfigurator(kvc)

@@ -134,7 +134,7 @@ class MlxModelRunnerStub(ModelRunner):
     def _aux_state_slots_per_request(self) -> int:
         """Auxiliary-state slots to reserve per concurrently running request.
 
-        Mirrors ``ModelRunnerKVCacheMixin._calculate_mamba_ratio``: with the
+        Mirrors ``KVCacheConfigurator``'s mamba ratio calculation: with the
         radix cache disabled there are no radix-held snapshots (the MLX
         prefill path returns before any tracked-state store), so each live
         request holds exactly one slot. No extra-buffer ratio term applies on
@@ -151,7 +151,7 @@ class MlxModelRunnerStub(ModelRunner):
         """Concurrency cap handed to the scheduler.
 
         Honors ``--max-running-requests``, mirroring the base runner's clamp
-        (``model_runner_kv_cache_mixin._resolve_max_num_reqs``): the requested
+        (``kv_cache_configurator``'s max-num-reqs resolution): the requested
         value is split per dp worker and capped by the KV pool capacity. When
         the flag is unset, fall back to a capacity-based default.
 

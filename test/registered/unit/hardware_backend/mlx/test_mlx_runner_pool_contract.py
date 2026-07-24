@@ -1,7 +1,7 @@
 """Guard the MLX stub's ``alloc_memory_pool`` override against drift.
 
-The base ``ModelRunner.alloc_memory_pool`` runs ``_init_pools`` which
-asserts ``is_draft_worker`` (model_runner_kv_cache_mixin.py:409); the
+The base ``ModelRunner.alloc_memory_pool`` runs the KV cache configurator's
+``_init_pools`` which asserts ``is_draft_worker`` (kv_cache_configurator.py); the
 MLX stub manages its own KV cache via ``MlxAttentionKVPool`` and must
 short-circuit that GPU-allocation path.  If the override is lost, every
 MLX startup crashes inside ``Scheduler.init_target_memory_pool``.
@@ -41,7 +41,7 @@ class TestMlxRunnerPoolContract(unittest.TestCase):
                 "MlxModelRunnerStub lost its alloc_memory_pool override. "
                 "Without it the base ModelRunner.alloc_memory_pool runs "
                 "_init_pools, which asserts is_draft_worker "
-                "(model_runner_kv_cache_mixin.py:409) and crashes every "
+                "(kv_cache_configurator.py) and crashes every "
                 "MLX startup. Re-add the no-op override."
             ),
         )

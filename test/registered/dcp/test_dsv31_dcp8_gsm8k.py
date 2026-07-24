@@ -108,7 +108,7 @@ def _get_max_total_num_tokens(base_url: str) -> int:
     """Fetch max_total_num_tokens from /server_info.
 
     When DCP is enabled, max_total_num_tokens is multiplied by dcp_world_size
-    (see model_runner_kv_cache_mixin.py), so this value can be used to verify
+    (see kv_cache_configurator.py), so this value can be used to verify
     that DCP is actually active.
     """
     resp = requests.get(f"{base_url}/server_info", timeout=30)

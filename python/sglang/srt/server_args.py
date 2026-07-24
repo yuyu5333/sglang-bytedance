@@ -7315,7 +7315,7 @@ class ServerArgs:
         # The strided-layout Triton requirement is enforced via
         # --enable-page-major-kv-layout (implied by the unified pool in
         # _handle_page_major_kv_layout); the model-family gate is enforced at pool
-        # construction in model_runner_kv_cache_mixin._init_pools.
+        # construction in kv_cache_configurator._build_token_to_kv_pool.
 
     def _handle_page_major_kv_layout(self):
         # The unified pool stores state in the page-major envelope-strided layout, so

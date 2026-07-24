@@ -43,7 +43,7 @@ class DSV4NPUReqToTokenPool(ReqToTokenPool):
     """ReqToTokenPool extended with DSV4 SWA + c4/c128 per-req tables.
 
     Drop-in replacement for ReqToTokenPool when the model is DeepSeek-V4 on
-    NPU. Selected by ``model_runner_kv_cache_mixin`` based on model arch +
+    NPU. Selected by ``kv_cache_configurator`` based on model arch +
     device. Non-DSV4 and non-NPU paths continue to use the base class.
 
     The auxiliary tables are intentionally NOT zeroed on ``clear()``: they are
