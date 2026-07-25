@@ -282,6 +282,13 @@ target_include_directories(flashmla_ops PRIVATE
     ${repo-flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/
     ${repo-flashmla_SOURCE_DIR}/csrc/cutlass/include
     ${repo-flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
+    # [kvbit] CUDA 13.0 moved CCCL (libcu++ cuda/std headers) out of
+    # /usr/local/cuda/include/ into the include/cccl/ subdir (dpkg
+    # cuda-cccl-13-0). cutlass/cutlass.h does #include <cuda/std/utility>;
+    # nvcc finds cuda/std internally, but the host g++ compiling
+    # csrc/flashmla_extension.cc does not, so it must be on the include
+    # path. Hardcoded for the pinned kvbit-dev / CUDA 13.0 build env.
+    /usr/local/cuda/include/cccl
 )
 
 target_link_libraries(flashmla_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
