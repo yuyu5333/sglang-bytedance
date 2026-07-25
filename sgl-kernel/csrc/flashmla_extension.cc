@@ -71,6 +71,31 @@ static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::option
       num_splits);
 }
 
+// [kvbit] 6-arg sparse_prefill_fwd shim matching the torch.library schema in
+// TORCH_LIBRARY_FRAGMENT below (q, kv, indices, sm_scale, d_v, attn_sink?,
+// topk_length?). The FlashMLA fork only exports a 5-arg sparse_prefill_fwd
+// (python_api.cpp, no optionals) and the 7-arg sparse_attn_prefill_interface.
+// flashmla_extension.cc used to take the address of the 5-arg symbol for a
+// 6-arg schema -> undefined symbol at link time. Forward to the 7-arg
+// interface instead, forwarding the two optionals (both default nullopt).
+static std::vector<at::Tensor> sgl_sparse_prefill_fwd(
+    const at::Tensor& q,
+    const at::Tensor& kv,
+    const at::Tensor& indices,
+    double sm_scale,
+    int64_t d_v,
+    const std::optional<at::Tensor>& attn_sink,
+    const std::optional<at::Tensor>& topk_length) {
+  return sparse_attn_prefill_interface(
+      q,
+      kv,
+      indices,
+      static_cast<float>(sm_scale),
+      static_cast<int>(d_v),
+      attn_sink,
+      topk_length);
+}
+
 TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   /*
    * From FlashMLA
@@ -115,7 +140,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def(
       "sparse_prefill_fwd(Tensor q, Tensor kv, Tensor indices, float sm_scale, int d_v, Tensor? attn_sink=None, "
       "Tensor? topk_length=None) -> Tensor[]");
-  m.impl("sparse_prefill_fwd", torch::kCUDA, &sparse_prefill_fwd);
+  m.impl("sparse_prefill_fwd", torch::kCUDA, &sgl_sparse_prefill_fwd);
 
   m.def(
       "fwd_kvcache_mla_fp8(Tensor q, Tensor kcache, int head_size_v, Tensor seqlens_k, Tensor block_table, float "
