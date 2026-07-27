@@ -1193,12 +1193,9 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 _MLA_NOPE_DIM, _MLA_TILE_SIZE,
                 _MLA_SLOT_BYTES, _MLA_SCALES_PER_TOKEN,
             )
-            if self._should_cache_swa:
-                if layer_id == 0:
-                    self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
-                swa_loc = self.cached_loc
-            else:
-                swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
+            # [merge-fix] upstream (c9ca56da8c) now translates full→SWA once
+            # in init_forward_metadata; get_swa_out_cache_loc already returns
+            # SWA loc, so use it directly (no per-layer re-translate / cache).
             local_layer_id = self._swa_local_layer_id(layer_id)
             shadow = self._wall_pools["swa"].shadow_buffers[local_layer_id]
             page_size = self.swa_kv_pool.page_size
@@ -1235,14 +1232,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             rotated_store_to_packed,
         )
 
-        # Mirror the parent's translation+cache logic
-        # (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused).
-        if self._should_cache_swa:
-            if layer_id == 0:
-                self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
-            swa_loc = self.cached_loc
-        else:
-            swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
+        # [merge-fix] upstream now translates full→SWA in init_forward_metadata;
+        # swa_loc arrives already translated, use directly (no per-layer cache).
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
         # drop_packed 模式 packed_buffers 是 1B 占位，跳过 rotated_store_to_packed
@@ -1310,12 +1301,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         ):
             from sglang.jit_kernel.deepseek_v4 import fused_k_norm_rope_flashmla
 
-            if self._should_cache_swa:
-                if layer_id == self.start_layer or self.cached_loc is None:
-                    self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
-                swa_loc = self.cached_loc
-            else:
-                swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
+            # [merge-fix] swa_loc arrives already translated (upstream
+            # init_forward_metadata); use directly, no per-layer cache.
             local_layer_id = self._swa_local_layer_id(layer_id)
             shadow = self._wall_pools["swa"].shadow_buffers[local_layer_id]
             fused_k_norm_rope_flashmla(
@@ -1333,14 +1320,8 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             rotated_store_to_packed,
         )
 
-        # Mirror the parent's translation+cache logic
-        # (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused_norm_rope).
-        if self._should_cache_swa:
-            if layer_id == self.start_layer or self.cached_loc is None:
-                self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
-            swa_loc = self.cached_loc
-        else:
-            swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
+        # [merge-fix] swa_loc arrives already translated (upstream
+        # init_forward_metadata); use directly, no per-layer cache.
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
 
