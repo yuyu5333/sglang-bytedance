@@ -1178,13 +1178,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     def set_swa_key_buffer_radix_fused(
         self,
         layer_id: int,
-        raw_loc: torch.Tensor,
+        swa_loc: torch.Tensor,
         cache_k: torch.Tensor,
     ) -> None:
         if self._mode != "wall":
-            return super().set_swa_key_buffer_radix_fused(layer_id, raw_loc, cache_k)
+            return super().set_swa_key_buffer_radix_fused(layer_id, swa_loc, cache_k)
         if "swa" not in self._wall_pools:
-            return super().set_swa_key_buffer_radix_fused(layer_id, raw_loc, cache_k)
+            return super().set_swa_key_buffer_radix_fused(layer_id, swa_loc, cache_k)
         # BYPASS: NSA-CP path. cache_k is already normed+rope-applied BF16
         # [N, 512]. Quant to FP8+UE8M0 layout via the same path used for
         # the rotated dequant output, then scatter into shadow_buffer.
@@ -1195,10 +1195,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             )
             if self._should_cache_swa:
                 if layer_id == 0:
-                    self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                    self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
                 swa_loc = self.cached_loc
             else:
-                swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
             local_layer_id = self._swa_local_layer_id(layer_id)
             shadow = self._wall_pools["swa"].shadow_buffers[local_layer_id]
             page_size = self.swa_kv_pool.page_size
@@ -1239,10 +1239,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused).
         if self._should_cache_swa:
             if layer_id == 0:
-                self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
             swa_loc = self.cached_loc
         else:
-            swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
+            swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
         # drop_packed 模式 packed_buffers 是 1B 占位，跳过 rotated_store_to_packed
@@ -1275,7 +1275,7 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     def set_swa_key_buffer_radix_fused_norm_rope(
         self,
         layer_id: int,
-        raw_loc: torch.Tensor,
+        swa_loc: torch.Tensor,
         kv: torch.Tensor,
         kv_weight: torch.Tensor,
         eps: float,
@@ -1284,11 +1284,11 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
     ) -> None:
         if self._mode != "wall":
             return super().set_swa_key_buffer_radix_fused_norm_rope(
-                layer_id, raw_loc, kv, kv_weight, eps, freqs_cis, positions
+                layer_id, swa_loc, kv, kv_weight, eps, freqs_cis, positions
             )
         if "swa" not in self._wall_pools:
             return super().set_swa_key_buffer_radix_fused_norm_rope(
-                layer_id, raw_loc, kv, kv_weight, eps, freqs_cis, positions
+                layer_id, swa_loc, kv, kv_weight, eps, freqs_cis, positions
             )
         # ------------------------------------------------------------------
         # 诊断开关 SGLANG_RQ_WALL_BYPASS_QUANT=1: 完全绕开 packed/shadow
@@ -1312,10 +1312,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
 
             if self._should_cache_swa:
                 if layer_id == self.start_layer or self.cached_loc is None:
-                    self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                    self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
                 swa_loc = self.cached_loc
             else:
-                swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
             local_layer_id = self._swa_local_layer_id(layer_id)
             shadow = self._wall_pools["swa"].shadow_buffers[local_layer_id]
             fused_k_norm_rope_flashmla(
@@ -1337,10 +1337,10 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
         # (DeepSeekV4TokenToKVPool.set_swa_key_buffer_radix_fused_norm_rope).
         if self._should_cache_swa:
             if layer_id == self.start_layer or self.cached_loc is None:
-                self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
+                self.cached_loc = self.translate_loc_from_full_to_swa(swa_loc)
             swa_loc = self.cached_loc
         else:
-            swa_loc = self.translate_loc_from_full_to_swa(raw_loc)
+            swa_loc = self.translate_loc_from_full_to_swa(swa_loc)
         local_layer_id = self._swa_local_layer_id(layer_id)
         cfg = self._nope_cfgs[layer_id]
 
