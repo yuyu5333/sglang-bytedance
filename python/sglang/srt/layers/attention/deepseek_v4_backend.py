@@ -1865,6 +1865,17 @@ class DeepseekV4AttnBackend(
             if q_nope_is_folded:
                 _hadamard256_inplace(q)
 
+            # [merge-fix] `flash_mla` is only bound under TYPE_CHECKING
+            # (L76) and inside _create_flashmla_metadata (L140, local), so
+            # it is NOT a module global at runtime. The pre-merge fork had a
+            # module-level `import flash_mla` (standalone) that the upstream
+            # main merge removed; without it the decode path (which does not
+            # take the _forward_prefill_sparse early-return) hits:
+            #   NameError: name 'flash_mla' is not defined   (L1868)
+            # Confirmed via CUDA_LAUNCH_BLOCKING=1 sync stack. Re-add a
+            # runtime import here, matching the sibling pattern at L140/L1914.
+            import sgl_kernel.flash_mla as flash_mla
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
