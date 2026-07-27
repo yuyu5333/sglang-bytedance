@@ -1897,28 +1897,36 @@ class DeepseekV4AttnBackend(
                     _pk[0, :16].tolist() if _pk is not None else None
                 )
                 # [kvbit diag] read-row packed bytes (gated to layers 0,1,2).
-                # Row 0 is irrelevant; the kernel reads at page_idx*page_size.
-                # Dump bytes at the first valid page's first row to see if the
-                # store actually wrote layer 1's buffer at the read location.
+                # swa_page_indices are TOKEN locs (each row of packed_kcache is
+                # one token; packed_kcache is [num_pages*page_size, row_bytes]).
+                # So the read row = the index value itself (NOT idx*page_size).
+                # Dump bytes at the first + last valid index to see if the store
+                # wrote the rows the kernel actually reads.
                 _readrow_str = ""
                 if _pk is not None and layer_id in (0, 1, 2):
-                    _psz = swa_k_cache.shape[1]  # page_size
                     _flat_idx = swa_page_indices.reshape(-1)
                     _valid = _flat_idx[_flat_idx >= 0]
                     if _valid.numel() > 0:
                         _pi0 = int(_valid[0])
-                        _rr = _pi0 * _psz
-                        _rr_end = min(_rr + _psz, _pk.shape[0])
-                        if _rr < _pk.shape[0]:
-                            _row_bytes = _pk[_rr, :16].tolist()
-                            _row_nonzero = int(
-                                (_pk[_rr:_rr_end, :168] != 0).any(dim=1).sum()
-                            )
-                            _readrow_str = (
-                                f" readpage={_pi0} readrow={_rr} "
-                                f"readrow_bytes={_row_bytes} "
-                                f"page_nonzero_rows={_row_nonzero}/{_rr_end-_rr}"
-                            )
+                        _pi_last = int(_valid.max())
+                        _b0 = (
+                            _pk[_pi0, :16].tolist()
+                            if _pi0 < _pk.shape[0] else None
+                        )
+                        _bl = (
+                            _pk[_pi_last, :16].tolist()
+                            if _pi_last < _pk.shape[0] else None
+                        )
+                        # count non-zero rows across ALL valid read indices
+                        _valid_rows = _valid[_valid < _pk.shape[0]]
+                        _nz = int(
+                            (_pk[_valid_rows, :168] != 0).any(dim=1).sum()
+                        ) if _valid_rows.numel() > 0 else 0
+                        _readrow_str = (
+                            f" readidx0={_pi0} readidx_last={_pi_last} "
+                            f"bytes_at_idx0={_b0} bytes_at_idxlast={_bl} "
+                            f"nonzero_read_rows={_nz}/{_valid_rows.numel()}"
+                        )
                 print(
                     f"[DBGDECODE-pre] layer={layer_id} "
                     f"q dt={q.dtype} sh={tuple(q.shape)} fin={_fin(q):.4f} "
