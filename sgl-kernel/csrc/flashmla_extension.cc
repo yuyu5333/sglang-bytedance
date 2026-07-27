@@ -33,7 +33,24 @@ static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::option
     const std::optional<at::Tensor>& extra_indices,
     const std::optional<at::Tensor>& extra_topk_length,
     int64_t d_v,
-    double sm_scale) {
+    double sm_scale,
+    // [kvbit M3.c.4] packed-FP8 trailing kwargs. Order matches
+    // sparse_attn_decode_interface in FlashMLA/csrc/api/sparse_decode.h.
+    // All optional with defaults (None / 0 / false) = bit-exact native
+    // FP8 path; the kernel only consumes them when all-6 packed tensors
+    // are non-None (use_packed=true).
+    const std::optional<at::Tensor>& packed_kcache = std::nullopt,
+    const std::optional<at::Tensor>& scale_kcache = std::nullopt,
+    const std::optional<at::Tensor>& R_matrix = std::nullopt,
+    const std::optional<at::Tensor>& zero_point = std::nullopt,
+    const std::optional<at::Tensor>& dim_of_bit = std::nullopt,
+    const std::optional<at::Tensor>& bitpos_in_dim = std::nullopt,
+    int64_t bit_uniform = 0,
+    const std::optional<at::Tensor>& q_for_extra = std::nullopt,
+    bool q_nope_is_folded = false,
+    bool identity_tail_bypass = false,
+    bool debug_u32_packed_load = false,
+    const std::optional<at::Tensor>& extra_packed_kcache = std::nullopt) {
   return sparse_attn_decode_interface(
       q,
       kv,
@@ -46,7 +63,19 @@ static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::option
       extra_indices,
       extra_topk_length,
       static_cast<int>(d_v),
-      static_cast<float>(sm_scale));
+      static_cast<float>(sm_scale),
+      packed_kcache,
+      scale_kcache,
+      R_matrix,
+      zero_point,
+      dim_of_bit,
+      bitpos_in_dim,
+      bit_uniform,
+      q_for_extra,
+      q_nope_is_folded,
+      identity_tail_bypass,
+      debug_u32_packed_load,
+      extra_packed_kcache);
 }
 
 static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::optional<at::Tensor>> sgl_dense_decode_fwd(
@@ -196,7 +225,12 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def(
       "sparse_decode_fwd(Tensor q, Tensor kv, Tensor indices, Tensor? topk_length, Tensor? attn_sink, "
       "Tensor? tile_scheduler_metadata, Tensor? num_splits, Tensor? extra_kv, Tensor? extra_indices, "
-      "Tensor? extra_topk_length, int d_v, float sm_scale) -> (Tensor, Tensor, Tensor?, Tensor?)");
+      "Tensor? extra_topk_length, int d_v, float sm_scale, "
+      "Tensor? packed_kcache=None, Tensor? scale_kcache=None, Tensor? R_matrix=None, "
+      "Tensor? zero_point=None, Tensor? dim_of_bit=None, Tensor? bitpos_in_dim=None, "
+      "int bit_uniform=0, Tensor? q_for_extra=None, bool q_nope_is_folded=False, "
+      "bool identity_tail_bypass=False, bool debug_u32_packed_load=False, "
+      "Tensor? extra_packed_kcache=None) -> (Tensor, Tensor, Tensor?, Tensor?)");
   m.impl("sparse_decode_fwd", torch::kCUDA, &sgl_sparse_decode_fwd);
 
   m.def(
