@@ -1876,6 +1876,42 @@ class DeepseekV4AttnBackend(
             # runtime import here, matching the sibling pattern at L140/L1914.
             import sgl_kernel.flash_mla as flash_mla
 
+            # [kvbit diag] one-shot env-gated dump to localize packed-decode
+            # NaN. Prints q / swa_k_cache / packed_kcache bytes / calib
+            # finiteness / index range pre-call, and output NaN post-call.
+            # Off by default (SGLANG_RQ_DEBUG_DECODE=1). Remove after diagnosis.
+            import os as _dbg_os
+            if _dbg_os.environ.get("SGLANG_RQ_DEBUG_DECODE", "0") == "1":
+                _pk = packed_kwargs.get("packed_kcache")
+                _sk = packed_kwargs.get("scale_kcache")
+                _Rm = packed_kwargs.get("R_matrix")
+                _zp = packed_kwargs.get("zero_point")
+                _bu = packed_kwargs.get("bit_uniform", 0)
+
+                def _fin(_t):
+                    if _t is None or _t.numel() == 0:
+                        return -1.0
+                    return float(torch.isfinite(_t.float()).float().mean())
+
+                _pk_bytes = (
+                    _pk[0, :16].tolist() if _pk is not None else None
+                )
+                print(
+                    f"[DBGDECODE-pre] layer={layer_id} "
+                    f"q dt={q.dtype} sh={tuple(q.shape)} fin={_fin(q):.4f} "
+                    f"swa_kc dt={swa_k_cache.dtype} sh={tuple(swa_k_cache.shape)} fin={_fin(swa_k_cache):.4f} "
+                    f"pk dt={getattr(_pk, 'dtype', None)} sh={tuple(_pk.shape) if _pk is not None else None} "
+                    f"pk_bytes0={_pk_bytes} "
+                    f"sk sh={tuple(_sk.shape) if _sk is not None else None} fin={_fin(_sk):.4f} "
+                    f"Rm sh={tuple(_Rm.shape) if _Rm is not None else None} dt={getattr(_Rm, 'dtype', None)} fin={_fin(_Rm):.4f} "
+                    f"zp sh={tuple(_zp.shape) if _zp is not None else None} fin={_fin(_zp):.4f} bu={_bu} "
+                    f"idx sh={tuple(swa_page_indices.shape)} "
+                    f"idxmax={int(swa_page_indices.max())} idxmin={int(swa_page_indices.min())} "
+                    f"extra_kc sh={tuple(extra_k_cache.shape) if extra_k_cache is not None else None} "
+                    f"extra_pk sh={tuple(extra_packed_kcache.shape) if extra_packed_kcache is not None else None}",
+                    flush=True,
+                )
+
             o = flash_mla.flash_mla_with_kvcache(
                 q=q,
                 k_cache=swa_k_cache,
@@ -1896,6 +1932,16 @@ class DeepseekV4AttnBackend(
                 extra_packed_kcache=extra_packed_kcache,
                 **packed_kwargs,
             )[0]
+            # [kvbit diag] post-call NaN check (env-gated, same flag as pre).
+            if _dbg_os.environ.get("SGLANG_RQ_DEBUG_DECODE", "0") == "1":
+                print(
+                    f"[DBGDECODE-post] layer={layer_id} "
+                    f"o dt={o.dtype} sh={tuple(o.shape)} "
+                    f"fin={float(torch.isfinite(o.float()).float().mean()):.4f} "
+                    f"hasnan={bool(torch.isnan(o).any())} "
+                    f"hasinf={bool(torch.isinf(o).any())}",
+                    flush=True,
+                )
             if q_nope_is_folded:
                 _hadamard256_inplace(o)
 
