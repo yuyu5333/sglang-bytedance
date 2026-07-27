@@ -71,7 +71,46 @@ static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::option
       num_splits);
 }
 
-// [kvbit] 6-arg sparse_prefill_fwd shim matching the torch.library schema in
+// [kvbit] 16-arg fwd_kvcache_mla shim matching the torch.library schema in
+// TORCH_LIBRARY_FRAGMENT below. The FlashMLA fork's fwd_kvcache_mla
+// (python_api.cpp) is 11-arg (q, kcache, head_size_v, seqlens_k, block_table,
+// softmax_scale, is_causal, tile_scheduler_metadata, num_splits, is_fp8,
+// indices). The upstream sgl-kernel schema extended it with 5 trailing
+// optionals (attn_sink, extra_k_cache, extra_indices_in_kvcache, topk_length,
+// extra_topk_length) that the Python wrapper asserts to None on this path
+// (the real sparse/extra routing goes through sparse_decode_fwd). Drop them
+// and forward the 11 args the fork function actually takes. Fixes the
+// undefined symbol _Z15fwd_kvcache_mla...optional... at .so load time.
+static std::vector<at::Tensor> sgl_fwd_kvcache_mla(
+    at::Tensor q,
+    const at::Tensor& kv_cache,
+    int64_t head_size_v,
+    const at::Tensor& seqlens_k,
+    const at::Tensor& block_table,
+    double softmax_scale,
+    bool is_causal,
+    const at::Tensor& tile_scheduler_metadata,
+    const at::Tensor& num_splits,
+    bool is_fp8,
+    const std::optional<at::Tensor>& indices,
+    const std::optional<at::Tensor>& /*attn_sink*/,
+    const std::optional<at::Tensor>& /*extra_k_cache*/,
+    const std::optional<at::Tensor>& /*extra_indices_in_kvcache*/,
+    const std::optional<at::Tensor>& /*topk_length*/,
+    const std::optional<at::Tensor>& /*extra_topk_length*/) {
+  return fwd_kvcache_mla(
+      q,
+      kv_cache,
+      static_cast<int>(head_size_v),
+      seqlens_k,
+      block_table,
+      static_cast<float>(softmax_scale),
+      is_causal,
+      tile_scheduler_metadata,
+      num_splits,
+      is_fp8,
+      indices);
+}
 // TORCH_LIBRARY_FRAGMENT below (q, kv, indices, sm_scale, d_v, attn_sink?,
 // topk_length?). The FlashMLA fork only exports a 5-arg sparse_prefill_fwd
 // (python_api.cpp, no optionals) and the 7-arg sparse_attn_prefill_interface.
@@ -114,7 +153,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "Tensor? attn_sink, Tensor? extra_k_cache, Tensor? extra_indices_in_kvcache, Tensor? topk_length, Tensor? "
       "extra_topk_length) "
       "-> Tensor[]");
-  m.impl("fwd_kvcache_mla", torch::kCUDA, &fwd_kvcache_mla);
+  m.impl("fwd_kvcache_mla", torch::kCUDA, &sgl_fwd_kvcache_mla);
 
 #ifdef FLASHMLA_ENABLE_SM100
   m.def(
