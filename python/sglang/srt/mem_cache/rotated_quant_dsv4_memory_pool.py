@@ -541,7 +541,13 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=page_size,
             swa_page_size=swa_page_size,
             dtype=dtype,
-            state_dtype=state_dtype,
+            # [kvbit merge-fix] upstream split the single state_dtype into
+            # c4_state_dtype + c128_state_dtype; _get_dsv4_compress_state_dtypes
+            # always returns the same dtype for both, and the configurator's
+            # rotated-path adapter (kv_cache_configurator.py:1000) collapses them
+            # back into one `state_dtype` before calling us, so forward it as both.
+            c4_state_dtype=state_dtype,
+            c128_state_dtype=state_dtype,
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             indexer_head_dim=indexer_head_dim,
