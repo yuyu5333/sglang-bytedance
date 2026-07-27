@@ -72,15 +72,23 @@ static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::option
 }
 
 // [kvbit] 16-arg fwd_kvcache_mla shim matching the torch.library schema in
-// TORCH_LIBRARY_FRAGMENT below. The FlashMLA fork's fwd_kvcache_mla
-// (python_api.cpp) is 11-arg (q, kcache, head_size_v, seqlens_k, block_table,
-// softmax_scale, is_causal, tile_scheduler_metadata, num_splits, is_fp8,
-// indices). The upstream sgl-kernel schema extended it with 5 trailing
+// TORCH_LIBRARY_FRAGMENT below. The upstream sgl-kernel schema (and the
+// declaration in include/sgl_kernel_ops.h:820) is 16-arg with 5 trailing
 // optionals (attn_sink, extra_k_cache, extra_indices_in_kvcache, topk_length,
-// extra_topk_length) that the Python wrapper asserts to None on this path
-// (the real sparse/extra routing goes through sparse_decode_fwd). Drop them
-// and forward the 11 args the fork function actually takes. Fixes the
-// undefined symbol _Z15fwd_kvcache_mla...optional... at .so load time.
+// extra_topk_length). The FlashMLA fork's fwd_kvcache_mla (python_api.cpp:95)
+// is only 11-arg — it drops those 5 optionals, so taking its address for the
+// 16-arg schema yields an undefined symbol at .so load, and calling it from a
+// 16-arg shim hits a decl/def mismatch (the compiler sees the 16-arg
+// declaration from sgl_kernel_ops.h and rejects the 11-arg call).
+//
+// Follow the sibling-shim pattern already used in this file: sgl_sparse_decode_fwd
+// and sgl_dense_decode_fwd forward to sparse_attn_decode_interface /
+// dense_attn_decode_interface (the fork's *_interface entry points), NOT to
+// same-named fork ops. Do the same here — route directly to the fork's
+// *_interface functions, passing nullopt for the 5 trailing optionals. The
+// Python wrapper (flash_mla.py flash_mla_with_kvcache) asserts those 5 are
+// None on this path; the real sparse/extra routing goes through sparse_decode_fwd.
+// Mirrors the fork's python_api.cpp:95 fwd_kvcache_mla body 1:1.
 static std::vector<at::Tensor> sgl_fwd_kvcache_mla(
     at::Tensor q,
     const at::Tensor& kv_cache,
@@ -98,18 +106,40 @@ static std::vector<at::Tensor> sgl_fwd_kvcache_mla(
     const std::optional<at::Tensor>& /*extra_indices_in_kvcache*/,
     const std::optional<at::Tensor>& /*topk_length*/,
     const std::optional<at::Tensor>& /*extra_topk_length*/) {
-  return fwd_kvcache_mla(
+  const int head_size_v_int = static_cast<int>(head_size_v);
+  const float softmax_scale_float = static_cast<float>(softmax_scale);
+  std::optional<at::Tensor> tile_scheduler_metadata_opt = tile_scheduler_metadata;
+  std::optional<at::Tensor> num_splits_opt = num_splits;
+  if (indices.has_value()) {
+    TORCH_CHECK(is_fp8, "Sparse decode path requires is_fp8=true");
+    auto result = sparse_attn_decode_interface(
+        q,
+        kv_cache,
+        indices.value(),
+        /*topk_length=*/std::nullopt,
+        /*attn_sink=*/std::nullopt,
+        tile_scheduler_metadata_opt,
+        num_splits_opt,
+        /*extra_kv=*/std::nullopt,
+        /*extra_indices=*/std::nullopt,
+        /*extra_topk_length=*/std::nullopt,
+        head_size_v_int,
+        softmax_scale_float);
+    return {std::get<0>(result), std::get<1>(result)};
+  }
+  TORCH_CHECK(!is_fp8,
+              "Dense FP8 decode is exposed via fwd_kvcache_mla_fp8, not fwd_kvcache_mla");
+  auto result = dense_attn_decode_interface(
       q,
       kv_cache,
-      static_cast<int>(head_size_v),
+      head_size_v_int,
       seqlens_k,
       block_table,
-      static_cast<float>(softmax_scale),
+      softmax_scale_float,
       is_causal,
-      tile_scheduler_metadata,
-      num_splits,
-      is_fp8,
-      indices);
+      tile_scheduler_metadata_opt,
+      num_splits_opt);
+  return {std::get<0>(result), std::get<1>(result)};
 }
 // TORCH_LIBRARY_FRAGMENT below (q, kv, indices, sm_scale, d_v, attn_sink?,
 // topk_length?). The FlashMLA fork only exports a 5-arg sparse_prefill_fwd
