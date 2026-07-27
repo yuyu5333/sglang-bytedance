@@ -1896,6 +1896,29 @@ class DeepseekV4AttnBackend(
                 _pk_bytes = (
                     _pk[0, :16].tolist() if _pk is not None else None
                 )
+                # [kvbit diag] read-row packed bytes (gated to layers 0,1,2).
+                # Row 0 is irrelevant; the kernel reads at page_idx*page_size.
+                # Dump bytes at the first valid page's first row to see if the
+                # store actually wrote layer 1's buffer at the read location.
+                _readrow_str = ""
+                if _pk is not None and layer_id in (0, 1, 2):
+                    _psz = swa_k_cache.shape[1]  # page_size
+                    _flat_idx = swa_page_indices.reshape(-1)
+                    _valid = _flat_idx[_flat_idx >= 0]
+                    if _valid.numel() > 0:
+                        _pi0 = int(_valid[0])
+                        _rr = _pi0 * _psz
+                        _rr_end = min(_rr + _psz, _pk.shape[0])
+                        if _rr < _pk.shape[0]:
+                            _row_bytes = _pk[_rr, :16].tolist()
+                            _row_nonzero = int(
+                                (_pk[_rr:_rr_end, :168] != 0).any(dim=1).sum()
+                            )
+                            _readrow_str = (
+                                f" readpage={_pi0} readrow={_rr} "
+                                f"readrow_bytes={_row_bytes} "
+                                f"page_nonzero_rows={_row_nonzero}/{_rr_end-_rr}"
+                            )
                 print(
                     f"[DBGDECODE-pre] layer={layer_id} "
                     f"q dt={q.dtype} sh={tuple(q.shape)} fin={_fin(q):.4f} "
@@ -1908,7 +1931,8 @@ class DeepseekV4AttnBackend(
                     f"idx sh={tuple(swa_page_indices.shape)} "
                     f"idxmax={int(swa_page_indices.max())} idxmin={int(swa_page_indices.min())} "
                     f"extra_kc sh={tuple(extra_k_cache.shape) if extra_k_cache is not None else None} "
-                    f"extra_pk sh={tuple(extra_packed_kcache.shape) if extra_packed_kcache is not None else None}",
+                    f"extra_pk sh={tuple(extra_packed_kcache.shape) if extra_packed_kcache is not None else None}"
+                    f"{_readrow_str}",
                     flush=True,
                 )
 
