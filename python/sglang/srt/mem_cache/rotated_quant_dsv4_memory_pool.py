@@ -1336,6 +1336,20 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             from sglang.jit_kernel.triton_rotated_quant_dsv4 import (
                 triton_fused_norm_rope,
             )
+            # [kvbit diag] pre-norm-rope dump: is the INPUT kv finite, or is
+            # the NaN produced by triton_fused_norm_rope? Gated layers 0,1,2.
+            if os.environ.get("SGLANG_RQ_DEBUG_DECODE", "0") == "1" and layer_id in (0, 1, 2):
+                _kv_fin = float(torch.isfinite(kv.float()).float().mean()) if kv.numel() > 0 else -1.0
+                _kw_fin = float(torch.isfinite(kv_weight.float()).float().mean()) if kv_weight.numel() > 0 else -1.0
+                _pos_min = int(positions.min()) if positions.numel() > 0 else -1
+                _pos_max = int(positions.max()) if positions.numel() > 0 else -1
+                print(
+                    f"[DBGSTORE-pre] layer={layer_id} "
+                    f"kv dt={kv.dtype} sh={tuple(kv.shape)} fin={_kv_fin:.4f} "
+                    f"kv_weight fin={_kw_fin:.4f} "
+                    f"pos=[{_pos_min},{_pos_max}] cat_nope_dim={self.qk_nope_head_dim}",
+                    flush=True,
+                )
             cat = triton_fused_norm_rope(
                 kv=kv, kv_weight=kv_weight, eps=eps,
                 freqs_cis=freqs_cis, positions=positions,
