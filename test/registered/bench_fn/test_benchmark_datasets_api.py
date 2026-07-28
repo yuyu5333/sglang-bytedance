@@ -372,6 +372,25 @@ class TestBenchmarkDatasetsAPI(unittest.TestCase):
         self.assertTrue(all(isinstance(row, DatasetRow) for row in rows_text))
         self.assertTrue(all(isinstance(row.prompt, list) for row in rows_ids))
 
+        rows_with_prefix = sample_random_requests(
+            input_len=8,
+            prefix_len=4,
+            output_len=4,
+            num_prompts=2,
+            range_ratio=1.0,
+            tokenizer=self.tokenizer,
+            dataset_path=dataset_path,
+            random_sample=False,
+            return_text=False,
+        )
+        self.assertTrue(all(row.prompt_len == 12 for row in rows_with_prefix))
+        self.assertTrue(
+            all(
+                row.prompt[:4] == rows_with_prefix[0].prompt[:4]
+                for row in rows_with_prefix
+            )
+        )
+
     def test_custom_sampler(self):
         dataset_path = self._write_custom_jsonl()
         rows = sample_custom_requests(

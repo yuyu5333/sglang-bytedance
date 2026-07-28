@@ -2270,7 +2270,19 @@ def cli_main():
         "--random-input-len",
         type=int,
         default=1024,
-        help="Number of input tokens per request, used only for random and image dataset.",
+        help=(
+            "Number of non-shared input tokens per request, used only for "
+            "random and image dataset."
+        ),
+    )
+    parser.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help=(
+            "Number of shared prefix tokens prepended to every random/random-ids "
+            "request. Use with --tokenize-prompt for exact token lengths."
+        ),
     )
     parser.add_argument(
         "--random-output-len",

@@ -20,6 +20,7 @@ from sglang.benchmark.utils import download_and_cache_hf_file, is_file_valid_jso
 @dataclass
 class RandomDataset(BaseDataset):
     input_len: int
+    prefix_len: int
     output_len: int
     num_requests: int
     range_ratio: float
@@ -31,6 +32,7 @@ class RandomDataset(BaseDataset):
     def from_args(cls, args: Namespace) -> "RandomDataset":
         return cls(
             input_len=args.random_input_len,
+            prefix_len=getattr(args, "random_prefix_len", 0),
             output_len=args.random_output_len,
             num_requests=args.num_prompts,
             range_ratio=args.random_range_ratio,
@@ -44,6 +46,7 @@ class RandomDataset(BaseDataset):
     ) -> List[DatasetRow]:
         return sample_random_requests(
             input_len=self.input_len,
+            prefix_len=self.prefix_len,
             output_len=self.output_len,
             num_prompts=self.num_requests,
             range_ratio=self.range_ratio,
@@ -63,7 +66,11 @@ def sample_random_requests(
     dataset_path: str,
     random_sample: bool = True,
     return_text: bool = True,
+    prefix_len: int = 0,
 ) -> List[DatasetRow]:
+    if prefix_len < 0:
+        raise ValueError(f"prefix_len must be non-negative, got {prefix_len}")
+
     input_lens = compute_random_lens(
         full_len=input_len,
         range_ratio=range_ratio,
@@ -75,11 +82,19 @@ def sample_random_requests(
         num=num_prompts,
     )
 
-    if return_text:
+    if return_text and prefix_len == 0:
         # Need to truncate input_len as server encode will add special token.
         num_special_tokens = int(tokenizer.num_special_tokens_to_add())
         for i in range(num_prompts):
             input_lens[i] = max(1, input_lens[i] - num_special_tokens)
+
+    shared_prefix = []
+    if prefix_len:
+        prefix_offset = int(np.random.randint(0, tokenizer.vocab_size))
+        shared_prefix = [
+            int((prefix_offset + index) % tokenizer.vocab_size)
+            for index in range(prefix_len)
+        ]
 
     if random_sample:
         # Sample token ids from ShareGPT and repeat/truncate them to satisfy the input_lens
@@ -132,13 +147,14 @@ def sample_random_requests(
             else:
                 ratio = (input_lens[i] + prompt_len - 1) // prompt_len
                 input_ids = (prompt_token_ids * ratio)[: input_lens[i]]
+            input_ids = shared_prefix + input_ids
             input_content = input_ids
             if return_text:
                 input_content = tokenizer.decode(input_content)
             input_requests.append(
                 DatasetRow(
                     prompt=input_content,
-                    prompt_len=input_lens[i],
+                    prompt_len=prefix_len + input_lens[i],
                     output_len=output_lens[i],
                 )
             )
@@ -148,20 +164,21 @@ def sample_random_requests(
         input_requests = []
         for i in range(num_prompts):
             # Use int() to convert numpy.int64 to native Python int for JSON serialization
-            input_content = [
+            suffix_content = [
                 int((offsets[i] + i + j) % tokenizer.vocab_size)
                 for j in range(input_lens[i])
             ]
+            input_content = shared_prefix + suffix_content
             if return_text:
                 input_content = tokenizer.decode(input_content)
             input_requests.append(
                 DatasetRow(
                     prompt=input_content,
-                    prompt_len=input_lens[i],
+                    prompt_len=prefix_len + input_lens[i],
                     output_len=output_lens[i],
                 )
             )
 
-    print(f"#Input tokens: {np.sum(input_lens)}")
+    print(f"#Input tokens: {np.sum(input_lens) + prefix_len * num_prompts}")
     print(f"#Output tokens: {np.sum(output_lens)}")
     return input_requests
