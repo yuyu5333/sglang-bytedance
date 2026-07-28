@@ -1765,9 +1765,24 @@ class DeepseekV4AttnBackend(
                 ), f"{extra_indices.shape=}'s last dimension is not aligned to 64"
 
             # sparse_prefill_fwd does not support SM120.
+            # [kvbit merge-fix] In wall drop_shadow mode the SWA cache is the
+            # packed uint8 buffer (bit-packed nope + affine header + rope BF16).
+            # _forward_prefill_sparse dequants it via dequantize_k_cache_paged,
+            # which expects a native FP8 paged buffer (e4m3 + UE8M0) and cannot
+            # bit-unpack the packed layout -> garbage -> NaN propagating from
+            # layer 0's prefill attention output through every layer's residual
+            # (confirmed: layer 1 prefill cat_fin=0.0, decode multinomial assert).
+            # When the SWA cache is packed (uint8), skip the sparse-prefill path
+            # and fall through to flash_mla_with_kvcache below, which routes to
+            # sparse_decode_fwd with use_packed=true -- that kernel bit-unpacks
+            # + fused-dequants correctly and handles s_q>1 (prefill). Native
+            # FP8 / shadow modes keep the original sparse-prefill path (their
+            # SWA cache is FP8, which dequantize_k_cache_paged handles).
+            _swa_is_packed = swa_k_cache.dtype == torch.uint8
             if (
                 forward_batch.forward_mode.is_extend_without_speculative()
                 and not _is_sm120
+                and not _swa_is_packed
                 and (
                     q.shape[0] > _LARGE_INDEXER_QUERY_THRESHOLD
                     or envs.SGLANG_OPT_FLASHMLA_SPARSE_PREFILL.get()
