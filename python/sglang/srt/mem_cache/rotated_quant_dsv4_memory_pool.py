@@ -1354,6 +1354,18 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
                 kv=kv, kv_weight=kv_weight, eps=eps,
                 freqs_cis=freqs_cis, positions=positions,
             )
+            # [kvbit diag] post-norm-rope: split nope/rope NaN + freqs_cis fin.
+            if os.environ.get("SGLANG_RQ_DEBUG_DECODE", "0") == "1" and layer_id in (0, 1, 2):
+                _nope_fin = float(torch.isfinite(cat[..., : self.qk_nope_head_dim].float()).float().mean())
+                _rope_fin = float(torch.isfinite(cat[..., self.qk_nope_head_dim :].float()).float().mean())
+                _fc_fin = float(torch.isfinite(freqs_cis.float().float()).float().mean()) if freqs_cis.numel() > 0 else -1.0
+                print(
+                    f"[DBGNORMROPE] layer={layer_id} "
+                    f"cat_nope_fin={_nope_fin:.4f} cat_rope_fin={_rope_fin:.4f} "
+                    f"freqs_cis_fin={_fc_fin:.4f} fc_sh={tuple(freqs_cis.shape)} "
+                    f"fc_dt={freqs_cis.dtype}",
+                    flush=True,
+                )
         else:
             # CPU fallback — only used in offline canary tests.
             kv_weight_f = kv_weight.to(torch.float32)
