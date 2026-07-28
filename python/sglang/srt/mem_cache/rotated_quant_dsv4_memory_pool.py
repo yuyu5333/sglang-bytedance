@@ -1365,6 +1365,25 @@ class RotatedQuantDeepSeekV4TokenToKVPool(DeepSeekV4TokenToKVPool):
             page_size=self.swa_kv_pool.page_size,
             cfg=cfg,
         )
+        # [kvbit diag] store-side dump (gated to layers 0,1,2). Verifies the
+        # store executed, the locs it wrote, and the bytes after write. Cross-
+        # check vs DBGDECODE-pre read locs to find store/read loc mismatch.
+        if os.environ.get("SGLANG_RQ_DEBUG_DECODE", "0") == "1" and layer_id in (0, 1, 2):
+            _entry = self._wall_pools["swa"]
+            _pb = _entry.packed_buffers[local_layer_id]
+            _bpt = _entry.packed_bpt
+            _pb_rows = _pb.view(-1, _bpt)  # [num_pages*page_size, bpt]
+            _cat_fin = float(torch.isfinite(cat.float()).float().mean()) if cat.numel() > 0 else -1.0
+            _loc0 = int(swa_loc[0]) if swa_loc.numel() > 0 else -1
+            _loc_last = int(swa_loc[-1]) if swa_loc.numel() > 0 else -1
+            _buf_bytes = _pb_rows[_loc0, :16].tolist() if (_loc0 >= 0 and _loc0 < _pb_rows.shape[0]) else None
+            print(
+                f"[DBGSTORE] layer={layer_id} local={local_layer_id} "
+                f"loc_len={swa_loc.numel()} loc0={_loc0} loc_last={_loc_last} "
+                f"cat_fin={_cat_fin:.4f} cat_sh={tuple(cat.shape)} "
+                f"buf_rows={_pb_rows.shape[0]} buf_at_loc0={_buf_bytes}",
+                flush=True,
+            )
         # T3 token-shadow 模式: cat 已经是 norm+rope 后的 BF16 [N, 512]，
         # 直接量化写 shadow，prologue 跳过 page refresh。
         if _wall_token_shadow_enabled():
