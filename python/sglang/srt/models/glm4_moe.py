@@ -128,7 +128,7 @@ def _get_glm_shared_experts_fusion_disable_reason(
     quant_config: Optional[QuantizationConfig],
 ) -> Optional[str]:
     quant_method_name = None if quant_config is None else quant_config.get_name()
-    if quant_method_name not in {"compressed-tensors", "compressed_tensors"}:
+    if quant_method_name not in {"compressed-tensors", "compressed_tensors", "mxfp4"}:
         return None
 
     quantization_config = getattr(config, "quantization_config", None)
@@ -150,7 +150,7 @@ def _get_glm_shared_experts_fusion_disable_reason(
         return None
 
     return (
-        "GLM compressed-tensors checkpoints with ignored shared_experts store "
+        "GLM packed-quantized checkpoints with ignored shared_experts store "
         "shared experts as loose weights while routed experts use packed MoE "
         "weights."
     )
