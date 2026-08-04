@@ -373,6 +373,9 @@ def maybe_fuse_routed_scale_and_shared_add(
     # alpha=scale)`. With no shared output, the missing scale is applied
     # in-place. Otherwise `routed` is already scale-final and we just add
     # `shared` (or pass through if there is none).
+    from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensors_wmxfp4_afp8_moe import (
+        CompressedTensorsWMXFP4AFP8MoE,
+    )
     from sglang.srt.layers.quantization.mxfp4_flashinfer_cutlass_moe import (
         Mxfp4FlashinferCutlassMoEMethod,
     )
@@ -386,6 +389,7 @@ def maybe_fuse_routed_scale_and_shared_add(
             Mxfp4FlashinferTrtllmMoEMethod,
             Mxfp4FlashinferCutlassMoEMethod,
             Mxfp4MarlinMoEMethod,
+            CompressedTensorsWMXFP4AFP8MoE,
         ),
     )
     if fused:
