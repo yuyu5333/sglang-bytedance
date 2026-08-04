@@ -888,6 +888,17 @@ class Envs:
     # BF16 kv_buffer. Decode bypasses fa3 via a kvbit triton kernel. DSA bf16
     # path only (GLM-5.2). ~2.77x token capacity. See kvbit docs/multi_model_arch.md.
     SGLANG_KVBIT_NO_ALLOC = EnvBool(False)
+    # Split-K parallelism for the kvbit no_alloc decode kernel. The kernel's
+    # grid third dim splits each seq's KV across programs; max_kv_splits=1
+    # (Phase-1) serializes the KV scan and is the dominant decode bottleneck
+    # (kvbit kernel is 5.6x-29x slower than fa3, mostly from no split-K).
+    # SPLIT_TILE: KV tokens per split (device-side num_kv_splits = ceil(seqlen /
+    #   tile), clamped to [1, MAX_SPLITS]). 0 disables split-K (=> 1 split).
+    # MAX_SPLITS: host literal upper bound (grid dim, must NOT be derived from a
+    #   GPU tensor or CUDA-graph capture breaks). Size the att_out/att_lse
+    #   staging buffers — keep modest to bound HBM.
+    SGLANG_KVBIT_DECODE_SPLIT_TILE = EnvInt(64)
+    SGLANG_KVBIT_DECODE_MAX_SPLITS = EnvInt(128)
 
 
 envs = Envs()

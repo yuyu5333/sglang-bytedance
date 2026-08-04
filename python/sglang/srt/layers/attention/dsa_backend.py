@@ -1893,14 +1893,23 @@ class DeepseekSparseAttnBackend(
         cache_seqlens = metadata.dsa_cache_seqlens_int32
         bs = q_nope.shape[0]
 
-        # Phase-1 correctness: 1 KV split per seq. ``max_kv_splits`` MUST be a
-        # host literal — deriving it from the GPU ``num_kv_splits`` tensor via
-        # ``int(num_kv_splits[0])`` would CUDA->CPU sync and break CUDA-graph
-        # capture. Phase-2 will set per-seq splits from cache_seqlens (like
-        # triton_backend get_num_kv_splits) with a preallocated metadata tensor
-        # and a literal max.
-        max_kv_splits = 1
-        num_kv_splits = torch.full((bs,), 1, dtype=torch.int32, device=q_nope.device)
+        # Split-K parallelism. The kernel grid third dim splits each seq's KV
+        # across programs (one program per (batch, head, split)); the reduce
+        # merges per-split (out, lse) via log-sum-exp. max_kv_splits MUST be a
+        # host literal — deriving it from a GPU tensor would CUDA->CPU sync and
+        # break CUDA-graph capture. num_kv_splits is computed DEVICE-side from
+        # cache_seqlens (no host sync): ceil(seqlen / tile), clamped to
+        # [1, max_kv_splits]. tile=0 disables split-K (1 split, Phase-1 path).
+        split_tile = envs.SGLANG_KVBIT_DECODE_SPLIT_TILE.get()
+        max_kv_splits = envs.SGLANG_KVBIT_DECODE_MAX_SPLITS.get()
+        if split_tile <= 0 or max_kv_splits <= 1:
+            max_kv_splits = 1
+            num_kv_splits = torch.full((bs,), 1, dtype=torch.int32, device=q_nope.device)
+        else:
+            # device-side: ceil(cache_seqlens / tile), clamp to [1, max_kv_splits].
+            num_kv_splits = torch.clamp(
+                (cache_seqlens + split_tile - 1) // split_tile, 1, max_kv_splits
+            ).to(torch.int32)
 
         out = mla_decode_fwd(
             q_nope.contiguous(),
