@@ -201,14 +201,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         FusedMoE modules.
         """
         # After apply_weight_name_mapper, keys may be prefixed (e.g. "model.Linear").
-        # Find any key ending with "Linear" and add corresponding "FusedMoE"/"DeepEPMoE".
+        # Find any key ending with "Linear" and add "FusedMoE"/"DeepEPMoE" (without
+        # prefix, since find_matched_target matches by module class name).
         linear_keys = [k for k in self.target_scheme_map if k.endswith("Linear")]
         if not linear_keys or "FusedMoE" in self.target_scheme_map:
             return
         for linear_key in linear_keys:
-            prefix = linear_key[: -len("Linear")]
-            self.target_scheme_map[f"{prefix}FusedMoE"] = self.target_scheme_map[linear_key]
-            self.target_scheme_map[f"{prefix}DeepEPMoE"] = self.target_scheme_map[linear_key]
+            self.target_scheme_map["FusedMoE"] = self.target_scheme_map[linear_key]
+            self.target_scheme_map["DeepEPMoE"] = self.target_scheme_map[linear_key]
 
     @property
     def weight_block_size(self) -> Optional[List[int]]:
