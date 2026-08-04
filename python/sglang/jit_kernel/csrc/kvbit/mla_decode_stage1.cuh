@@ -320,14 +320,6 @@ __global__ void kvbit_mla_decode_stage1_kernel(
   device::PDLTriggerSecondary<kUsePDL>();
 }
 
-struct KvbitMlaDecodeStage1Params {
-  int32_t batch, n_heads, max_len, max_splits;
-  int32_t stride_qn_b, stride_qn_h, stride_qp_b, stride_qp_h;
-  int64_t stride_pk_b;
-  int32_t stride_pt_b, stride_pt_n;
-  int32_t stride_o_b, stride_o_h, stride_o_s;
-};
-
 template <bool kUsePDL>
 struct KvbitMlaDecodeStage1Kernel {
   static constexpr auto kernel = kvbit_mla_decode_stage1_kernel<kUsePDL>;
@@ -348,43 +340,60 @@ struct KvbitMlaDecodeStage1Kernel {
     auto Dn = SymbolicSize{"kv_lora_rank"};
     auto Dr = SymbolicSize{"qk_rope_head_dim"};
     auto Ms = SymbolicSize{"max_splits"};
+    // strides (in elements)
+    auto Sqn_b = SymbolicSize{"stride_qn_b"};
+    auto Sqn_h = SymbolicSize{"stride_qn_h"};
+    auto Sqp_b = SymbolicSize{"stride_qp_b"};
+    auto Sqp_h = SymbolicSize{"stride_qp_h"};
+    auto Spk_b = SymbolicSize{"stride_pk_b"};
+    auto Spt_b = SymbolicSize{"stride_pt_b"};
+    auto Spt_n = SymbolicSize{"stride_pt_n"};
+    auto So_b = SymbolicSize{"stride_o_b"};
+    auto So_h = SymbolicSize{"stride_o_h"};
+    auto So_s = SymbolicSize{"stride_o_s"};
     auto device_ = SymbolicDevice{};
     device_.set_options<kDLCUDA>();
 
-    // q_nope (B,H,Dn) bf16, q_pe (B,H,Dr) bf16
-    TensorMatcher({B, H, Dn}).with_dtype<bf16_t>().with_device<kDLCUDA>(device_).verify(q_nope);
-    TensorMatcher({B, H, Dr}).with_dtype<bf16_t>().with_device<kDLCUDA>(device_).verify(q_pe);
-    // kvbit_packed (S, row_bytes) uint8 ; row_bytes is Dn-derived (288 for Dn=512)
-    // We accept any trailing dim (the row bytes); validate Dn==512 implicitly via constexpr.
-    TensorMatcher({S, -1}).with_dtype<uint8_t>().with_device<kDLCUDA>(device_).verify(kvbit_packed);
-    TensorMatcher({S, 1, Dr}).with_dtype<bf16_t>().with_device<kDLCUDA>(device_).verify(rope_buf);
-    TensorMatcher({B, L}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(page_table);
+    TensorMatcher({B, H, Dn})
+        .with_strides({Sqn_b, Sqn_h, 1})
+        .with_dtype<bf16_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(q_nope);
+    TensorMatcher({B, H, Dr})
+        .with_strides({Sqp_b, Sqp_h, 1})
+        .with_dtype<bf16_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(q_pe);
+    TensorMatcher({S, -1})
+        .with_strides({Spk_b, 1})
+        .with_dtype<uint8_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(kvbit_packed);
+    TensorMatcher({S, 1, Dr})
+        .with_dtype<bf16_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(rope_buf);
+    TensorMatcher({B, L})
+        .with_strides({Spt_b, Spt_n})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(page_table);
     TensorMatcher({B}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(cache_seqlens);
     TensorMatcher({B}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(num_kv_splits);
-    TensorMatcher({B, H, Ms, Dn}).with_dtype<fp32_t>().with_device<kDLCUDA>(device_).verify(att_out);
-    TensorMatcher({B, H, Ms}).with_dtype<fp32_t>().with_device<kDLCUDA>(device_).verify(att_lse);
+    TensorMatcher({B, H, Ms, Dn})
+        .with_strides({So_b, So_h, So_s, 1})
+        .with_dtype<fp32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(att_out);
+    TensorMatcher({B, H, Ms})
+        .with_dtype<fp32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(att_lse);
 
     const auto batch = static_cast<int32_t>(B.unwrap());
     const auto n_heads = static_cast<int32_t>(H.unwrap());
     const auto max_len = static_cast<int32_t>(L.unwrap());
     const DLDevice dev = device_.unwrap();
-
-    const auto p = KvbitMlaDecodeStage1Params{
-        .batch = batch,
-        .n_heads = n_heads,
-        .max_len = max_len,
-        .max_splits = max_splits,
-        .stride_qn_b = static_cast<int32_t>(q_nope->stride[0]),
-        .stride_qn_h = static_cast<int32_t>(q_nope->stride[1]),
-        .stride_qp_b = static_cast<int32_t>(q_pe->stride[0]),
-        .stride_qp_h = static_cast<int32_t>(q_pe->stride[1]),
-        .stride_pk_b = kvbit_packed->stride[0],
-        .stride_pt_b = static_cast<int32_t>(page_table->stride[0]),
-        .stride_pt_n = static_cast<int32_t>(page_table->stride[1]),
-        .stride_o_b = static_cast<int32_t>(att_out->stride[0]),
-        .stride_o_h = static_cast<int32_t>(att_out->stride[1]),
-        .stride_o_s = static_cast<int32_t>(att_out->stride[2]),
-    };
 
     constexpr int32_t kBlockSize = 256;
     dim3 grid(batch, n_heads, max_splits);
@@ -399,10 +408,13 @@ struct KvbitMlaDecodeStage1Kernel {
         static_cast<const int32_t*>(num_kv_splits.data_ptr()),
         static_cast<float*>(att_out.data_ptr()),
         static_cast<float*>(att_lse.data_ptr()),
-        p.batch, p.n_heads, p.max_len, p.max_splits,
-        p.stride_qn_b, p.stride_qn_h, p.stride_qp_b, p.stride_qp_h,
-        p.stride_pk_b, p.stride_pt_b, p.stride_pt_n,
-        p.stride_o_b, p.stride_o_h, p.stride_o_s);
+        batch, n_heads, max_len, max_splits,
+        static_cast<int32_t>(Sqn_b.unwrap()), static_cast<int32_t>(Sqn_h.unwrap()),
+        static_cast<int32_t>(Sqp_b.unwrap()), static_cast<int32_t>(Sqp_h.unwrap()),
+        static_cast<int64_t>(Spk_b.unwrap()),
+        static_cast<int32_t>(Spt_b.unwrap()), static_cast<int32_t>(Spt_n.unwrap()),
+        static_cast<int32_t>(So_b.unwrap()), static_cast<int32_t>(So_h.unwrap()),
+        static_cast<int32_t>(So_s.unwrap()));
   }
 };
 
