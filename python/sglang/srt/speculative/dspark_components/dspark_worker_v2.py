@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import replace
 from typing import Optional
@@ -116,18 +118,23 @@ class DSparkWorkerV2(BaseSpecWorker):
         )
         self.gamma = runtime_config.gamma
         self.verify_num_draft_tokens = runtime_config.verify_num_draft_tokens
+        self.draft_query_num_tokens = runtime_config.draft_query_num_tokens
+        self.sample_from_anchor = runtime_config.sample_from_anchor
         self.speculative_num_draft_tokens = self.verify_num_draft_tokens
         self._mask_token_id = runtime_config.mask_token_id
 
         if self.ps.tp_rank == 0:
             logger.info(
                 "Initialized DSpark draft runner. attention_backend=%s, model=%s, "
-                "gamma=%s, verify_num_draft_tokens=%s, mask_token_id=%s, "
-                "markov_head=%s",
+                "gamma=%s, verify_num_draft_tokens=%s, "
+                "draft_query_num_tokens=%s, sample_from_anchor=%s, "
+                "mask_token_id=%s, markov_head=%s",
                 bundle.resolved_attention_backend,
                 self.draft_model.__class__.__name__,
                 self.gamma,
                 self.verify_num_draft_tokens,
+                self.draft_query_num_tokens,
+                self.sample_from_anchor,
                 self._mask_token_id,
                 type(self.draft_model.markov_head).__name__,
             )
@@ -136,7 +143,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             length=self.verify_num_draft_tokens, device=self.device
         )
         self._draft_block_spec_info = make_draft_block_spec_info(
-            draft_token_num=int(self.gamma), device=self.device
+            draft_token_num=int(self.draft_query_num_tokens), device=self.device
         )
 
         target_model = self.target_worker.model_runner.model
@@ -184,6 +191,8 @@ class DSparkWorkerV2(BaseSpecWorker):
             draft_model=self.draft_model,
             draft_model_runner=self.draft_model_runner,
             gamma=self.gamma,
+            draft_query_num_tokens=self.draft_query_num_tokens,
+            sample_from_anchor=self.sample_from_anchor,
             mask_token_id=self._mask_token_id,
             draft_block_spec_info=self._draft_block_spec_info,
             dp_moe_sync=self._draft_is_moe and server_args.enable_dp_attention,
@@ -277,6 +286,71 @@ class DSparkWorkerV2(BaseSpecWorker):
             return draft_tp_context(get_parallel().attn_tp_group)
         return nullcontext()
 
+    def _maybe_trace_runtime_proposal(
+        self,
+        *,
+        batch: ScheduleBatch,
+        bs: int,
+        draft_block_ids: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        verify_ids_2d: torch.Tensor,
+        accept,
+        proposal_folded: bool,
+    ) -> None:
+        trace_path = os.environ.get("SGLANG_DSPARK_TRACE_PATH")
+        if not trace_path or self.ps.tp_rank != 0:
+            return
+        max_steps = int(os.environ.get("SGLANG_DSPARK_TRACE_MAX_STEPS", "8"))
+        trace_count = int(getattr(self, "_dspark_trace_count", 0))
+        if trace_count >= max_steps:
+            return
+        max_reqs = int(os.environ.get("SGLANG_DSPARK_TRACE_MAX_REQS", "1"))
+        n_reqs = min(int(bs), max_reqs, max_steps - trace_count)
+
+        def _row(tensor: torch.Tensor, row: int):
+            return [int(x) for x in tensor[row].detach().cpu().tolist()]
+
+        records = []
+        reqs = getattr(batch, "reqs", None) or []
+        for row in range(n_reqs):
+            record = {
+                "source": "sglang_runtime",
+                "forward_iter": int(getattr(batch, "forward_iter", -1)),
+                "row": row,
+                "rid": str(getattr(reqs[row], "rid", "")) if row < len(reqs) else "",
+                "prefix_len": int(batch.seq_lens[row].detach().cpu().item()),
+                "gamma": int(self.gamma),
+                "verify_num_draft_tokens": int(self.verify_num_draft_tokens),
+                "draft_query_num_tokens": int(self.draft_query_num_tokens),
+                "sample_from_anchor": bool(self.sample_from_anchor),
+                "proposal_folded": bool(proposal_folded),
+                "draft_block_ids": _row(draft_block_ids, row),
+                "anchor_token": int(draft_block_ids[row, 0].detach().cpu().item()),
+                "draft_tokens": _row(draft_tokens, row),
+                "verify_ids_2d": _row(verify_ids_2d, row),
+            }
+            for name in ("correct_len", "commit_lens", "cap_trim_lens", "bonus", "out_tokens"):
+                value = getattr(accept, name, None)
+                if value is None:
+                    continue
+                if value.ndim == 0:
+                    record[name] = int(value.detach().cpu().item())
+                elif value.shape[0] > row:
+                    item = value[row]
+                    record[name] = (
+                        [int(x) for x in item.detach().cpu().reshape(-1).tolist()]
+                        if item.ndim > 0
+                        else int(item.detach().cpu().item())
+                    )
+            records.append(record)
+
+        if records:
+            os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+            with open(trace_path, "a", encoding="utf-8") as f:
+                for record in records:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._dspark_trace_count = trace_count + len(records)
+
     def alloc_memory_pool(
         self,
         memory_pool_config=None,
@@ -320,6 +394,8 @@ class DSparkWorkerV2(BaseSpecWorker):
         return maybe_build_draft_sampler(
             draft_model=self.draft_model,
             gamma=self.gamma,
+            draft_query_num_tokens=self.draft_query_num_tokens,
+            sample_from_anchor=self.sample_from_anchor,
             max_bs=max(self.server_args.cuda_graph_config.decode.bs),
             device=self.device,
             tp_rank=self.ps.tp_rank,
@@ -611,6 +687,15 @@ class DSparkWorkerV2(BaseSpecWorker):
             layout=layout,
             prefix_lens=prefix_lens,
             draft_tokens=draft_tokens,
+        )
+        self._maybe_trace_runtime_proposal(
+            batch=batch,
+            bs=bs,
+            draft_block_ids=draft_block_ids,
+            draft_tokens=draft_tokens,
+            verify_ids_2d=verify_ids_2d,
+            accept=accept,
+            proposal_folded=proposal.folded,
         )
         if on_publish is not None:
             if confidence is not None:

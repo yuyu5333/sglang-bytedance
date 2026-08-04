@@ -1,0 +1,111 @@
+# GLM-5.2 DSpark Runtime Reproduction
+
+This branch contains the patched SGLang runtime used for GLM-5.2 DSpark
+serving and benchmark reproduction. It is intended to be used as source code
+mounted into an existing SGLang 0.5.12-compatible container.
+
+## What Is Included
+
+- `DSPARK` speculative decoding runtime support.
+- DSpark draft/verify/accept scheduling components.
+- GLM/DeepSeek DSA attention backend integration.
+- `dspark_bonus_anchor` layout handling for speculators-style checkpoints.
+- Legacy anchor-slot compatibility via `SGLANG_DSPARK_LEGACY_ANCHOR_SLOT`.
+- Native MTP/NEXTN launch compatibility for same-environment comparison.
+
+## Runtime Source Path
+
+The evaluated service used this source tree through `PYTHONPATH`, rather than
+the container's default installed SGLang package:
+
+```bash
+export PYTHONPATH=/path/to/sglang/python:${PYTHONPATH:-}
+```
+
+When using a container that already has SGLang installed, make sure this branch
+is ahead of the preinstalled package on `PYTHONPATH`.
+
+## Minimal DSpark Launch
+
+Prepare these paths on the target machine:
+
+```bash
+export MODEL_PATH=<path_to_glm52_fp8_target_model>
+export TOKENIZER_PATH=<path_to_glm52_tokenizer>
+export CHAT_TEMPLATE=$MODEL_PATH/chat_template.jinja
+export DRAFT_PATH=<path_to_dspark_draft_model>
+export SERVED_MODEL_NAME=glm52-dspark
+
+export PYTHONPATH=/path/to/sglang/python:${PYTHONPATH:-}
+export FLASHINFER_DISABLE_VERSION_CHECK=1
+```
+
+Single-node or node-rank-specific arguments can be adjusted as needed. The
+production evaluation used the same argument surface:
+
+```bash
+python3 -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --tokenizer-path "$TOKENIZER_PATH" \
+  --chat-template "$CHAT_TEMPLATE" \
+  --tp-size <tp_size> \
+  --nnodes <num_nodes> \
+  --node-rank <node_rank> \
+  --dist-init-addr <master_addr:master_port> \
+  --speculative-algorithm DSPARK \
+  --speculative-draft-model-path "$DRAFT_PATH" \
+  --speculative-num-draft-tokens 8 \
+  --trust-remote-code \
+  --tokenizer-mode slow \
+  --context-length 32768 \
+  --mem-fraction-static 0.90 \
+  --dsa-prefill-backend flashmla_sparse \
+  --dsa-decode-backend fa3 \
+  --sampling-backend pytorch \
+  --tool-call-parser glm47 \
+  --host 0.0.0.0 \
+  --port 31000 \
+  --served-model-name "$SERVED_MODEL_NAME"
+```
+
+For legacy checkpoints trained with anchor-as-proposal semantics, the draft
+model config should set:
+
+```json
+{
+  "dspark_bonus_anchor": false,
+  "block_size": 8,
+  "speculative_tokens": 7
+}
+```
+
+If the checkpoint cannot be edited, the runtime also supports:
+
+```bash
+export SGLANG_DSPARK_LEGACY_ANCHOR_SLOT=1
+```
+
+Prefer the config-based route when preparing a shareable model artifact.
+
+## Runtime Checks
+
+After startup, verify these lines in the server log:
+
+```text
+speculative_algorithm='DSPARK'
+Initialized DSpark draft runner
+draft_query_num_tokens=...
+sample_from_anchor=...
+Capture target verify CUDA graph
+Capture draft verify CUDA graph
+```
+
+For GLM-5.2 MLA/DSA serving, prefill CUDA graph may be disabled automatically
+with a log line similar to:
+
+```text
+Breakable CUDA graph is incompatible with MLA attention; disabling prefill CUDA graph.
+```
+
+This is expected for the evaluated GLM-5.2 setup; decode and verify CUDA graphs
+should still be captured.

@@ -730,13 +730,23 @@ class ModelRunner:
     ) -> int:
         """Logits rows per decode batch slot."""
         if self.spec_algorithm.is_speculative():
-            return resolve_num_tokens_per_req(
+            num_tokens_per_req = resolve_num_tokens_per_req(
                 phase="target_verify",
                 server_args=self.server_args,
                 spec_algorithm=self.spec_algorithm,
                 is_draft_worker=self.is_draft_worker,
                 num_draft_tokens=num_draft_tokens,
             )
+            if self.spec_algorithm.is_dspark() and self.is_draft_worker:
+                hf_config = self.model_config.hf_config
+                bonus_anchor = getattr(hf_config, "dspark_bonus_anchor", None)
+                if bonus_anchor is None:
+                    bonus_anchor = (
+                        getattr(hf_config, "speculators_model_type", None) == "dspark"
+                    )
+                if bonus_anchor:
+                    num_tokens_per_req += 1
+            return num_tokens_per_req
         dllm_config = DllmConfig.from_server_args(self.server_args)
         return dllm_config.block_size if dllm_config is not None else 1
 

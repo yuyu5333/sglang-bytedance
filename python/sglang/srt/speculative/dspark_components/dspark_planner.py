@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional, Union
 
 import msgspec
@@ -48,6 +49,23 @@ from sglang.srt.utils.async_probe import (
 from sglang.srt.utils.common import require_mlp_tp_gather
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_verify_len_cap(verify_num_draft_tokens: int) -> Optional[int]:
+    raw = os.environ.get("SGLANG_DSPARK_VERIFY_LEN_CAP", "").strip()
+    if not raw:
+        return None
+    try:
+        cap = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid SGLANG_DSPARK_VERIFY_LEN_CAP={raw!r}; expected integer."
+        ) from exc
+    if cap <= 0:
+        raise ValueError(
+            f"Invalid SGLANG_DSPARK_VERIFY_LEN_CAP={raw!r}; expected > 0."
+        )
+    return min(cap, int(verify_num_draft_tokens))
 
 
 class VerifyWindow(msgspec.Struct, frozen=True):
@@ -579,6 +597,10 @@ class DSparkVerifyPlanner:
             budget=budget,
             cfg=self._schedule_cfg,
         ).to(device=device, dtype=torch.int32)
+        verify_len_cap = _resolve_verify_len_cap(self.verify_num_draft_tokens)
+        if verify_len_cap is not None:
+            floor = max(self._schedule_cfg.min_verify_len, 1)
+            verify_lens.clamp_(min=floor, max=verify_len_cap)
 
         if envs.SGLANG_ENABLE_ASYNC_ASSERT.get():
             verify_lens_64 = verify_lens.to(torch.int64)
@@ -728,14 +750,18 @@ def uniform_ragged_layout(
     model_runner,
     tier_num_reqs: Optional[int] = None,
 ) -> Optional[RaggedVerifyLayout]:
+    verify_len_cap = _resolve_verify_len_cap(verify_num_draft_tokens)
+    effective_verify_len = (
+        verify_num_draft_tokens if verify_len_cap is None else verify_len_cap
+    )
     tier_num_reqs = bs if tier_num_reqs is None else tier_num_reqs
     if ragged_layout_exceeds_captured_grid(
         num_reqs=tier_num_reqs,
-        verify_num_draft_tokens=verify_num_draft_tokens,
+        verify_num_draft_tokens=effective_verify_len,
         model_runner=model_runner,
     ):
         return None
-    verify_lens_cpu = [verify_num_draft_tokens] * bs
+    verify_lens_cpu = [effective_verify_len] * bs
     grid = verify_layout_grid(
         verify_lens_cpu=verify_lens_cpu,
         ragged_verify_mode=ragged_verify_mode,
@@ -744,7 +770,7 @@ def uniform_ragged_layout(
     graph_num_tokens_floor = verify_layout_graph_num_tokens_floor(
         num_reqs=tier_num_reqs,
         ragged_verify_mode=ragged_verify_mode,
-        verify_num_draft_tokens=verify_num_draft_tokens,
+        verify_num_draft_tokens=effective_verify_len,
         model_runner=model_runner,
     )
     return RaggedVerifyLayout.from_verify_lens(

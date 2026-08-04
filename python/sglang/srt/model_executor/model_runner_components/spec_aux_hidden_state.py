@@ -158,7 +158,10 @@ def _resolve_dflash_aux_hidden_state(
                     f"got markov_rank={dspark_draft_config.markov_rank}."
                 )
             if dspark_draft_config.target_layer_ids is not None:
-                target_layer_ids = list(dspark_draft_config.target_layer_ids)
+                target_layer_ids = dspark_draft_config.resolve_target_layer_ids(
+                    target_num_layers=int(target_num_layers),
+                    draft_num_layers=int(draft_num_layers),
+                )
 
         config.dflash_use_aux_hidden_state = True
         config.dflash_draft_num_layers = int(draft_num_layers)

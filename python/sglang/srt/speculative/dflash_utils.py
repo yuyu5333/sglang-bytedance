@@ -335,10 +335,19 @@ def _get_text_config(config: Any) -> Any:
     if config is None:
         return None
     if isinstance(config, dict):
-        return config.get("text_config", config)
+        text_config = config.get("text_config", None)
+        if text_config is not None:
+            return text_config
+        transformer_layer_config = config.get("transformer_layer_config", None)
+        return (
+            transformer_layer_config if transformer_layer_config is not None else config
+        )
     text_config = getattr(config, "text_config", None)
     if text_config is not None:
         return text_config
+    transformer_layer_config = getattr(config, "transformer_layer_config", None)
+    if transformer_layer_config is not None:
+        return transformer_layer_config
     get_text_config = getattr(config, "get_text_config", None)
     if callable(get_text_config):
         try:
@@ -446,6 +455,7 @@ def parse_dflash_draft_config(*, draft_hf_config: Any) -> DFlashDraftConfig:
         field_name="DFLASH draft num_hidden_layers",
         min_value=1,
     )
+    aux_layer_ids = _cfg_get(draft_hf_config, "aux_hidden_state_layer_ids", None)
     raw_num_target_layers = dflash_cfg.get(
         "num_target_layers",
         _cfg_get(draft_hf_config, "num_target_layers", None),
@@ -471,6 +481,10 @@ def parse_dflash_draft_config(*, draft_hf_config: Any) -> DFlashDraftConfig:
         "target_layer_ids",
         _cfg_get(draft_hf_config, "target_layer_ids", None),
     )
+    if layer_ids is None and aux_layer_ids is not None:
+        # Speculators IDs name target layer inputs. SGLang captures layer outputs,
+        # so output i - 1 is the input to layer i, matching vLLM's conversion.
+        layer_ids = [int(x) - 1 for x in aux_layer_ids]
     parsed_target_layer_ids: Optional[List[int]]
     if layer_ids is None:
         parsed_target_layer_ids = None
@@ -634,13 +648,13 @@ def compute_dflash_sampling_correct_drafts_and_bonus(
         )
 
     if threshold_single is None:
-        from sglang.srt.runtime_context import get_spec
+        from sglang.srt.runtime_context import get_server_args
 
-        threshold_single = get_spec().speculative_accept_threshold_single
+        threshold_single = get_server_args().speculative_accept_threshold_single
     if threshold_acc is None:
-        from sglang.srt.runtime_context import get_spec
+        from sglang.srt.runtime_context import get_server_args
 
-        threshold_acc = get_spec().speculative_accept_threshold_acc
+        threshold_acc = get_server_args().speculative_accept_threshold_acc
     threshold_single = float(threshold_single)
     threshold_acc = max(float(threshold_acc), 1e-9)
 
@@ -682,7 +696,39 @@ def compute_dflash_sampling_correct_drafts_and_bonus(
         uniform_top_k_value=uniform_top_k_value,
         use_sparse_topk=use_sparse_topk,
     )
-    draft_probs = torch.zeros_like(target_probs)
+    from sglang.srt.runtime_context import get_server_args
+
+    use_rejection_sampling = (
+        get_server_args().speculative_use_rejection_sampling
+    )
+    if use_rejection_sampling:
+        from sglang.kernels.ops.speculative.reject_sampling import (
+            chain_speculative_sampling_triton,
+        )
+
+        # DFlash proposes greedily. Its proposal distribution is therefore a
+        # delta at candidates[:, 1:], not an all-zero target-only placeholder.
+        vocab_size = target_probs.shape[-1]
+        draft_probs = torch.zeros(
+            (bs, draft_token_num - 1, vocab_size),
+            dtype=target_probs.dtype,
+            device=device,
+        )
+        draft_probs.scatter_(
+            2,
+            candidates[:, 1:].to(torch.long).unsqueeze(-1),
+            1.0,
+        )
+        sampling_fn = chain_speculative_sampling_triton
+        sampling_uniforms = uniform_samples[:, : draft_token_num - 1]
+        sampling_threshold_single = 1.0
+        sampling_threshold_acc = 1.0
+    else:
+        draft_probs = torch.zeros_like(target_probs)
+        sampling_fn = tree_speculative_sampling_target_only
+        sampling_uniforms = uniform_samples
+        sampling_threshold_single = threshold_single
+        sampling_threshold_acc = threshold_acc
 
     (
         retrieve_index,
@@ -699,7 +745,7 @@ def compute_dflash_sampling_correct_drafts_and_bonus(
     candidates_i64 = (
         candidates if candidates.dtype == torch.int64 else candidates.to(torch.int64)
     )
-    tree_speculative_sampling_target_only(
+    sampling_fn(
         predicts=predicts,
         accept_index=accept_index,
         accept_token_num=accept_token_num,
@@ -707,12 +753,12 @@ def compute_dflash_sampling_correct_drafts_and_bonus(
         retrive_index=retrieve_index,
         retrive_next_token=retrieve_next_token,
         retrive_next_sibling=retrieve_next_sibling,
-        uniform_samples=uniform_samples,
+        uniform_samples=sampling_uniforms,
         uniform_samples_for_final_sampling=uniform_samples_for_final_sampling,
         target_probs=target_probs,
         draft_probs=draft_probs,
-        threshold_single=threshold_single,
-        threshold_acc=threshold_acc,
+        threshold_single=sampling_threshold_single,
+        threshold_acc=sampling_threshold_acc,
         deterministic=True,
     )
 

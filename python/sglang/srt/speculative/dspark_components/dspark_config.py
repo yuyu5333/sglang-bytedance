@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 import msgspec
 
-from sglang.srt.speculative.dflash_utils import parse_dflash_draft_config
+from sglang.srt.speculative.dflash_utils import (
+    build_target_layer_ids,
+    parse_dflash_draft_config,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
@@ -64,10 +67,49 @@ class DSparkDraftConfig(msgspec.Struct, frozen=True):
     def require_markov(self) -> bool:
         return int(self.markov_rank) > 0
 
+    def resolve_target_layer_ids(
+        self,
+        *,
+        target_num_layers: int,
+        draft_num_layers: Optional[int] = None,
+    ) -> List[int]:
+        target_num_layers = int(target_num_layers)
+        if target_num_layers <= 0:
+            raise ValueError(
+                f"target_num_layers must be positive, got {target_num_layers}."
+            )
+
+        if self.target_layer_ids is None:
+            if draft_num_layers is None:
+                if self.num_hidden_layers is None:
+                    raise ValueError(
+                        "DSpark requires draft num_hidden_layers in config when "
+                        "target_layer_ids are omitted."
+                    )
+                draft_num_layers = int(self.num_hidden_layers)
+            return build_target_layer_ids(target_num_layers, int(draft_num_layers))
+
+        resolved = list(self.target_layer_ids)
+        if len(resolved) <= 0:
+            raise ValueError(
+                "DSpark target_layer_ids must be non-empty. "
+                f"Got len(target_layer_ids)={len(resolved)}."
+            )
+
+        for idx, val in enumerate(resolved):
+            if val < 0 or val >= target_num_layers:
+                raise ValueError(
+                    "DSpark target_layer_ids contains an out-of-range layer id. "
+                    f"target_layer_ids[{idx}]={val}, target_num_layers={target_num_layers}."
+                )
+        return resolved
+
 
 class DSparkRuntimeConfig(msgspec.Struct, frozen=True):
     gamma: int
     verify_num_draft_tokens: int
+    draft_query_num_tokens: int
+    sample_from_anchor: bool
     mask_token_id: int
 
 
@@ -117,9 +159,19 @@ def resolve_runtime_config(
             f"vocab size {target_vocab_size}."
         )
 
+    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", None)
+    if bonus_anchor is None:
+        bonus_anchor = (
+            getattr(draft_hf_config, "speculators_model_type", None) == "dspark"
+        )
+    sample_from_anchor = not bool(bonus_anchor)
+    draft_query_num_tokens = gamma if sample_from_anchor else gamma + 1
+
     return DSparkRuntimeConfig(
         gamma=gamma,
         verify_num_draft_tokens=gamma + 1,
+        draft_query_num_tokens=draft_query_num_tokens,
+        sample_from_anchor=sample_from_anchor,
         mask_token_id=mask_token_id,
     )
 
@@ -265,9 +317,12 @@ def parse_dspark_draft_config(*, draft_hf_config: Any) -> DSparkDraftConfig:
             f"DSpark mask_token_id must be non-negative, got {mask_token_id}."
         )
 
-    gamma = (
+    # External DSpark checkpoints store the verify window size in block_size,
+    # while runtime gamma counts only the draft proposals (exclude bonus token).
+    raw_block_size = (
         int(prefixed_block_size) if prefixed_block_size is not None else base.block_size
     )
+    gamma = raw_block_size - 1 if raw_block_size is not None else None
 
     if prefixed_target_layer_ids is not None:
         if not isinstance(prefixed_target_layer_ids, (list, tuple)) or not len(

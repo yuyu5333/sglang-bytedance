@@ -423,12 +423,27 @@ class DeepseekV2WeightLoaderMixin:
                             weight_loader = getattr(
                                 param, "weight_loader", default_weight_loader
                             )
+
+                            def _debug_weight_loader(param, loaded_weight, name, weight_loader):
+                                try:
+                                    weight_loader(param, loaded_weight)
+                                except Exception:
+                                    logger.error(
+                                        "DEBUG weight load failed: name=%s param_shape=%s loaded_shape=%s param_dtype=%s loaded_dtype=%s",
+                                        name,
+                                        tuple(param.shape),
+                                        tuple(loaded_weight.shape),
+                                        param.dtype,
+                                        loaded_weight.dtype,
+                                    )
+                                    raise
+
                             maybe_executor_submit(
                                 executor=executor,
                                 futures=futures,
                                 use_async=use_async_loading,
-                                func=weight_loader,
-                                func_args=(param, loaded_weight),
+                                func=_debug_weight_loader,
+                                func_args=(param, loaded_weight, name, weight_loader),
                             )
 
             # Wait for all tasks to complete and raise any exceptions.

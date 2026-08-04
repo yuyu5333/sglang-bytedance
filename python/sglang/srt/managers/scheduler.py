@@ -3919,14 +3919,21 @@ class Scheduler(
             ret["scale_phase"] = ElasticEPStateManager.get_scale_phase()
             ret["elastic_ep_last_error"] = ElasticEPStateManager.get_last_error()
 
-        if (
-            not self.spec_algorithm.is_none()
-            and self.metrics_reporter.spec_total_num_forward_ct > 0
-        ):
-            ret["avg_spec_accept_length"] = (
+        if not self.spec_algorithm.is_none():
+            spec_total_num_accept_tokens = (
                 self.metrics_reporter.spec_total_num_accept_tokens
-                / self.metrics_reporter.spec_total_num_forward_ct
+                + self.metrics_reporter.spec_num_accept_tokens
             )
+            spec_total_num_forward_ct = (
+                self.metrics_reporter.spec_total_num_forward_ct
+                + self.metrics_reporter.spec_num_forward_ct
+            )
+            ret["spec_total_num_accept_tokens"] = spec_total_num_accept_tokens
+            ret["spec_total_num_forward_ct"] = spec_total_num_forward_ct
+            if spec_total_num_forward_ct > 0:
+                ret["avg_spec_accept_length"] = (
+                    spec_total_num_accept_tokens / spec_total_num_forward_ct
+                )
 
         if RECORD_STEP_TIME:
             ret["step_time_dict"] = self.metrics_reporter.step_time_dict

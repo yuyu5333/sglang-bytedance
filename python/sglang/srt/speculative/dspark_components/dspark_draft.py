@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import Optional
 
@@ -28,6 +29,15 @@ from sglang.srt.speculative.spec_info import (
 from sglang.srt.speculative.spec_utils import draft_tp_context
 
 logger = logging.getLogger(__name__)
+
+
+def legacy_anchor_slot_layout_enabled() -> bool:
+    return os.environ.get("SGLANG_DSPARK_LEGACY_ANCHOR_SLOT", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class DraftBlockResult(msgspec.Struct, frozen=True):
@@ -60,10 +70,23 @@ def greedy_step_sampler(step_logits: torch.Tensor, step_idx: int) -> torch.Tenso
 
 class DsparkDraftSampler:
 
-    def __init__(self, *, model, gamma, max_bs, device, confidence_fn=None, out=None):
+    def __init__(
+        self,
+        *,
+        model,
+        gamma,
+        draft_query_num_tokens,
+        sample_from_anchor,
+        max_bs,
+        device,
+        confidence_fn=None,
+        out=None,
+    ):
         self.model = model
         self.markov_head = model.markov_head
         self.gamma = int(gamma)
+        self.draft_query_num_tokens = int(draft_query_num_tokens)
+        self.sample_from_anchor = bool(sample_from_anchor)
         if out is not None:
             assert out.shape == (int(max_bs) * self.gamma,) and out.dtype == torch.int64
             self.out = out
@@ -79,20 +102,31 @@ class DsparkDraftSampler:
         )
 
     def __call__(self, hidden_states, input_ids):
-        bs = hidden_states.shape[0] // self.gamma
-        base_logits, confidence_tap = self.model.compute_base_logits(hidden_states)
+        query_width = self.draft_query_num_tokens
+        bs = hidden_states.shape[0] // query_width
+        query_hidden = hidden_states.view(bs, query_width, -1)
+        if legacy_anchor_slot_layout_enabled():
+            draft_hidden_3d = query_hidden[:, : self.gamma, :]
+        else:
+            draft_hidden_3d = (
+                query_hidden[:, : self.gamma, :]
+                if self.sample_from_anchor
+                else query_hidden[:, 1 : 1 + self.gamma, :]
+            )
+        draft_hidden = draft_hidden_3d.reshape(bs * self.gamma, -1)
+        base_logits, confidence_tap = self.model.compute_base_logits(draft_hidden)
         base_logits = base_logits.view(bs, self.gamma, -1)
-        anchor = input_ids.view(bs, self.gamma)[:, 0]
+        anchor = input_ids.view(bs, query_width)[:, 0]
         draft_tokens, _ = self.markov_head.sample_block(
             base_logits,
             first_prev_tokens=anchor,
-            hidden_states=hidden_states.view(bs, self.gamma, -1),
+            hidden_states=draft_hidden_3d,
             sampler=greedy_step_sampler,
         )
         self.out[: draft_tokens.numel()].copy_(draft_tokens.reshape(-1))
         if self.confidence_out is not None:
             confidence = self.confidence_fn(
-                draft_hidden=hidden_states.view(bs, self.gamma, -1),
+                draft_hidden=draft_hidden_3d,
                 anchor_tokens=anchor,
                 draft_tokens=draft_tokens,
                 confidence_tap=confidence_tap,
@@ -104,6 +138,8 @@ def maybe_build_draft_sampler(
     *,
     draft_model,
     gamma: int,
+    draft_query_num_tokens: int,
+    sample_from_anchor: bool,
     max_bs: int,
     device,
     tp_rank: int,
@@ -130,6 +166,8 @@ def maybe_build_draft_sampler(
     return DsparkDraftSampler(
         model=draft_model,
         gamma=gamma,
+        draft_query_num_tokens=draft_query_num_tokens,
+        sample_from_anchor=sample_from_anchor,
         max_bs=max_bs,
         device=device,
         confidence_fn=confidence_fn,
@@ -224,6 +262,8 @@ class DraftBlockProposer:
         draft_model,
         draft_model_runner,
         gamma: int,
+        draft_query_num_tokens: int,
+        sample_from_anchor: bool,
         mask_token_id: int,
         draft_block_spec_info,
         dp_moe_sync: bool = False,
@@ -231,6 +271,8 @@ class DraftBlockProposer:
         self.draft_model = draft_model
         self.draft_model_runner = draft_model_runner
         self.gamma = gamma
+        self.draft_query_num_tokens = draft_query_num_tokens
+        self.sample_from_anchor = sample_from_anchor
         self._mask_token_id = mask_token_id
         self._draft_block_spec_info = draft_block_spec_info
         self._draft_sampler = None
@@ -348,25 +390,29 @@ class DraftBlockProposer:
         embed_module,
     ) -> DraftForwardResult:
         gamma = self.gamma
+        query_width = self.draft_query_num_tokens
         prefix_lens = batch.seq_lens
         positions_2d = verify_window.positions_2d
         verify_cache_loc_2d = verify_window.verify_cache_loc_2d
 
-        draft_block_ids = torch.full(
-            (bs, gamma), int(self._mask_token_id), dtype=torch.long, device=device
+        draft_query_ids = torch.full(
+            (bs, query_width),
+            int(self._mask_token_id),
+            dtype=torch.long,
+            device=device,
         )
-        draft_block_ids[:, 0].copy_(draft_input.bonus_tokens.view(-1))
-        draft_positions = positions_2d[:, :gamma].reshape(-1)
-        draft_cache_loc = verify_cache_loc_2d[:, :gamma].reshape(-1)
+        draft_query_ids[:, 0].copy_(draft_input.bonus_tokens.view(-1))
+        draft_positions = positions_2d[:, :query_width].reshape(-1)
+        draft_cache_loc = verify_cache_loc_2d[:, :query_width].reshape(-1)
 
         draft_owns_embed = hasattr(self.draft_model, "forward_embed")
         draft_input_embeds: Optional[torch.Tensor] = None
         if not draft_owns_embed:
-            noise_embedding = embed_module(draft_block_ids)
+            noise_embedding = embed_module(draft_query_ids)
             draft_input_embeds = noise_embedding.view(-1, noise_embedding.shape[-1])
 
         if batch.seq_lens_cpu is not None:
-            draft_seq_lens_cpu = batch.seq_lens_cpu + gamma
+            draft_seq_lens_cpu = batch.seq_lens_cpu + query_width
             draft_seq_lens_sum = int(draft_seq_lens_cpu.sum())
         elif draft_input.reserved_seq_lens_cpu is not None:
             draft_seq_lens_cpu = draft_input.reserved_seq_lens_cpu
@@ -377,7 +423,7 @@ class DraftBlockProposer:
         draft_forward_batch = ForwardBatch(
             forward_mode=ForwardMode.TARGET_VERIFY,
             batch_size=bs,
-            input_ids=draft_block_ids.flatten(),
+            input_ids=draft_query_ids.flatten(),
             req_pool_indices=batch.req_pool_indices,
             seq_lens=prefix_lens,
             out_cache_loc=draft_cache_loc,
@@ -396,7 +442,17 @@ class DraftBlockProposer:
         raw_hidden = logits_output.hidden_states
         if raw_hidden is None:
             raise RuntimeError("DSpark draft model returned no hidden states.")
-        draft_hidden_3d = raw_hidden.view(bs, gamma, -1)
+        query_hidden_3d = raw_hidden.view(bs, query_width, -1)
+        if legacy_anchor_slot_layout_enabled():
+            draft_hidden_3d = query_hidden_3d[:, :gamma, :]
+        else:
+            draft_hidden_3d = (
+                query_hidden_3d[:, :gamma, :]
+                if self.sample_from_anchor
+                else query_hidden_3d[:, 1 : 1 + gamma, :]
+            )
+        raw_hidden = draft_hidden_3d.reshape(bs * gamma, -1)
+        draft_block_ids = draft_query_ids[:, :gamma]
         return DraftForwardResult(
             draft_block_ids=draft_block_ids,
             raw_hidden=raw_hidden,
