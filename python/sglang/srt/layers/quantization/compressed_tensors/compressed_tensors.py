@@ -49,6 +49,7 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Fp8MoE,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWMXFP4AFP8MoE,
     CompressedTensorsWNA16,
     CompressedTensorsWNA16MoE,
     CompressedTensorsWNA16TritonMoE,
