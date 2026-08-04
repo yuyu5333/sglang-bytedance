@@ -200,19 +200,25 @@ class CompressedTensorsConfig(QuantizationConfig):
         targeting 'Linear' needs to also match
         FusedMoE modules.
         """
-        if (
-            "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
-        ):
+        # After apply_weight_name_mapper, keys may be prefixed (e.g. "model.Linear").
+        # Find any key ending with "Linear" and add corresponding "FusedMoE"/"DeepEPMoE".
+        linear_keys = [k for k in self.target_scheme_map if k.endswith("Linear")]
+        if not linear_keys or "FusedMoE" in self.target_scheme_map:
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
-        self.target_scheme_map["DeepEPMoE"] = self.target_scheme_map["Linear"]
+        for linear_key in linear_keys:
+            prefix = linear_key[: -len("Linear")]
+            self.target_scheme_map[f"{prefix}FusedMoE"] = self.target_scheme_map[linear_key]
+            self.target_scheme_map[f"{prefix}DeepEPMoE"] = self.target_scheme_map[linear_key]
 
     @property
     def weight_block_size(self) -> Optional[List[int]]:
         """Get the weight block size from the quantization config."""
-        if "Linear" in self.target_scheme_map:
-            weights_config = self.target_scheme_map["Linear"].get("weights")
+        # After apply_weight_name_mapper, key may be prefixed (e.g. "model.Linear").
+        linear_key = next(
+            (k for k in self.target_scheme_map if k.endswith("Linear")), None
+        )
+        if linear_key is not None:
+            weights_config = self.target_scheme_map[linear_key].get("weights")
             if weights_config and hasattr(weights_config, "block_structure"):
                 return weights_config.block_structure
         return None
