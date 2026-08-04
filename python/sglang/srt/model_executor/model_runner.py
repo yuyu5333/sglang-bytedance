@@ -56,6 +56,7 @@ from sglang.srt.configs import (
     Qwen3_5MoeConfig,
     Qwen3NextConfig,
 )
+from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.linear_attn_model_registry import get_linear_attn_config
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
@@ -189,6 +190,7 @@ from sglang.srt.server_args import (
     set_global_server_args_for_scheduler,
 )
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+from sglang.srt.speculative.spec_utils import resolve_num_tokens_per_req
 from sglang.srt.state_capturer.base import TopkCaptureOutput
 from sglang.srt.state_capturer.indexer_topk import (
     create_indexer_capturer,
@@ -871,6 +873,31 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if self.canary_manager is not None and not self.is_draft_worker:
             self.canary_manager.mark_init_finished()
+
+    def decode_num_tokens_per_req(
+        self, *, num_draft_tokens: Optional[int] = None
+    ) -> int:
+        """Logits rows per decode batch slot."""
+        if self.spec_algorithm.is_speculative():
+            num_tokens_per_req = resolve_num_tokens_per_req(
+                phase="target_verify",
+                server_args=self.server_args,
+                spec_algorithm=self.spec_algorithm,
+                is_draft_worker=self.is_draft_worker,
+                num_draft_tokens=num_draft_tokens,
+            )
+            if self.spec_algorithm.is_dspark() and self.is_draft_worker:
+                hf_config = self.model_config.hf_config
+                bonus_anchor = getattr(hf_config, "dspark_bonus_anchor", None)
+                if bonus_anchor is None:
+                    bonus_anchor = (
+                        getattr(hf_config, "speculators_model_type", None) == "dspark"
+                    )
+                if bonus_anchor:
+                    num_tokens_per_req += 1
+            return num_tokens_per_req
+        dllm_config = DllmConfig.from_server_args(self.server_args)
+        return dllm_config.block_size if dllm_config is not None else 1
 
     def adjust_hybrid_swa_layers_for_pp(self):
         if not self.is_hybrid_swa:

@@ -775,7 +775,12 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             capture_hidden_mode=capture_hidden_mode,
         )
 
-    def filter_batch(self, new_indices: torch.Tensor, has_been_filtered: bool = True):
+    def filter_batch(
+        self,
+        new_indices: torch.Tensor,
+        has_been_filtered: bool = True,
+        new_indices_cpu: Optional[List[int]] = None,
+    ):
         if self.future_indices is not None:
             self.future_indices = self.future_indices[new_indices]
             return
@@ -793,16 +798,24 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
 
             self.topk_p = self.topk_p[: len(new_indices)]
             self.topk_index = self.topk_index[: len(new_indices)]
+            if self.draft_probs is not None:
+                self.draft_probs = self.draft_probs[: len(new_indices)]
             if self.hidden_states is not None:
                 self.hidden_states = self.hidden_states[: len(new_indices)]
             self.bonus_tokens = self.bonus_tokens[: len(new_indices)]
+            if self.dsa_topk_indices is not None:
+                self.dsa_topk_indices = self.dsa_topk_indices[: len(new_indices)]
         else:
             # in some cases(e.g draft_extend), we have not filtered the batch by `unfinished_index`
             self.topk_p = self.topk_p[new_indices]
             self.topk_index = self.topk_index[new_indices]
+            if self.draft_probs is not None:
+                self.draft_probs = self.draft_probs[new_indices]
             if self.hidden_states is not None:
                 self.hidden_states = self.hidden_states[new_indices]
             self.bonus_tokens = self.bonus_tokens[new_indices]
+            if self.dsa_topk_indices is not None:
+                self.dsa_topk_indices = self.dsa_topk_indices[new_indices]
 
     def merge_batch(self, spec_info: "EagleDraftInput"):
         if self.future_indices is not None:

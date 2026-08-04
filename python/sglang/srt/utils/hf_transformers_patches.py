@@ -60,6 +60,7 @@ def apply_all():
     _patch_image_processor_kwargs()
     _patch_image_process_cuda_tensor()
     _patch_nemotron_h_pattern()
+    _patch_glm_moe_dsa_attribute_map()
 
     # v5 general patches
     _ensure_clean_up_tokenization_compat()
@@ -133,6 +134,31 @@ def _ensure_gguf_version():
 # ---------------------------------------------------------------------------
 # v5.4 patches (merged from transformers_v54_compat.py)
 # ---------------------------------------------------------------------------
+
+
+def _patch_glm_moe_dsa_attribute_map():
+    """Remove the incorrect head_dim -> qk_rope_head_dim alias in GLM-5.2.
+
+    Some GlmMoeDsaConfig implementations expose:
+        attribute_map = {"head_dim": "qk_rope_head_dim", ...}
+    which causes head_dim=192 from config.json to overwrite the correct
+    qk_rope_head_dim=64 during config initialization.
+    """
+    try:
+        from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import (
+            GlmMoeDsaConfig,
+        )
+    except ImportError:
+        return
+
+    attr_map = getattr(GlmMoeDsaConfig, "attribute_map", None)
+    if not isinstance(attr_map, dict):
+        return
+    if attr_map.get("head_dim") == "qk_rope_head_dim":
+        attr_map = dict(attr_map)
+        attr_map.pop("head_dim", None)
+        GlmMoeDsaConfig.attribute_map = attr_map
+
 
 
 def _patch_rope_parameters_validation():

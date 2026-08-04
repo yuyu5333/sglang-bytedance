@@ -3524,14 +3524,30 @@ class Scheduler(
         }
         ret["effective_max_running_requests_per_dp"] = self.max_running_requests
 
-        if (
-            not self.spec_algorithm.is_none()
-            and self.metrics_reporter.spec_total_num_forward_ct > 0
-        ):
-            ret["avg_spec_accept_length"] = (
+        if self.server_args.elastic_ep_backend is not None:
+            from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
+
+            ret["is_scaling_elastic_ep"] = ElasticEPStateManager.is_scaling()
+            ret["effective_ep_size"] = ElasticEPStateManager.get_effective_ep_size()
+            ret["pending_ep_size"] = ElasticEPStateManager.get_pending_ep_size()
+            ret["scale_phase"] = ElasticEPStateManager.get_scale_phase()
+            ret["elastic_ep_last_error"] = ElasticEPStateManager.get_last_error()
+
+        if not self.spec_algorithm.is_none():
+            spec_total_num_accept_tokens = (
                 self.metrics_reporter.spec_total_num_accept_tokens
-                / self.metrics_reporter.spec_total_num_forward_ct
+                + self.metrics_reporter.spec_num_accept_tokens
             )
+            spec_total_num_forward_ct = (
+                self.metrics_reporter.spec_total_num_forward_ct
+                + self.metrics_reporter.spec_num_forward_ct
+            )
+            ret["spec_total_num_accept_tokens"] = spec_total_num_accept_tokens
+            ret["spec_total_num_forward_ct"] = spec_total_num_forward_ct
+            if spec_total_num_forward_ct > 0:
+                ret["avg_spec_accept_length"] = (
+                    spec_total_num_accept_tokens / spec_total_num_forward_ct
+                )
 
         if RECORD_STEP_TIME:
             ret["step_time_dict"] = self.metrics_reporter.step_time_dict
