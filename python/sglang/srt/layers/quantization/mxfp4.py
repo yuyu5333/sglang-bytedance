@@ -255,6 +255,13 @@ class Mxfp4Config(QuantizationConfig):
         if hf_quant_cfg is None:
             return None
 
+        # If the checkpoint uses compressed-tensors format with mxfp4-pack-quantized,
+        # let CompressedTensorsConfig handle it (it has CompressedTensorsWMXFP4AFP8MoE
+        # scheme that correctly creates w13_weight_packed / w2_weight_packed params).
+        quant_method = str(hf_quant_cfg.get("quant_method", "")).lower()
+        if quant_method == "compressed-tensors":
+            return None
+
         quant_format = hf_quant_cfg.get("format")
         if quant_format == cls._MXFP4_PACKED_FORMAT:
             return "mxfp4"
