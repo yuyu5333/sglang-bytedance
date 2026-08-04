@@ -335,8 +335,9 @@ class Mxfp4Config(QuantizationConfig):
             else:
                 return Mxfp4DynamicQuantMoEMethod()
         else:
-            if self.is_checkpoint_mxfp4_serialized:
-                raise NotImplementedError("Mxfp4 attention layer is not implemented")
+            # Non-linear, non-MoE layers (e.g. RadixAttention) are not
+            # quantized; they are listed in the model's ignore list.
+            pass
         return None
 
     def get_scaled_act_names(self) -> List[str]:
