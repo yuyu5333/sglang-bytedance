@@ -44,7 +44,9 @@
 #include "cutlass/trace.h"
 #include "cutlass_extensions/detail/collective/mixed_input_utils.hpp"
 
-#define GROUP_SIZE 128
+// NOTE: the previous global `#define GROUP_SIZE 128` has been removed in favor of
+// a per-instantiation `MxGroupSize` constant (see CollectiveMma below), so that
+// int4a8 (group=128) and mxfp4a8 (group=32) can coexist without macro collisions.
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -291,6 +293,19 @@ struct CollectiveMmaArrayMixedInput<
                                         KernelConversionMode == ConversionMode::ConvertAndScaleWithZero;
   static constexpr bool UseScaleLookupTable =
       KernelConversionMode == ConversionMode::ConvertAndScale && cutlass::detail::is_Array_v<ElementScale>;
+
+  // --- MXFP4A8 support: derive the K-wise quant group size per instantiation ---
+  // The packed scale operand is an Array<ElementScale, PackedScalesNum> where
+  // PackedScalesNum == TileK / GroupSize. Therefore GroupSize == TileK / kElements.
+  // This yields 128 for int4a8 (Array<bf16,4>, bit-identical to the old
+  // hardcoded `#define GROUP_SIZE 128`) and 32 for mxfp4a8 (Array<bf16,16>),
+  // without threading an extra template parameter. For the DirectConvert path
+  // (no scale) we fall back to the tile-K size so no chunking is introduced.
+  static constexpr int MxScalePackedNum =
+      cutlass::detail::is_Array_v<ElementScale> ? static_cast<int>(NonVoidElementScale::kElements) : 1;
+  static constexpr int MxGroupSize =
+      ModeHasScales ? (static_cast<int>(cute::size<2>(TileShape{})) / MxScalePackedNum)
+                    : static_cast<int>(cute::size<2>(TileShape{}));
   static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{});
   static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
   static constexpr size_t SmemAlignmentScale = cute::max(SmemAlignmentA, SmemAlignmentB);
@@ -711,7 +726,7 @@ struct CollectiveMmaArrayMixedInput<
     } else if constexpr (ModeHasScales) {
       // The real scale_k that actually works
       // auto scale_k = K / mainloop_params.chunk_size;
-      auto scale_k = K / GROUP_SIZE;
+      auto scale_k = K / MxGroupSize;
 
       Tensor mS_mkl = mainloop_params.tma_load_scale.get_tma_tensor(make_shape(M, scale_k, L));  // (m,scale_k,l)
       Tensor gS_mkl = local_tile(mS_mkl, ScaleTileShape{}, make_coord(_, _));  // (BLK_M,BLK_Scale_K,m,scale_k,l)
@@ -994,8 +1009,8 @@ struct CollectiveMmaArrayMixedInput<
 
     multiply_add<ElementAccumulator> fma;
 
-    constexpr int NumMMAsPerChunk = GROUP_SIZE / cute::get<0, 1>(tCsB.shape())();
-    constexpr int NumChunksPerTileK = cute::size<1>(sA.shape())() / GROUP_SIZE;
+    constexpr int NumMMAsPerChunk = MxGroupSize / cute::get<0, 1>(tCsB.shape())();
+    constexpr int NumChunksPerTileK = cute::size<1>(sA.shape())() / MxGroupSize;
     cute::array<decltype(make_fragment_like(accum)), NumChunksPerTileK> intermediate_array;
 
     constexpr int K_BLOCK_MAX = size<2>(tCrA_load);
@@ -1416,7 +1431,7 @@ struct CollectiveMmaArrayMixedInput<
     if constexpr (KernelConversionMode == ConversionMode::ConvertAndScale) {
       NonVoidElementScale const* ptr_S = nullptr;
       // auto scale_k = K / mainloop_params.chunk_size;
-      auto scale_k = K / GROUP_SIZE;
+      auto scale_k = K / MxGroupSize;
       Tensor tensor_scale =
           make_tensor(detail::get_logical_ptr(ptr_S), make_shape(M, scale_k, Int<1>{}), mainloop_params.dS[next_group]);
       cute::detail::fill_tma_gmem_shape_stride(
@@ -1424,7 +1439,7 @@ struct CollectiveMmaArrayMixedInput<
     } else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
       ElementZero const* ptr_Z = nullptr;
       // auto scale_k = K / mainloop_params.chunk_size;
-      auto scale_k = K / GROUP_SIZE;
+      auto scale_k = K / MxGroupSize;
       Tensor tensor_zero =
           make_tensor(detail::get_logical_ptr(ptr_Z), make_shape(M, scale_k, Int<1>{}), mainloop_params.dS[next_group]);
       cute::detail::fill_tma_gmem_shape_stride(

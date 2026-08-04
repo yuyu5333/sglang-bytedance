@@ -38,7 +38,7 @@ namespace {
 
 // Type definitions
 using MmaType = cutlass::float_e4m3_t;     // FP8 e4m3 type
-using QuantType = cutlass::int4b_t;        // 4-bit integer type
+using QuantType = cutlass::int4b_t;        // 4-bit integer type (default, int4a8)
 using ElementAccumulator = float;          // Accumulator type
 using ElementScale = cutlass::bfloat16_t;  // Scale type
 using ElementC = cutlass::bfloat16_t;      // Output type
@@ -70,11 +70,22 @@ static constexpr int AlignmentB = 128 / cutlass::sizeof_bits<QuantType>::value;
 static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
 static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
-template <typename TileShape, typename ClusterShape, typename KernelSchedule, typename EpilogueSchedule>
+template <
+    typename TileShape,
+    typename ClusterShape,
+    typename KernelSchedule,
+    typename EpilogueSchedule,
+    // MXFP4A8: the 4-bit weight element type. Defaults to int4b_t so all existing
+    // int4a8 instantiations are byte-identical; pass cutlass::float_e2m1_t for mxfp4a8.
+    typename QuantTypeB = QuantType,
+    // K-wise quant group size. int4a8 uses 128; mxfp4a8 (E8M0 block) uses 32.
+    int GroupSizeK = 128>
 struct cutlass_3x_w4a8_group_gemm {
-  static constexpr int GroupSize = 128;
+  static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScalePacked = cutlass::Array<ElementScale, PackedScalesNum>;
+  // Alignment for the 4-bit weight operand (int4b_t / float_e2m1_t are both 4-bit).
+  static constexpr int AlignmentQuantB = 128 / cutlass::sizeof_bits<QuantTypeB>::value;
 
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       ArchTag,
@@ -95,9 +106,9 @@ struct cutlass_3x_w4a8_group_gemm {
   using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
       ArchTag,
       OperatorClass,
-      cute::tuple<QuantType, ElementScalePacked>,
+      cute::tuple<QuantTypeB, ElementScalePacked>,
       LayoutB_Transpose*,
-      AlignmentB,
+      AlignmentQuantB,
       MmaType,
       LayoutA_Transpose*,
       AlignmentA,
@@ -107,6 +118,9 @@ struct cutlass_3x_w4a8_group_gemm {
       cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
           sizeof(typename CollectiveEpilogue::SharedStorage))>,
       KernelSchedule>::CollectiveOp;
+
+  // Expose the weight quant type so the caller can cast device pointers correctly.
+  using ElementQuantB = QuantTypeB;
 
   // Define the final kernel and GEMM operation types
   using GemmKernelScaleOnly =
@@ -240,7 +254,7 @@ void cutlass_w4a8_group_gemm_caller(
   arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGrouped,
       {num_experts, problem_sizes_as_shapes, nullptr},
-      {static_cast<const QuantType**>(b_ptrs.data_ptr()),
+      {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs.data_ptr()),
        static_cast<typename Gemm::StrideB*>(b_strides.data_ptr()),
        static_cast<const MmaType**>(a_ptrs.data_ptr()),
        static_cast<typename Gemm::StrideA*>(a_strides.data_ptr()),
