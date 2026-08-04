@@ -93,6 +93,52 @@ def e8m0_to_bf16(scale_e8m0: torch.Tensor) -> torch.Tensor:
     return torch.pow(2.0, exp).to(torch.bfloat16)
 
 
+# E2M1 nibble interleave order used by the kernel's prmt-LUT (same as int4a8).
+_ORDER_MAP = [0, 2, 4, 6, 1, 3, 5, 7]
+
+
+def repack_hf_mxfp4_to_kernel(w_uint8: torch.Tensor) -> torch.Tensor:
+    """Re-interleave HF-packed MXFP4 (E2M1) bytes into the int4a8 kernel layout.
+
+    HF stores two E2M1 nibbles per byte in *natural* order (nibble ``2j`` in the
+    low half of byte ``j``, nibble ``2j+1`` in the high half). The CUTLASS
+    DirectConvert mainloop loads packed 4-bit weights as int32 words and applies
+    a prmt-LUT that expects the 8 nibbles of every int32 word to follow
+    ``order_map = [0, 2, 4, 6, 1, 3, 5, 7]`` (identical to the int4a8 path's
+    ``pack_int4_to_int32``). This routine performs that fixed per-8-nibble
+    permutation on the whole tensor in a vectorized way (``process_weights``
+    runs once at load time, so we avoid the Python-loop packer above).
+
+    Args:
+        w_uint8: HF-packed weights ``[..., cols]`` (uint8/int8), ``cols`` bytes
+            per row, i.e. ``2*cols`` E2M1 codes along the last logical dim.
+
+    Returns:
+        int8 tensor of the same shape, re-interleaved to the kernel layout.
+    """
+    assert w_uint8.dtype in (torch.uint8, torch.int8)
+    w = w_uint8.to(torch.int64)
+    lead = w.shape[:-1]
+    cols = w.shape[-1]
+    k = cols * 2
+    assert k % 8 == 0, f"nibble count {k} not a multiple of 8"
+
+    # 1) unpack to natural-order nibble codes [..., K]
+    low = w & 0x0F
+    high = (w >> 4) & 0x0F
+    nibbles = torch.stack([low, high], dim=-1).reshape(*lead, k)
+
+    # 2) reorder every group of 8 nibbles by order_map
+    idx = torch.tensor(_ORDER_MAP, device=w.device, dtype=torch.int64)
+    nibbles = nibbles.reshape(*lead, k // 8, 8).index_select(-1, idx)
+    nibbles = nibbles.reshape(*lead, k)
+
+    # 3) re-pack pairs back into bytes (low, high)
+    nibbles = nibbles.reshape(*lead, cols, 2)
+    packed = (nibbles[..., 0] & 0x0F) | ((nibbles[..., 1] & 0x0F) << 4)
+    return packed.to(torch.int8)
+
+
 def pack_mxfp4_to_int32(to_pack: torch.Tensor, reorder: bool = True) -> torch.Tensor:
     """Pack E2M1 nibble codes into int32 words using the SAME interleave layout
     as ``pack_int4_to_int32``. ``to_pack`` holds 4-bit codes (0..15) as int8.
