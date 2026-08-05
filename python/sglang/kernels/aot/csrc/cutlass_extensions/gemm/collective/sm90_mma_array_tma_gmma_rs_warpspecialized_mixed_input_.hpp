@@ -30,6 +30,10 @@
  **************************************************************************************************/
 #pragma once
 
+// MXFP4A8 TEMP: device-side tensormap dump to localize the multi-expert
+// activation-scale bug. Remove after fix is landed.
+#define MXFP4A8_DEBUG_TENSORMAP 1
+
 #include "cute/algorithm/functional.hpp"
 #include "cute/algorithm/gemm.hpp"
 #include "cute/arch/cluster_sm90.hpp"
@@ -1658,6 +1662,17 @@ struct CollectiveMmaArrayMixedInput<
             detail::get_logical_ptr(ptr_AS), make_shape(N, scale_k, Int<1>{}), mainloop_params.dAS[next_group]);
         cute::detail::fill_tma_gmem_shape_stride(
             mainloop_params.tma_load_act_scale, tensor_act_scale, prob_shape_act_scale, prob_stride_act_scale);
+#ifdef MXFP4A8_DEBUG_TENSORMAP
+        {
+          printf(
+              "[AS-REPLACE] blk=%d grp=%d N=%u scaleK=%d dAS=(%ld,%ld) shape=(%u,%u,%u) strideB=(%llu,%llu,%llu)\n",
+              (int)blockIdx.x, next_group, N, (int)scale_k,
+              (long)get<1>(mainloop_params.dAS[next_group]), (long)get<2>(mainloop_params.dAS[next_group]),
+              prob_shape_act_scale[0], prob_shape_act_scale[1], prob_shape_act_scale[2],
+              (unsigned long long)prob_stride_act_scale[0], (unsigned long long)prob_stride_act_scale[1],
+              (unsigned long long)prob_stride_act_scale[2]);
+        }
+#endif
       }
     } else if constexpr (KernelConversionMode == ConversionMode::ConvertAndScaleWithZero) {
       ElementZero const* ptr_Z = nullptr;

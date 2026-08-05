@@ -223,8 +223,11 @@ def run_case_mxfp8_act(pack_fn, label, num_experts, m, k, n, device, seed=0):
     c_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
     b_strides = a_strides
     s_strides = c_strides
-    # activation-scale stride: token unit-stride, scale_k stride = M (tokens/expert)
-    as_strides = torch.full((num_experts, 3), m, device=device, dtype=torch.int64)
+    # activation-scale stride: StrideScale = Stride<Int<1>, int64, int64>, so the
+    # per-expert descriptor stride buffer holds exactly TWO int64 (16 bytes); the
+    # kernel indexes dAS[e] by sizeof(StrideScale)=2. Layout MUST be (E, 2) =
+    # [scale_k_stride=M, L_stride=M], NOT (E, 3) (that mis-strides every expert>0).
+    as_strides = torch.full((num_experts, 2), m, device=device, dtype=torch.int64)
 
     # alpha = 1.0 (activation scale now applied inside the mainloop, not epilogue)
     a_scale_one = torch.ones(1, dtype=torch.float32, device=device)
@@ -279,7 +282,7 @@ def run_case_act_identity(label, num_experts, m, k, n, device, seed=0):
     c_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
     b_strides = a_strides
     s_strides = c_strides
-    as_strides = torch.full((num_experts, 3), m, device=device, dtype=torch.int64)
+    as_strides = torch.full((num_experts, 2), m, device=device, dtype=torch.int64)
     a_scale_one = torch.ones(1, dtype=torch.float32, device=device)
 
     c = torch.empty((m, n), dtype=torch.bfloat16, device=device)
@@ -352,9 +355,10 @@ def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
     c_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
     b_strides = a_strides
     s_strides = c_strides
-    # activation-scale stride per expert = M_e (tokens/expert)
+    # activation-scale stride per expert = M_e (tokens/expert). StrideScale holds
+    # exactly TWO int64 (Int<1> leading dim is compile-time), so this MUST be (E,2).
     as_strides = torch.tensor(
-        [[int(counts[e])] * 3 for e in range(num_experts)],
+        [[int(counts[e])] * 2 for e in range(num_experts)],
         dtype=torch.int64, device=device,
     )
     a_scale_one = torch.ones(1, dtype=torch.float32, device=device)
@@ -407,6 +411,9 @@ def main():
     run_case_mxfp8_act_multi("mxfp8_multi", [4, 4, 4, 4], 512, 1024, device)
     run_case_mxfp8_act_multi("mxfp8_multi", [3, 5, 4, 8], 512, 1024, device)
     run_case_mxfp8_act_multi("mxfp8_multi", [16, 8, 32, 8], 1024, 2048, device)
+    print("=== mxfp8 activation MULTI-EXPERT (UNIFORM counts: isolate N-value bug) ===")
+    for c in ([2, 2], [3, 3], [4, 4], [8, 8], [16, 16], [32, 32]):
+        run_case_mxfp8_act_multi("mxfp8_unif", c, 512, 1024, device)
 
 
 if __name__ == "__main__":
