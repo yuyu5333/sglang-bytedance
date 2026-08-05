@@ -17,9 +17,10 @@ The int4a8 path (``int4fp8_utils.py``) is left untouched; this is a parallel mod
 """
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
+from sglang.srt.model_executor.runner_utils.capture_mode import get_is_capture_mode
 
 logger = logging.getLogger(__name__)
 
@@ -196,33 +197,17 @@ def quantize_activation_mxfp8_blockwise_grouped(
     return x_fp8, scale
 
 
-def build_grouped_act_block_scale(
+def _build_grouped_act_block_scale_compact(
     scale: torch.Tensor,
     expert_offsets_host,
     block_size: int = MXFP4_BLOCK_SIZE,
 ):
-    """Build the per-expert-concatenated activation block-scale buffer + strides
-    that the CUTLASS mxfp4a8 grouped GEMM consumes.
+    """Compact builder used by the eager path.
 
-    Given a per-token+per-block activation scale ``scale`` [total_m, K//block]
-    laid out grouped-by-expert (the same order as the reordered activation) and
-    the per-expert token boundaries ``expert_offsets_host`` (a length-(E+1)
-    host/CPU int sequence, i.e. exclusive-prefix offsets ending at total_m), this
-    slices each expert's rows, interleaves them 4-wide over K-blocks, PADS the
-    token (M) dim up to an even count (so the TMA scale_k gmem stride
-    ``M_pad * sizeof(Array<bf16,4>) = M_pad*8`` bytes is a multiple of 16), and
-    concatenates the padded blocks. It returns the flat buffer plus the
-    ``as_strides`` tensor [E, 2] (both columns = padded M_e), matching the
-    kernel's ``StrideScale = Stride<Int<1>, int64, int64>`` (2 stored int64).
-
-    The kernel advances the per-expert scale pointer by the exclusive cumsum of
-    these padded strides (see ``w4a8_get_group_starts.cuh``), so the buffer here
-    MUST be built with the identical padding.
-
-    Returns:
-        as_packed: 1-D bf16 tensor, the concatenated per-expert interleaved
-            padded scale blocks.
-        as_strides: int64 tensor [E, 2] with padded M_e in both columns.
+    This keeps the buffer tightly packed by concatenating the per-expert blocks
+    with an expert-local even padding ``M_pad``. It is numerically exact and
+    memory-efficient, but it uses host-side expert offsets and dynamic-shape
+    tensor construction, so it must stay out of CUDA graph capture.
     """
     device = scale.device
     num_experts = len(expert_offsets_host) - 1
@@ -256,6 +241,98 @@ def build_grouped_act_block_scale(
         device=device,
     )
     return as_packed, as_strides
+
+
+def _build_grouped_act_block_scale_capture_safe(
+    scale: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    block_size: int = MXFP4_BLOCK_SIZE,
+):
+    """Graph-safe builder for decode/spec CUDA graph capture.
+
+    Unlike the eager compact builder, this path never calls ``.cpu()`` /
+    ``.tolist()`` and never creates dynamic-shape outputs from per-expert token
+    counts. Instead, every expert uses the SAME fixed even token stride
+    ``M_stride = round_up_even(total_m)``, and the per-expert scale block is
+    stored in a dense buffer of shape ``[E, K//(block*4), M_stride*4]``.
+
+    This wastes some memory versus the compact eager layout, but for decode graph
+    capture ``total_m`` is the captured batch size times ``topk`` (small and
+    static), while the fixed even stride removes the original TMA alignment
+    issue for odd per-expert token counts and makes the whole builder
+    CUDA-graph-recordable.
+    """
+    assert torch.is_tensor(expert_offsets), "capture-safe path requires tensor expert_offsets"
+    device = scale.device
+    nblk = scale.shape[1]
+    assert nblk % 4 == 0, f"K//block={nblk} must be a multiple of 4"
+
+    num_experts = expert_offsets.numel() - 1
+    total_m = scale.shape[0]
+    m_stride = max(2, (total_m + 1) & ~1)
+
+    grouped = torch.zeros(
+        (num_experts, m_stride, nblk),
+        dtype=scale.dtype,
+        device=device,
+    )
+
+    if total_m > 0:
+        row_ids = torch.arange(total_m, device=device, dtype=expert_offsets.dtype)
+        expert_ids = torch.searchsorted(expert_offsets[1:], row_ids, right=True)
+        row_offsets = expert_offsets.index_select(0, expert_ids)
+        local_rows = (row_ids - row_offsets).to(torch.long)
+        grouped[expert_ids.to(torch.long), local_rows, :] = scale
+
+    packed = (
+        grouped.reshape(num_experts, m_stride, nblk // 4, 4)
+        .permute(0, 2, 1, 3)
+        .reshape(num_experts, nblk // 4, m_stride * 4)
+        .contiguous()
+    )
+    as_packed = packed.reshape(-1).contiguous()
+    as_strides = torch.full(
+        (num_experts, 2),
+        m_stride,
+        dtype=torch.int64,
+        device=device,
+    )
+    return as_packed, as_strides
+
+
+def build_grouped_act_block_scale(
+    scale: torch.Tensor,
+    expert_offsets,
+    block_size: int = MXFP4_BLOCK_SIZE,
+    capture_safe: Optional[bool] = None,
+):
+    """Build the activation block-scale buffer + strides consumed by CUTLASS.
+
+    There are two layouts:
+
+    1. eager compact layout: per-expert concatenation with expert-local even
+       padding ``M_pad`` (minimal memory footprint).
+    2. capture-safe layout: fixed even ``M_stride`` for every expert, fully
+       device-side and static-shape so it is CUDA-graph-recordable.
+
+    The capture-safe layout is selected automatically inside CUDA graph capture,
+    or can be forced explicitly by passing ``capture_safe=True`` for testing.
+    """
+    if capture_safe is None:
+        capture_safe = get_is_capture_mode()
+
+    if capture_safe:
+        return _build_grouped_act_block_scale_capture_safe(
+            scale, expert_offsets, block_size=block_size
+        )
+
+    if torch.is_tensor(expert_offsets):
+        expert_offsets_host = expert_offsets.detach().to("cpu").tolist()
+    else:
+        expert_offsets_host = expert_offsets
+    return _build_grouped_act_block_scale_compact(
+        scale, expert_offsets_host, block_size=block_size
+    )
 
 
 # E2M1 nibble interleave order used by the int4fp8 ``pack_*_to_int32`` helper.

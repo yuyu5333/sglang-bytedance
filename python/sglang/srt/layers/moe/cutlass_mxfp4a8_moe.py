@@ -165,9 +165,8 @@ def cutlass_mxfp4a8_moe(
     gateup_input, a1_blk_scale = quantize_activation_mxfp8_blockwise(
         gateup_input_bf16, block_size=MXFP4_CHUNK_SIZE
     )
-    eo_host = expert_offsets.detach().to("cpu").tolist()
     a1_as_packed, a1_as_strides = build_grouped_act_block_scale(
-        a1_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+        a1_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE
     )
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
@@ -204,7 +203,7 @@ def cutlass_mxfp4a8_moe(
         intermediate, block_size=MXFP4_CHUNK_SIZE
     )
     a2_as_packed, a2_as_strides = build_grouped_act_block_scale(
-        a2_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+        a2_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE
     )
 
     cutlass_mxfp4a8_moe_mm(
@@ -331,9 +330,8 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         gateup_input_pre_reorder, block_size=MXFP4_CHUNK_SIZE
     )
     del gateup_input_pre_reorder
-    eo_host = expert_offsets.detach().to("cpu").tolist()
     a1_as_packed, a1_as_strides = build_grouped_act_block_scale(
-        a1_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+        a1_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE
     )
 
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
@@ -369,7 +367,7 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         intermediate, block_size=MXFP4_CHUNK_SIZE
     )
     a2_as_packed, a2_as_strides = build_grouped_act_block_scale(
-        a2_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+        a2_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE
     )
 
     cutlass_mxfp4a8_moe_mm(

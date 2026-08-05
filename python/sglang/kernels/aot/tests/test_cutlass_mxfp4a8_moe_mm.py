@@ -18,6 +18,7 @@ import sys
 
 import torch
 from sgl_kernel import cutlass_mxfp4a8_moe_mm
+from sglang.srt.layers.mxfp4a8_utils import build_grouped_act_block_scale
 
 # E2M1 magnitude table indexed by the 3-bit magnitude index (exp<<1 | mant).
 # Matches mxfp4_numeric_conversion.hpp: idx 0..7 -> {0,.5,1,1.5,2,3,4,6}.
@@ -324,7 +325,7 @@ def run_case_act_identity(label, num_experts, m, k, n, device, seed=0):
     return mean_abs / ref_scale
 
 
-def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
+def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0, capture_safe=False):
     """Multi-expert grouped GEMM with the FULL mxfp8 activation path and UNEVEN
     per-expert token counts. This is the case the single-expert tests never
     exercised: the get_group_starts pointer advances by
@@ -355,17 +356,6 @@ def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
     for e in range(num_experts):
         sel[starts[e]:starts[e + 1]] = e
 
-    # per-expert-concatenated interleaved activation scale, each expert's token
-    # block PADDED up to an even count (16-byte TMA alignment on scale_k stride).
-    as_blocks = []
-    m_pads = []
-    for e in range(num_experts):
-        se = a_blk_scale[starts[e]:starts[e + 1]]  # [M_e, sk]
-        flat, m_pad = interleave_act_scale_padded(se)  # [sk/4 * M_pad*4], M_pad
-        as_blocks.append(flat)
-        m_pads.append(m_pad)
-    as_packed = torch.cat(as_blocks).contiguous()
-
     expert_offsets = torch.tensor(starts, dtype=torch.int32, device=device)
     problem_sizes = torch.tensor(
         [[n, int(counts[e]), k] for e in range(num_experts)],
@@ -375,14 +365,29 @@ def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
     c_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
     b_strides = a_strides
     s_strides = c_strides
-    # activation-scale stride per expert = PADDED token count M_pad. StrideScale
-    # holds exactly TWO int64 (Int<1> leading dim is compile-time), so this MUST
-    # be (E,2). get_group_starts uses column 0 (M_pad) to advance the per-expert
-    # act-scale pointer by the exclusive cumsum of padded strides.
-    as_strides = torch.tensor(
-        [[int(m_pads[e])] * 2 for e in range(num_experts)],
-        dtype=torch.int64, device=device,
-    )
+    if capture_safe:
+        as_packed, as_strides = build_grouped_act_block_scale(
+            a_blk_scale, expert_offsets, block_size=CHUNK, capture_safe=True
+        )
+    else:
+        # per-expert-concatenated interleaved activation scale, each expert's token
+        # block PADDED up to an even count (16-byte TMA alignment on scale_k stride).
+        as_blocks = []
+        m_pads = []
+        for e in range(num_experts):
+            se = a_blk_scale[starts[e]:starts[e + 1]]  # [M_e, sk]
+            flat, m_pad = interleave_act_scale_padded(se)  # [sk/4 * M_pad*4], M_pad
+            as_blocks.append(flat)
+            m_pads.append(m_pad)
+        as_packed = torch.cat(as_blocks).contiguous()
+        # activation-scale stride per expert = PADDED token count M_pad. StrideScale
+        # holds exactly TWO int64 (Int<1> leading dim is compile-time), so this MUST
+        # be (E,2). get_group_starts uses column 0 (M_pad) to advance the per-expert
+        # act-scale pointer by the exclusive cumsum of padded strides.
+        as_strides = torch.tensor(
+            [[int(m_pads[e])] * 2 for e in range(num_experts)],
+            dtype=torch.int64, device=device,
+        )
     a_scale_one = torch.ones(1, dtype=torch.float32, device=device)
 
     c = torch.empty((m_total, n), dtype=torch.bfloat16, device=device)
@@ -433,6 +438,9 @@ def main():
     run_case_mxfp8_act_multi("mxfp8_multi", [4, 4, 4, 4], 512, 1024, device)
     run_case_mxfp8_act_multi("mxfp8_multi", [3, 5, 4, 8], 512, 1024, device)
     run_case_mxfp8_act_multi("mxfp8_multi", [16, 8, 32, 8], 1024, 2048, device)
+    print("=== mxfp8 activation MULTI-EXPERT (graph-safe fixed-stride layout) ===")
+    run_case_mxfp8_act_multi("mxfp8_graph", [3, 5, 4, 8], 512, 1024, device, capture_safe=True)
+    run_case_mxfp8_act_multi("mxfp8_graph", [16, 8, 32, 8], 1024, 2048, device, capture_safe=True)
     print("=== mxfp8 activation MULTI-EXPERT (UNIFORM counts: isolate N-value bug) ===")
     for c in ([2, 2], [3, 3], [4, 4], [8, 8], [16, 16], [32, 32]):
         run_case_mxfp8_act_multi("mxfp8_unif", c, 512, 1024, device)
