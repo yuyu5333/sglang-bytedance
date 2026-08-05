@@ -161,6 +161,103 @@ def interleave_act_scale_mxfp8(
     return si.contiguous()
 
 
+def quantize_activation_mxfp8_blockwise_grouped(
+    x: torch.Tensor, block_size: int = MXFP4_BLOCK_SIZE, pad_even: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Grouped mxfp8 block-quant helper: quantize an activation tensor to FP8
+    (e4m3) data + a per-token+per-block bf16 scale, padding the token dimension
+    to an even count so the kernel's TMA layout constraints are satisfied.
+
+    This is the grouped counterpart of ``quantize_activation_mxfp8_blockwise``:
+    it applies the same per-token + per-block (block_size along K) real-valued
+    ``amax / 448`` scale, but additionally pads M up to the next even value
+    (matching the kernel's even-padding requirement) with zeros.
+
+    Args:
+        x: activation ``[M, K]`` (bf16/fp16/fp32); K must be divisible by
+            ``block_size``.
+        block_size: K-wise block size, default 32 (matches the E8M0 weight block).
+        pad_even: if True (default), pad M up to the next even value with zeros.
+
+    Returns:
+        x_fp8: ``[M_padded, K]`` float8_e4m3fn, the block-scaled activation.
+        scale: ``[M_padded, K // block_size]`` bf16, ``block_amax / 448`` per block.
+    """
+    assert x.dim() == 2, "activation must be 2D [M, K]"
+    m, k = x.shape
+    assert k % block_size == 0, f"K={k} not divisible by block_size={block_size}"
+
+    if pad_even and (m % 2 != 0):
+        pad = torch.zeros(1, k, dtype=x.dtype, device=x.device)
+        x = torch.cat([x, pad], dim=0)
+        m = x.shape[0]
+
+    x_fp8, scale = quantize_activation_mxfp8_blockwise(x, block_size=block_size)
+    return x_fp8, scale
+
+
+def build_grouped_act_block_scale(
+    scale: torch.Tensor,
+    expert_offsets_host,
+    block_size: int = MXFP4_BLOCK_SIZE,
+):
+    """Build the per-expert-concatenated activation block-scale buffer + strides
+    that the CUTLASS mxfp4a8 grouped GEMM consumes.
+
+    Given a per-token+per-block activation scale ``scale`` [total_m, K//block]
+    laid out grouped-by-expert (the same order as the reordered activation) and
+    the per-expert token boundaries ``expert_offsets_host`` (a length-(E+1)
+    host/CPU int sequence, i.e. exclusive-prefix offsets ending at total_m), this
+    slices each expert's rows, interleaves them 4-wide over K-blocks, PADS the
+    token (M) dim up to an even count (so the TMA scale_k gmem stride
+    ``M_pad * sizeof(Array<bf16,4>) = M_pad*8`` bytes is a multiple of 16), and
+    concatenates the padded blocks. It returns the flat buffer plus the
+    ``as_strides`` tensor [E, 2] (both columns = padded M_e), matching the
+    kernel's ``StrideScale = Stride<Int<1>, int64, int64>`` (2 stored int64).
+
+    The kernel advances the per-expert scale pointer by the exclusive cumsum of
+    these padded strides (see ``w4a8_get_group_starts.cuh``), so the buffer here
+    MUST be built with the identical padding.
+
+    Returns:
+        as_packed: 1-D bf16 tensor, the concatenated per-expert interleaved
+            padded scale blocks.
+        as_strides: int64 tensor [E, 2] with padded M_e in both columns.
+    """
+    device = scale.device
+    num_experts = len(expert_offsets_host) - 1
+    nblk = scale.shape[1]
+    assert nblk % 4 == 0, f"K//block={nblk} must be a multiple of 4"
+
+    blocks = []
+    m_pads = []
+    for e in range(num_experts):
+        s0 = int(expert_offsets_host[e])
+        s1 = int(expert_offsets_host[e + 1])
+        se = scale[s0:s1]  # [M_e, nblk]
+        m_e = se.shape[0]
+        m_pad = (m_e + 1) & ~1  # round up to even
+        if m_pad != m_e:
+            pad = torch.zeros(m_pad - m_e, nblk, dtype=se.dtype, device=device)
+            se = torch.cat([se, pad], dim=0)
+        # 4-wide interleave over K-blocks: [M_pad, nblk] -> [nblk/4, M_pad*4]
+        si = se.reshape(m_pad, nblk // 4, 4).permute(1, 0, 2).reshape(nblk // 4, m_pad * 4)
+        blocks.append(si.reshape(-1).contiguous())
+        m_pads.append(m_pad)
+
+    as_packed = (
+        torch.cat(blocks).contiguous()
+        if blocks
+        else torch.zeros(0, dtype=scale.dtype, device=device)
+    )
+    as_strides = torch.tensor(
+        [[m_pads[e]] * 2 for e in range(num_experts)],
+        dtype=torch.int64,
+        device=device,
+    )
+    return as_packed, as_strides
+
+
 # E2M1 nibble interleave order used by the int4fp8 ``pack_*_to_int32`` helper.
 # NOTE: the CUTLASS mxfp4a8 kernel does NOT expect this reorder for its packed
 # int8 weight operand (see ``repack_hf_mxfp4_to_kernel`` below).

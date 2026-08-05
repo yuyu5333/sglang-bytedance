@@ -52,6 +52,10 @@ from sglang.kernels.ops.quantization.per_tensor_quant_fp8 import (
     per_tensor_absmax_fp8,
     per_tensor_quant_fp8,
 )
+from sglang.srt.layers.mxfp4a8_utils import (
+    build_grouped_act_block_scale,
+    quantize_activation_mxfp8_blockwise,
+)
 
 # MXFP4 K-wise block size (E8M0 block). int4a8 uses 128; mxfp4a8 uses 32.
 MXFP4_CHUNK_SIZE = 32
@@ -120,22 +124,22 @@ def cutlass_mxfp4a8_moe(
         topk_ids,
     )
 
-    gateup_input = torch.empty(
+    # MXFP8 activation: reorder to bf16 first (identity scale), then per-token +
+    # per-block (block=32) fp8 quant. The block scale rides the kernel's 4th TMA
+    # and the epilogue alpha is 1.0 (activation scale applied inside the mainloop).
+    gateup_input_bf16 = torch.empty(
         (m * topk, k),
         device=device,
-        dtype=torch.float8_e4m3fn,
+        dtype=torch.bfloat16,
     )
-
-    if a1_scale is None:
-        a1_scale = torch.zeros(1, dtype=torch.float32, device=device)
-        per_tensor_absmax_fp8(a, a1_scale)
+    ones_scale = torch.ones(1, dtype=torch.float32, device=device)
 
     pre_reorder_for_cutlass_moe(
         a,
-        gateup_input,
+        gateup_input_bf16,
         src2dst,
         topk_ids,
-        a1_scale,
+        ones_scale,
         num_local_experts,
         topk,
         m,
@@ -156,6 +160,16 @@ def cutlass_mxfp4a8_moe(
         k,
     )
 
+    # Per-token + per-block fp8 quant of the reordered activation, then build the
+    # per-expert-concatenated (even-padded) block-scale buffer + strides.
+    gateup_input, a1_blk_scale = quantize_activation_mxfp8_blockwise(
+        gateup_input_bf16, block_size=MXFP4_CHUNK_SIZE
+    )
+    eo_host = expert_offsets.detach().to("cpu").tolist()
+    a1_as_packed, a1_as_strides = build_grouped_act_block_scale(
+        a1_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+    )
+
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((m * topk, k), device=device, dtype=torch.bfloat16)
 
@@ -163,7 +177,7 @@ def cutlass_mxfp4a8_moe(
         c1,
         gateup_input,
         w1_q,
-        a1_scale.float(),
+        ones_scale,
         w1_scale,
         expert_offsets[:-1],
         problem_sizes1,
@@ -173,29 +187,31 @@ def cutlass_mxfp4a8_moe(
         s_strides13,
         MXFP4_CHUNK_SIZE,
         topk,
+        a1_as_packed,
+        a1_as_strides,
+        MXFP4_CHUNK_SIZE,
     )
 
-    intermediate_q = torch.empty(
-        (m * topk, n), dtype=torch.float8_e4m3fn, device=device
-    )
+    # GEMM2 activation: silu_and_mul in bf16, then per-token + per-block fp8 quant.
+    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
+    if swiglu_limit is not None:
+        lim = float(swiglu_limit)
+        c1[:, :n].clamp_(max=lim)
+        c1[:, n:].clamp_(min=-lim, max=lim)
+    silu_and_mul(c1, intermediate)
 
-    if a2_scale is None:
-        a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
-        silu_mul_dynamic_tensorwise_quant_for_cutlass_moe(
-            c1, intermediate_q, a2_scale, expert_offsets[-1:], m * topk, n,
-            swiglu_limit=swiglu_limit,
-        )
-    else:
-        silu_mul_static_tensorwise_quant_for_cutlass_moe(
-            c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n,
-            swiglu_limit=swiglu_limit,
-        )
+    intermediate_q, a2_blk_scale = quantize_activation_mxfp8_blockwise(
+        intermediate, block_size=MXFP4_CHUNK_SIZE
+    )
+    a2_as_packed, a2_as_strides = build_grouped_act_block_scale(
+        a2_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+    )
 
     cutlass_mxfp4a8_moe_mm(
         c2,
         intermediate_q,
         w2_q,
-        a2_scale.float(),
+        ones_scale,
         w2_scale,
         expert_offsets[:-1],
         problem_sizes2,
@@ -205,6 +221,9 @@ def cutlass_mxfp4a8_moe(
         s_strides2,
         MXFP4_CHUNK_SIZE,
         topk,
+        a2_as_packed,
+        a2_as_strides,
+        MXFP4_CHUNK_SIZE,
     )
 
     output = torch.empty_like(a)
