@@ -35,7 +35,16 @@ __global__ void int4_fp8_get_group_gemm_starts(
     // block) uses 32. The per-expert weight-scale buffer holds n*k/group bf16
     // elements, so the per-expert pointer must advance by that amount. Defaults
     // to 128 so the int4a8 call site (which passes 128) is byte-identical.
-    int64_t weight_scale_group = 128) {
+    int64_t weight_scale_group = 128,
+    // MXFP4A8: per-expert activation-scale stride array [E, 2] (int64). Element
+    // [e][0] = the per-expert token stride of the block-scale buffer, PADDED up
+    // to an even count so the TMA scale_k gmem stride (M_pad * sizeof(Array<bf16,4>)
+    // = M_pad*8 bytes) is a multiple of 16 (TMA requirement). The activation-scale
+    // buffer is per-expert-concatenated with PADDED token blocks, so the per-expert
+    // pointer must advance by the exclusive cumsum of these padded strides -- NOT
+    // by the (real) expert_offset used for the M-contiguous activation tensor.
+    // nullptr for int4a8 (act-scale path disabled).
+    int64_t const* as_strides = nullptr) {
   int expert_id = threadIdx.x;
   int32_t expert_offset = expert_offsets[expert_id];
 
@@ -46,7 +55,19 @@ __global__ void int4_fp8_get_group_gemm_starts(
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + (per_out_ch ? expert_id * n * k / weight_scale_group : expert_id);
   if (as_offsets != nullptr && as_base_as_int != nullptr) {
-    as_offsets[expert_id] = as_base_as_int + expert_offset * (k / act_scale_group);
+    // Exclusive cumsum of the PADDED per-expert token strides (as_strides[j][0],
+    // laid out as [E,2] so element j is at index j*2). Falls back to the real
+    // expert_offset when no stride array is supplied (defensive; the mxfp4a8
+    // caller always passes as_strides). E is tiny (<=256) so the serial scan is
+    // negligible in this single-block launch.
+    int64_t as_tok_off = expert_offset;
+    if (as_strides != nullptr) {
+      as_tok_off = 0;
+      for (int j = 0; j < expert_id; ++j) {
+        as_tok_off += as_strides[j * 2];
+      }
+    }
+    as_offsets[expert_id] = as_base_as_int + as_tok_off * (k / act_scale_group);
   }
 }
 
@@ -106,7 +127,8 @@ __global__ void int4_fp8_get_group_gemm_starts_3d(
             as_ptrs_raw,                                                                  \
             as_base_raw,                                                                  \
             act_scale_group,                                                              \
-            weight_scale_group);                                                          \
+            weight_scale_group,                                                           \
+            as_strides_raw);                                                              \
   }
 
 #define __CALL_W4A8_GET_STARTS_KERNEL_3D(TENSOR_C_TYPE, C_TYPE)                              \
@@ -154,7 +176,12 @@ void run_int4_fp8_get_group_gemm_starts(
     // Weight-scale K-wise quant group size (int4a8: 128, mxfp4a8: 32). Passed to
     // the launch macro so the per-expert weight-scale pointer advances by the
     // correct n*k/group. Defaults to 128 (int4a8) for byte-identical behaviour.
-    int64_t weight_scale_group = 128) {
+    int64_t weight_scale_group = 128,
+    // MXFP4A8: per-expert activation-scale stride tensor [E, 2] (int64). Used to
+    // compute the exclusive cumsum of PADDED per-expert token strides so the
+    // per-expert act-scale pointer lands on the correctly-padded (16B-aligned)
+    // sub-buffer. Left empty for int4a8.
+    std::optional<torch::Tensor> as_strides = std::nullopt) {
   TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b_tensors.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -167,10 +194,15 @@ void run_int4_fp8_get_group_gemm_starts(
   // MXFP4A8: raw pointers for the optional activation block-scale path.
   cutlass::bfloat16_t** as_ptrs_raw = nullptr;
   cutlass::bfloat16_t* as_base_raw = nullptr;
+  int64_t const* as_strides_raw = nullptr;
   if (as_ptrs.has_value() && act_scales.has_value()) {
     TORCH_CHECK(act_scales->dtype() == torch::kBFloat16, "activation block-scale must be bf16");
     as_ptrs_raw = static_cast<cutlass::bfloat16_t**>(as_ptrs->data_ptr());
     as_base_raw = static_cast<cutlass::bfloat16_t*>(act_scales->data_ptr());
+    if (as_strides.has_value()) {
+      TORCH_CHECK(as_strides->dtype() == torch::kInt64, "as_strides must be int64");
+      as_strides_raw = static_cast<int64_t const*>(as_strides->data_ptr());
+    }
   }
 
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());

@@ -159,6 +159,22 @@ def interleave_act_scale(scale: torch.Tensor) -> torch.Tensor:
     return si.contiguous()
 
 
+def interleave_act_scale_padded(scale: torch.Tensor):
+    """Same as interleave_act_scale but pads the token (M) dim up to an EVEN
+    count first. The packed act-scale element is Array<bf16,4> = 8 bytes, so the
+    TMA scale_k gmem stride = M*8 bytes must be a multiple of 16 -> M must be
+    even. Odd per-expert token counts (real in production: routed token counts
+    are unpadded) would otherwise trip a 16-byte TMA alignment error and read
+    garbage. Returns (interleaved_flat[sk/4 * M_pad*4], M_pad). The padded rows
+    are never consumed (the TMA box N-shape stays at the real M)."""
+    m, sk = scale.shape
+    m_pad = (m + 1) & ~1  # round up to even
+    if m_pad != m:
+        pad = torch.zeros(m_pad - m, sk, dtype=scale.dtype, device=scale.device)
+        scale = torch.cat([scale, pad], dim=0)
+    return interleave_act_scale(scale).reshape(-1), m_pad
+
+
 def quant_act_mxfp8(x: torch.Tensor):
     """Per-token + per-block (block=CHUNK) fp8 e4m3 activation quant.
 
@@ -339,11 +355,15 @@ def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
     for e in range(num_experts):
         sel[starts[e]:starts[e + 1]] = e
 
-    # per-expert-concatenated interleaved activation scale
+    # per-expert-concatenated interleaved activation scale, each expert's token
+    # block PADDED up to an even count (16-byte TMA alignment on scale_k stride).
     as_blocks = []
+    m_pads = []
     for e in range(num_experts):
         se = a_blk_scale[starts[e]:starts[e + 1]]  # [M_e, sk]
-        as_blocks.append(interleave_act_scale(se).reshape(-1))  # [sk/4 * M_e*4]
+        flat, m_pad = interleave_act_scale_padded(se)  # [sk/4 * M_pad*4], M_pad
+        as_blocks.append(flat)
+        m_pads.append(m_pad)
     as_packed = torch.cat(as_blocks).contiguous()
 
     expert_offsets = torch.tensor(starts, dtype=torch.int32, device=device)
@@ -355,10 +375,12 @@ def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
     c_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
     b_strides = a_strides
     s_strides = c_strides
-    # activation-scale stride per expert = M_e (tokens/expert). StrideScale holds
-    # exactly TWO int64 (Int<1> leading dim is compile-time), so this MUST be (E,2).
+    # activation-scale stride per expert = PADDED token count M_pad. StrideScale
+    # holds exactly TWO int64 (Int<1> leading dim is compile-time), so this MUST
+    # be (E,2). get_group_starts uses column 0 (M_pad) to advance the per-expert
+    # act-scale pointer by the exclusive cumsum of padded strides.
     as_strides = torch.tensor(
-        [[int(counts[e])] * 2 for e in range(num_experts)],
+        [[int(m_pads[e])] * 2 for e in range(num_experts)],
         dtype=torch.int64, device=device,
     )
     a_scale_one = torch.ones(1, dtype=torch.float32, device=device)

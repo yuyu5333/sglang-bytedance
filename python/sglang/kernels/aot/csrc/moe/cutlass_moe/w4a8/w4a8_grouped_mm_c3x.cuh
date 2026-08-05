@@ -269,7 +269,10 @@ void cutlass_w4a8_group_gemm_caller(
       use_act_block_scale ? act_scale_group : 0,
       // Weight-scale group size for this instantiation (int4a8=128, mxfp4a8=32),
       // so the per-expert weight-scale pointer advances by n*k/GroupSize.
-      static_cast<int64_t>(Gemm::GroupSize));
+      static_cast<int64_t>(Gemm::GroupSize),
+      // MXFP4A8: per-expert act-scale stride tensor [E,2] so get_group_starts can
+      // advance the act-scale pointer by the PADDED (16B-aligned) cumsum.
+      use_act_block_scale ? as_strides : std::nullopt);
 
   arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGrouped,
