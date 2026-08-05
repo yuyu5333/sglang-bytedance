@@ -382,6 +382,9 @@ def maybe_fuse_routed_scale_and_shared_add(
     from sglang.srt.layers.quantization.mxfp4_marlin_moe import (
         Mxfp4MarlinMoEMethod,
     )
+    from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensors_wmxfp4_afp8_moe import (
+        CompressedTensorsWMXFP4AFP8MoE,
+    )
 
     fused = isinstance(
         experts.quant_method,
