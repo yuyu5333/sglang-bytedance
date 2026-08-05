@@ -305,6 +305,93 @@ def run_case_act_identity(label, num_experts, m, k, n, device, seed=0):
     return mean_abs / ref_scale
 
 
+def run_case_mxfp8_act_multi(label, counts, k, n, device, seed=0):
+    """Multi-expert grouped GEMM with the FULL mxfp8 activation path and UNEVEN
+    per-expert token counts. This is the case the single-expert tests never
+    exercised: the get_group_starts pointer advances by
+    ``expert_offset * (k/group)`` per expert, which is only self-consistent if
+    the global activation-scale buffer is the per-expert-concatenated interleave
+    (each expert -> [scale_k/4, M_e*4], concatenated), with as_strides[e]=M_e.
+    Tokens are laid out grouped-by-expert (as the MoE reorder produces)."""
+    torch.manual_seed(seed)
+    dtype = torch.bfloat16
+    num_experts = len(counts)
+    m_total = int(sum(counts))
+    sk = k // CHUNK
+
+    a = torch.randn(m_total, k, dtype=dtype, device=device)
+    a_fp8, a_blk_scale = quant_act_mxfp8(a)  # [M,K] fp8, [M,K//CHUNK] bf16
+
+    codes, w_values = make_e2m1_weights(num_experts, n, k, device)
+    exps = torch.randint(-4, 3, (num_experts, n, k // CHUNK), device=device)
+    w_scale = 2.0 ** exps.to(torch.float32)
+    b_packed = pack_nibbles_natural(codes).view(num_experts, n, k // 2).contiguous()
+    b_scale = interleave_scales(w_scale.to(torch.bfloat16)).contiguous()
+
+    # per-expert token boundaries (grouped layout) + expert selection vector
+    starts = [0]
+    for c in counts:
+        starts.append(starts[-1] + int(c))
+    sel = torch.zeros((m_total,), dtype=torch.long, device=device)
+    for e in range(num_experts):
+        sel[starts[e]:starts[e + 1]] = e
+
+    # per-expert-concatenated interleaved activation scale
+    as_blocks = []
+    for e in range(num_experts):
+        se = a_blk_scale[starts[e]:starts[e + 1]]  # [M_e, sk]
+        as_blocks.append(interleave_act_scale(se).reshape(-1))  # [sk/4 * M_e*4]
+    as_packed = torch.cat(as_blocks).contiguous()
+
+    expert_offsets = torch.tensor(starts, dtype=torch.int32, device=device)
+    problem_sizes = torch.tensor(
+        [[n, int(counts[e]), k] for e in range(num_experts)],
+        dtype=torch.int32, device=device,
+    )
+    a_strides = torch.full((num_experts, 3), k, device=device, dtype=torch.int64)
+    c_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
+    b_strides = a_strides
+    s_strides = c_strides
+    # activation-scale stride per expert = M_e (tokens/expert)
+    as_strides = torch.tensor(
+        [[int(counts[e])] * 3 for e in range(num_experts)],
+        dtype=torch.int64, device=device,
+    )
+    a_scale_one = torch.ones(1, dtype=torch.float32, device=device)
+
+    c = torch.empty((m_total, n), dtype=torch.bfloat16, device=device)
+    cutlass_mxfp4a8_moe_mm(
+        c, a_fp8, b_packed, a_scale_one, b_scale,
+        expert_offsets[:-1], problem_sizes,
+        a_strides, b_strides, c_strides, s_strides,
+        CHUNK, 1,
+        as_packed, as_strides, CHUNK,
+    )
+    c = c.to(dtype)
+
+    c_ref = ref_grouped_gemm_mxfp8_act(a_fp8, a_blk_scale, w_values, w_scale, num_experts, sel)
+
+    max_abs = torch.max(torch.abs(c.float() - c_ref.float())).item()
+    mean_abs = torch.mean(torch.abs(c.float() - c_ref.float())).item()
+    ref_scale = c_ref.float().abs().mean().item() + 1e-9
+    print(
+        f"[{label:12s}] E={num_experts} counts={list(counts)} k={k} n={n}  "
+        f"max_abs={max_abs:.4f} mean_abs={mean_abs:.4f} rel_mean={mean_abs/ref_scale:.4f}"
+    )
+    # per-expert breakdown to localize which group is wrong
+    for e in range(num_experts):
+        tok = torch.where(sel == e)[0]
+        ce = c.float()[tok]
+        re = c_ref.float()[tok]
+        rs = re.abs().mean().item() + 1e-9
+        print(
+            f"    expert {e}: tok[{starts[e]}:{starts[e+1]}] "
+            f"rel_mean={ (ce-re).abs().mean().item()/rs :.4f} "
+            f"max_abs={ (ce-re).abs().max().item() :.2f}"
+        )
+    return mean_abs / ref_scale
+
+
 def main():
     if not torch.cuda.is_available():
         print("CUDA required")
@@ -313,9 +400,13 @@ def main():
     print("=== DIAGNOSTIC: activation scale = ones (should be identity) ===")
     for (m, k, n) in [(4, 256, 512), (8, 512, 1024), (128, 512, 1024)]:
         run_case_act_identity("act_ones", 1, m, k, n, device)
-    print("=== mxfp8 per-token + per-block activation (FULL path) ===")
+    print("=== mxfp8 per-token + per-block activation (FULL path, single expert) ===")
     for (m, k, n) in [(4, 256, 512), (8, 512, 1024), (16, 1024, 2048), (128, 512, 1024)]:
         run_case_mxfp8_act(pack_nibbles_natural, "mxfp8_act", 1, m, k, n, device)
+    print("=== mxfp8 activation MULTI-EXPERT (uneven token counts) ===")
+    run_case_mxfp8_act_multi("mxfp8_multi", [4, 4, 4, 4], 512, 1024, device)
+    run_case_mxfp8_act_multi("mxfp8_multi", [3, 5, 4, 8], 512, 1024, device)
+    run_case_mxfp8_act_multi("mxfp8_multi", [16, 8, 32, 8], 1024, 2048, device)
 
 
 if __name__ == "__main__":

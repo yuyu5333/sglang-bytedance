@@ -30,7 +30,12 @@ __global__ void int4_fp8_get_group_gemm_starts(
     // grouping of the activation `a_offsets`. nullptr for int4a8 (per-tensor).
     cutlass::bfloat16_t** as_offsets = nullptr,
     cutlass::bfloat16_t* as_base_as_int = nullptr,
-    int64_t act_scale_group = 0) {
+    int64_t act_scale_group = 0,
+    // Weight-scale K-wise quant group size. int4a8 uses 128; mxfp4a8 (E8M0
+    // block) uses 32. The per-expert weight-scale buffer holds n*k/group bf16
+    // elements, so the per-expert pointer must advance by that amount. Defaults
+    // to 128 so the int4a8 call site (which passes 128) is byte-identical.
+    int64_t weight_scale_group = 128) {
   int expert_id = threadIdx.x;
   int32_t expert_offset = expert_offsets[expert_id];
 
@@ -38,7 +43,8 @@ __global__ void int4_fp8_get_group_gemm_starts(
   b_offsets[expert_id] = b_base_as_int + expert_id * k * n / 2;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
   a_scales_offsets[expert_id] = a_scales_base_as_int + (per_act_token ? expert_offset : 0);
-  b_scales_offsets[expert_id] = b_scales_base_as_int + (per_out_ch ? expert_id * n * k / 128 : expert_id);
+  b_scales_offsets[expert_id] =
+      b_scales_base_as_int + (per_out_ch ? expert_id * n * k / weight_scale_group : expert_id);
   if (as_offsets != nullptr && as_base_as_int != nullptr) {
     as_offsets[expert_id] = as_base_as_int + expert_offset * (k / act_scale_group);
   }
@@ -99,7 +105,8 @@ __global__ void int4_fp8_get_group_gemm_starts_3d(
             per_out_ch,                                                                   \
             as_ptrs_raw,                                                                  \
             as_base_raw,                                                                  \
-            act_scale_group);                                                             \
+            act_scale_group,                                                              \
+            weight_scale_group);                                                          \
   }
 
 #define __CALL_W4A8_GET_STARTS_KERNEL_3D(TENSOR_C_TYPE, C_TYPE)                              \
@@ -143,7 +150,11 @@ void run_int4_fp8_get_group_gemm_starts(
     // are emitted (N-indexed like the activation). Left empty for int4a8.
     std::optional<torch::Tensor> as_ptrs = std::nullopt,
     std::optional<torch::Tensor> act_scales = std::nullopt,
-    int64_t act_scale_group = 0) {
+    int64_t act_scale_group = 0,
+    // Weight-scale K-wise quant group size (int4a8: 128, mxfp4a8: 32). Passed to
+    // the launch macro so the per-expert weight-scale pointer advances by the
+    // correct n*k/group. Defaults to 128 (int4a8) for byte-identical behaviour.
+    int64_t weight_scale_group = 128) {
   TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b_tensors.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);

@@ -266,7 +266,10 @@ void cutlass_w4a8_group_gemm_caller(
       b_scales,
       use_act_block_scale ? std::optional<torch::Tensor>(as_scales_ptrs) : std::nullopt,
       use_act_block_scale ? act_block_scales : std::nullopt,
-      use_act_block_scale ? act_scale_group : 0);
+      use_act_block_scale ? act_scale_group : 0,
+      // Weight-scale group size for this instantiation (int4a8=128, mxfp4a8=32),
+      // so the per-expert weight-scale pointer advances by n*k/GroupSize.
+      static_cast<int64_t>(Gemm::GroupSize));
 
   arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGrouped,
