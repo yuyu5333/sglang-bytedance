@@ -179,7 +179,14 @@ void cutlass_w4a8_group_gemm_caller(
     torch::Tensor const& b_strides,
     torch::Tensor const& d_strides,
     torch::Tensor const& s_strides,
-    int64_t chunk_size) {
+    int64_t chunk_size,
+    // MXFP4A8: optional per-token+per-block activation scale (N-indexed, bf16
+    // [total_m, K/act_group]) and its per-expert stride array. When provided the
+    // mainloop's EnableActBlockScale path is fed; for int4a8 these stay nullopt
+    // so the aggregate leaves ptr_AS/dAS default-null and the kernel is byte-identical.
+    std::optional<torch::Tensor> act_block_scales = std::nullopt,
+    std::optional<torch::Tensor> as_strides = std::nullopt,
+    int64_t act_scale_group = 0) {
   //   using Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
   using Args = typename Gemm::GemmScaleOnly::Arguments;
 
@@ -218,6 +225,13 @@ void cutlass_w4a8_group_gemm_caller(
   torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
+  // MXFP4A8: per-expert activation block-scale pointer array (only used when
+  // act_block_scales is provided; int4a8 leaves this empty).
+  torch::Tensor as_scales_ptrs;
+  bool use_act_block_scale = act_block_scales.has_value() && as_strides.has_value();
+  if (use_act_block_scale) {
+    as_scales_ptrs = torch::empty(num_experts, options_int);
+  }
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = a_tensors.device().index();
@@ -249,7 +263,10 @@ void cutlass_w4a8_group_gemm_caller(
       b_tensors,
       d_tensors,
       a_scales,
-      b_scales);
+      b_scales,
+      use_act_block_scale ? std::optional<torch::Tensor>(as_scales_ptrs) : std::nullopt,
+      use_act_block_scale ? act_block_scales : std::nullopt,
+      use_act_block_scale ? act_scale_group : 0);
 
   arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGrouped,
@@ -267,6 +284,14 @@ void cutlass_w4a8_group_gemm_caller(
        static_cast<ElementD**>(out_ptrs.data_ptr()),
        static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
       hw_info};
+
+  // MXFP4A8: feed the activation block-scale into the mainloop's optional path.
+  // These members default to nullptr, so the int4a8 path is unaffected.
+  if (use_act_block_scale) {
+    arguments.mainloop.ptr_AS =
+        static_cast<const typename Gemm::ElementScalePacked**>(as_scales_ptrs.data_ptr());
+    arguments.mainloop.dAS = static_cast<typename Gemm::StrideS*>(as_strides->data_ptr());
+  }
 
   // Instantiate and run GEMM
   typename Gemm::GemmScaleOnly gemm;
@@ -286,7 +311,13 @@ void cutlass_w4a8_group_gemm_caller(
 
   status = gemm.run(stream);
   if (status != cutlass::Status::kSuccess) {
-    TORCH_CHECK(false, "GEMM execution failed");
+    cudaError_t ce = cudaGetLastError();
+    TORCH_CHECK(
+        false,
+        "GEMM execution failed: status=",
+        cutlassGetStatusString(status),
+        " cuda=",
+        cudaGetErrorString(ce));
   }
 }
 

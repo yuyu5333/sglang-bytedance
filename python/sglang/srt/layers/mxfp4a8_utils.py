@@ -93,6 +93,74 @@ def e8m0_to_bf16(scale_e8m0: torch.Tensor) -> torch.Tensor:
     return torch.pow(2.0, exp).to(torch.bfloat16)
 
 
+_FP8_E4M3_MAX = 448.0
+
+
+def quantize_activation_mxfp8_blockwise(
+    x: torch.Tensor, block_size: int = MXFP4_BLOCK_SIZE
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Quantize an activation tensor to mxfp8: FP8 (e4m3) data + a per-K-block
+    scale, i.e. per-token (row) AND per-block (block_size along K).
+
+    This is the activation-side counterpart of ``quantize_mxfp4_blockwise`` and
+    is what makes the CUTLASS mxfp4a8 GEMM a true "per-token + per-block" (mxfp8)
+    activation path on SM90, matching the SM100/SM120 native mxfp8 activation.
+
+    Unlike the E8M0 weight scale, the activation block scale is a *general*
+    fp32/bf16 amax-derived value (NOT restricted to a power of two): FP8 e4m3
+    already carries a mantissa, so a real-valued per-block scale minimises the
+    quantization error (this is how flashinfer / trtllm mxfp8 activation works in
+    practice). The scale is emitted as bf16 so the kernel post-MMA path consumes
+    the same bf16 element type as the (pre-expanded) weight block scale.
+
+    Args:
+        x: activation ``[M, K]`` (bf16/fp16/fp32); K must be divisible by
+            ``block_size``.
+        block_size: K-wise block size, default 32 (matches the E8M0 weight block).
+
+    Returns:
+        x_fp8: ``[M, K]`` float8_e4m3fn, the block-scaled activation.
+        scale: ``[M, K // block_size]`` bf16, ``block_amax / 448`` per block.
+            Dequant is ``x_fp8[m, k] * scale[m, k // block_size]``.
+    """
+    assert x.dim() == 2, "activation must be 2D [M, K]"
+    m, k = x.shape
+    assert k % block_size == 0, f"K={k} not divisible by block_size={block_size}"
+    nblk = k // block_size
+
+    xf = x.reshape(m, nblk, block_size).float()
+    amax = xf.abs().amax(dim=-1)  # [M, nblk]
+    amax = torch.clamp(amax, min=1e-12)
+    scale = amax / _FP8_E4M3_MAX  # [M, nblk], real-valued
+    xq = (xf / scale.unsqueeze(-1)).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
+    x_fp8 = xq.reshape(m, k).to(torch.float8_e4m3fn)
+    return x_fp8, scale.to(torch.bfloat16)
+
+
+def interleave_act_scale_mxfp8(
+    scale: torch.Tensor, alignment: int = 4
+) -> torch.Tensor:
+    """Interleave a per-token+per-block activation scale ``[M, K//block]`` into
+    the kernel's physical activation-scale layout ``[K//(block*4), M*4]``.
+
+    This mirrors the weight-scale 4-wide interleave (``interleave_scales`` in the
+    int4a8 path) but tiled over tokens (M) instead of weight channels (N). The
+    kernel's activation-scale TMA expects **token unit-stride** with the scale-K
+    stride equal to M (tokens per expert), i.e. ``as_strides = M``. This exact
+    layout was verified bit-exact (rel_mean = 0.0000) by the single-GEMM test
+    ``tests/test_cutlass_mxfp4a8_moe_mm.py::run_case_mxfp8_act``.
+
+    ``K//block`` must be a multiple of ``alignment`` (=4); for K a multiple of 128
+    and block=32 this holds (K/32 multiple of 4).
+    """
+    m, nblk = scale.shape
+    assert nblk % alignment == 0, f"K//block={nblk} not divisible by {alignment}"
+    si = scale.reshape(m, nblk // alignment, alignment)  # [M, nblk/4, 4]
+    si = si.permute(1, 0, 2)  # [nblk/4, M, 4]
+    si = si.reshape(nblk // alignment, m * alignment)  # [nblk/4, M*4]
+    return si.contiguous()
+
+
 # E2M1 nibble interleave order used by the int4fp8 ``pack_*_to_int32`` helper.
 # NOTE: the CUTLASS mxfp4a8 kernel does NOT expect this reorder for its packed
 # int8 weight operand (see ``repack_hf_mxfp4_to_kernel`` below).

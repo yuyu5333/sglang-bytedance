@@ -23,7 +23,14 @@ __global__ void int4_fp8_get_group_gemm_starts(
     int64_t n,
     int64_t k,
     bool per_act_token,
-    bool per_out_ch) {
+    bool per_out_ch,
+    // MXFP4A8: optional per-token+per-block activation scale (N-indexed, bf16).
+    // When as_offsets/as_base are non-null the per-expert pointer is computed as
+    // as_base + expert_offset * (k / act_scale_group), mirroring the token
+    // grouping of the activation `a_offsets`. nullptr for int4a8 (per-tensor).
+    cutlass::bfloat16_t** as_offsets = nullptr,
+    cutlass::bfloat16_t* as_base_as_int = nullptr,
+    int64_t act_scale_group = 0) {
   int expert_id = threadIdx.x;
   int32_t expert_offset = expert_offsets[expert_id];
 
@@ -32,6 +39,9 @@ __global__ void int4_fp8_get_group_gemm_starts(
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
   a_scales_offsets[expert_id] = a_scales_base_as_int + (per_act_token ? expert_offset : 0);
   b_scales_offsets[expert_id] = b_scales_base_as_int + (per_out_ch ? expert_id * n * k / 128 : expert_id);
+  if (as_offsets != nullptr && as_base_as_int != nullptr) {
+    as_offsets[expert_id] = as_base_as_int + expert_offset * (k / act_scale_group);
+  }
 }
 
 template <typename ElementA, typename ElementB, typename ElementC, typename ElementAccumulator>
@@ -86,7 +96,10 @@ __global__ void int4_fp8_get_group_gemm_starts_3d(
             out_tensors.size(1),                                                          \
             a_tensors.size(1),                                                            \
             per_act_token,                                                                \
-            per_out_ch);                                                                  \
+            per_out_ch,                                                                   \
+            as_ptrs_raw,                                                                  \
+            as_base_raw,                                                                  \
+            act_scale_group);                                                             \
   }
 
 #define __CALL_W4A8_GET_STARTS_KERNEL_3D(TENSOR_C_TYPE, C_TYPE)                              \
@@ -124,7 +137,13 @@ void run_int4_fp8_get_group_gemm_starts(
     torch::Tensor const& b_tensors,
     torch::Tensor& out_tensors,
     torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales) {
+    torch::Tensor const& b_scales,
+    // MXFP4A8: optional per-token+per-block activation scale plumbing. When
+    // as_ptrs/act_scales are provided, per-expert bf16 activation-scale pointers
+    // are emitted (N-indexed like the activation). Left empty for int4a8.
+    std::optional<torch::Tensor> as_ptrs = std::nullopt,
+    std::optional<torch::Tensor> act_scales = std::nullopt,
+    int64_t act_scale_group = 0) {
   TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b_tensors.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -133,6 +152,15 @@ void run_int4_fp8_get_group_gemm_starts(
   int num_experts = static_cast<int>(expert_offsets.size(0));
   bool per_act_token = a_scales.numel() != 1;
   bool per_out_ch = b_scales.numel() != num_experts;
+
+  // MXFP4A8: raw pointers for the optional activation block-scale path.
+  cutlass::bfloat16_t** as_ptrs_raw = nullptr;
+  cutlass::bfloat16_t* as_base_raw = nullptr;
+  if (as_ptrs.has_value() && act_scales.has_value()) {
+    TORCH_CHECK(act_scales->dtype() == torch::kBFloat16, "activation block-scale must be bf16");
+    as_ptrs_raw = static_cast<cutlass::bfloat16_t**>(as_ptrs->data_ptr());
+    as_base_raw = static_cast<cutlass::bfloat16_t*>(act_scales->data_ptr());
+  }
 
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
 
