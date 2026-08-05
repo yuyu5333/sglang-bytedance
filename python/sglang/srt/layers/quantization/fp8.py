@@ -2407,6 +2407,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if get_moe_runner_backend().is_cutlass():
             from sglang.srt.layers.moe.cutlass_moe import cutlass_fused_experts_fp8
 
+            # For fp4-expert model configs (e.g. DeepSeek-V4 with
+            # SGLANG_DSV4_FP4_EXPERTS=1) the cutlass stride/pointer buffers are
+            # skipped in create_weights by the `not self.is_fp4_expert` gate, but
+            # any remaining fp8 block-quant MoE layer still routes here under
+            # --moe-runner-backend cutlass. Initialize them lazily (idempotent).
+            self._ensure_cutlass_buffers_initialized(layer)
+
             with use_symmetric_memory(
                 get_tp_group(), disabled=not is_allocation_symmetric()
             ):
