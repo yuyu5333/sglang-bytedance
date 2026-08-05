@@ -307,11 +307,6 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         a.shape[1],
         BLOCK_SIZE=512,
     )
-    gateup_input = torch.empty(
-        gateup_input_pre_reorder.shape, dtype=torch.float8_e4m3fn, device=device
-    )
-    per_tensor_quant_fp8(gateup_input_pre_reorder, gateup_input, a1_scale.float(), True)
-    del gateup_input_pre_reorder
     local_topk_ids = topk_ids_
     local_topk_ids = (
         torch.where(local_topk_ids == -1, num_experts, topk_ids_).to(torch.int32)
@@ -330,6 +325,17 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         n,
         k,
     )
+
+    ones_scale = torch.ones(1, dtype=torch.float32, device=device)
+    gateup_input, a1_blk_scale = quantize_activation_mxfp8_blockwise(
+        gateup_input_pre_reorder, block_size=MXFP4_CHUNK_SIZE
+    )
+    del gateup_input_pre_reorder
+    eo_host = expert_offsets.detach().to("cpu").tolist()
+    a1_as_packed, a1_as_strides = build_grouped_act_block_scale(
+        a1_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+    )
+
     c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.zeros((m * topk, k), device=device, dtype=torch.bfloat16)
 
@@ -337,7 +343,7 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         c1,
         gateup_input,
         w1_q,
-        a1_scale.float(),
+        ones_scale,
         w1_scale,
         expert_offsets[:-1],
         problem_sizes1,
@@ -347,6 +353,9 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         s_strides13,
         MXFP4_CHUNK_SIZE,
         topk,
+        a1_as_packed,
+        a1_as_strides,
+        MXFP4_CHUNK_SIZE,
     )
     intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
     if swiglu_limit is not None:
@@ -356,16 +365,18 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         c1[:, n:].clamp_(min=-lim, max=lim)
     silu_and_mul(c1, intermediate)
 
-    intermediate_q = torch.empty(
-        intermediate.shape, dtype=torch.float8_e4m3fn, device=device
+    intermediate_q, a2_blk_scale = quantize_activation_mxfp8_blockwise(
+        intermediate, block_size=MXFP4_CHUNK_SIZE
     )
-    per_tensor_quant_fp8(intermediate, intermediate_q, a2_scale.float(), True)
+    a2_as_packed, a2_as_strides = build_grouped_act_block_scale(
+        a2_blk_scale, eo_host, block_size=MXFP4_CHUNK_SIZE
+    )
 
     cutlass_mxfp4a8_moe_mm(
         c2,
         intermediate_q,
         w2_q,
-        a2_scale.float(),
+        ones_scale,
         w2_scale,
         expert_offsets[:-1],
         problem_sizes2,
@@ -375,6 +386,9 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         s_strides2,
         MXFP4_CHUNK_SIZE,
         topk,
+        a2_as_packed,
+        a2_as_strides,
+        MXFP4_CHUNK_SIZE,
     )
     num_tokens = src2dst.shape[0] // topk
     output = torch.empty(
