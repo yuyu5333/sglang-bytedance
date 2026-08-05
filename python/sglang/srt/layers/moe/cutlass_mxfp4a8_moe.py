@@ -80,6 +80,7 @@ def cutlass_mxfp4a8_moe(
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
     routed_scaling_factor: float = 1.0,
+    swiglu_limit: Optional[float] = None,
 ) -> torch.Tensor:
     """MXFP4A8 fused MoE. Mirrors ``cutlass_w4a8_moe`` but:
 
@@ -181,11 +182,13 @@ def cutlass_mxfp4a8_moe(
     if a2_scale is None:
         a2_scale = torch.zeros(1, dtype=torch.float32, device=device)
         silu_mul_dynamic_tensorwise_quant_for_cutlass_moe(
-            c1, intermediate_q, a2_scale, expert_offsets[-1:], m * topk, n
+            c1, intermediate_q, a2_scale, expert_offsets[-1:], m * topk, n,
+            swiglu_limit=swiglu_limit,
         )
     else:
         silu_mul_static_tensorwise_quant_for_cutlass_moe(
-            c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n
+            c1, intermediate_q, a2_scale.float(), expert_offsets[-1:], m * topk, n,
+            swiglu_limit=swiglu_limit,
         )
 
     cutlass_mxfp4a8_moe_mm(
@@ -242,6 +245,7 @@ def cutlass_mxfp4a8_moe_deepep_normal(
     problem_sizes2: torch.Tensor,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    swiglu_limit: Optional[float] = None,
 ) -> torch.Tensor:
     """MXFP4A8 DeepEP-normal fused MoE. Mirrors ``cutlass_w4a8_moe_deepep_normal``
     with MXFP4 weights and ``chunk_size=32``."""
@@ -326,6 +330,11 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         topk,
     )
     intermediate = torch.empty((m * topk, n), device=device, dtype=torch.bfloat16)
+    if swiglu_limit is not None:
+        # DeepSeek-V4 swiglu clamp: gate=min(gate, L), up=clamp(up, -L, L).
+        lim = float(swiglu_limit)
+        c1[:, :n].clamp_(max=lim)
+        c1[:, n:].clamp_(min=-lim, max=lim)
     silu_and_mul(c1, intermediate)
 
     intermediate_q = torch.empty(
@@ -390,6 +399,7 @@ def cutlass_mxfp4a8_moe_deepep_ll(
     problem_sizes2: torch.Tensor,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    swiglu_limit: Optional[float] = None,
 ) -> torch.Tensor:
     """MXFP4A8 DeepEP-low-latency fused MoE. Mirrors
     ``cutlass_w4a8_moe_deepep_ll`` with MXFP4 weights and ``chunk_size=32``."""
@@ -452,6 +462,11 @@ def cutlass_mxfp4a8_moe_deepep_ll(
     intermediate_q = torch.empty(
         (num_experts, m, n), device=a_states.device, dtype=torch.float8_e4m3fn
     )
+    if swiglu_limit is not None:
+        # DeepSeek-V4 swiglu clamp: gate=min(gate, L), up=clamp(up, -L, L).
+        lim = float(swiglu_limit)
+        c1[..., :n].clamp_(max=lim)
+        c1[..., n:].clamp_(min=-lim, max=lim)
     silu_and_mul_masked_post_per_tensor_quant_fwd(
         c1, intermediate_q, masked_m, a2_scale
     )
