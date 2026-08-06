@@ -2656,10 +2656,12 @@ class KVBit4MLATokenToKVPool(DSATokenToKVPool):
             R = build_hadamard(self.kv_lora_rank, dtype=torch.bfloat16, device=nope.device)
             self._kvbit_encode_R = R
         rotated = (nope @ R).to(torch.float32)  # bf16 GMMA → fp32 for the quant kernel
+        # Fused: quant+pack+header+scatter (nope) + raw rope scatter, ONE kernel.
+        # rope_in must be contiguous (n, drope) bf16; the reshape below is a view
+        # of cache_k_rope which is contiguous in the last dim.
+        rope_in = cache_k_rope.reshape(n, self.qk_rope_head_dim).to(self.dtype).contiguous()
         encode_quant_pack_scatter(
             rotated, loc, self.kvbit_packed[local],
             bits=self.kvbit_bits, group_size=self.kvbit_group_size,
+            rope_in=rope_in, rope_out=self.rope_buffer[local],
         )
-        # rope: raw BF16 copy into rope_buffer.
-        rope = cache_k_rope.reshape(n, 1, self.qk_rope_head_dim).to(self.dtype)
-        self.rope_buffer[local][loc] = rope
