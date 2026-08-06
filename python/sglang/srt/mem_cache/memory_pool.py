@@ -2638,26 +2638,28 @@ class KVBit4MLATokenToKVPool(DSATokenToKVPool):
         maybe_detect_oob(
             loc, 0, self.size + self.page_size, "set_mla_kv_buffer (KVBit4-MLA)"
         )
-        from kvbit.store import encode_kv_rows
+        from kvbit.rotation import build_hadamard
+        from kvbit.triton_kernels import encode_quant_pack_scatter
 
         layer_id = layer.layer_id
         local = layer_id - self.start_layer
         n = cache_k_nope.shape[0]
-        # nope: (n, kv_lora_rank) → kvbit 4bit packed (rotated). encode_kv_rows
-        # expects (..., nope_dim + rope_dim); rope_dim=0 here (nope-only).
+        # nope: (n, kv_lora_rank) → Hadamard-rotate (bf16 GMMA, cached R) →
+        # fused quant+pack+scatter (ONE Triton kernel) into kvbit_packed.
+        # The fused kernel replaces encode_kv_rows (rotate+quant+pack+stack+
+        # view+cat) + index_put — cuts the per-token write-path kernel count
+        # from ~8 to 2 (rotate matmul + fused kernel), reducing graph-replay
+        # overhead (the decode-step kernel-count bottleneck per the profile).
         nope = cache_k_nope.reshape(n, self.kv_lora_rank).to(torch.bfloat16)
-        packed = encode_kv_rows(
-            nope,
-            bits=self.kvbit_bits,
-            nope_dim=self.kv_lora_rank,
-            rope_dim=0,
-            group_size=self.kvbit_group_size,
-            rotation=None,  # build_hadamard(kv_lora_rank) inside
-            bf16_rotate=True,  # match production: BF16 tensor-core matmul
-            rotate=True,
-        )  # PackedKVRows.data: (n, row_bytes) uint8
-        # Graph-safe scatter (device-side index assign, no host sync).
-        self.kvbit_packed[local][loc] = packed.data
+        R = getattr(self, "_kvbit_encode_R", None)
+        if R is None or R.shape[0] != self.kv_lora_rank or R.dtype != torch.bfloat16:
+            R = build_hadamard(self.kv_lora_rank, dtype=torch.bfloat16, device=nope.device)
+            self._kvbit_encode_R = R
+        rotated = (nope @ R).to(torch.float32)  # bf16 GMMA → fp32 for the quant kernel
+        encode_quant_pack_scatter(
+            rotated, loc, self.kvbit_packed[local],
+            bits=self.kvbit_bits, group_size=self.kvbit_group_size,
+        )
         # rope: raw BF16 copy into rope_buffer.
         rope = cache_k_rope.reshape(n, 1, self.qk_rope_head_dim).to(self.dtype)
         self.rope_buffer[local][loc] = rope
