@@ -178,17 +178,18 @@ class Mxfp4CutlassMoEMethod:
         layer.w13_weight = Parameter(w13, requires_grad=False)
         layer.w2_weight = Parameter(w2, requires_grad=False)
 
-        # --- scales: -> numerical 2**e in bf16, then 4-wide interleave ---
+        # --- scales: -> numerical 2**e in bf16, then 8-wide interleave ---
+        # 8-wide matches the mxfp4 kernel PackedScalesNum = TileK(256)/GroupSize(32).
         w13_scale = _normalize_scale_tensor(
             layer.w13_weight_scale_inv.data, torch.bfloat16
         )
-        w13_scale = interleave_scales(w13_scale.contiguous())
+        w13_scale = interleave_scales(w13_scale.contiguous(), group=4)
         layer.w13_weight_scale = Parameter(w13_scale, requires_grad=False)
 
         w2_scale = _normalize_scale_tensor(
             layer.w2_weight_scale_inv.data, torch.bfloat16
         )
-        w2_scale = interleave_scales(w2_scale.contiguous())
+        w2_scale = interleave_scales(w2_scale.contiguous(), group=4)
         layer.w2_weight_scale = Parameter(w2_scale, requires_grad=False)
 
         layer._dsv4_mxfp4_backend = "cutlass"

@@ -574,7 +574,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
           1. E2M1 weights: re-interleave nibbles HF-natural -> order_map
              ``[0,2,4,6,1,3,5,7]`` (same LUT layout as int4a8), keep as int8.
           2. E8M0 scales: expand losslessly to bf16 (power-of-2) then apply the
-             4-wide ``interleave_scales`` used by the post-MMA group-scale path.
+             4-wide ``interleave_scales`` used by the post-MMA group-scale path
+             (4 = PackedScalesNum = mxfp4 TileK(128)/GroupSize(32); the 64-bit
+             TMA element cap forbids TileK=256 / 8-wide).
         The ``[gate; up]`` concatenated layout from the standard per-shard MoE
         loader already matches the kernel, so no de-interleave is needed.
         """
@@ -594,11 +596,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # --- scales: E8M0 uint8 -> bf16 (lossless), then 4-wide interleave ---
         w13_scale = e8m0_to_bf16(layer.w13_weight_scale.data.to(device))
-        w13_scale = interleave_scales(w13_scale.to(torch.bfloat16))
+        w13_scale = interleave_scales(w13_scale.to(torch.bfloat16), group=4)
         layer.w13_weight_scale = Parameter(w13_scale, requires_grad=False)
 
         w2_scale = e8m0_to_bf16(layer.w2_weight_scale.data.to(device))
-        w2_scale = interleave_scales(w2_scale.to(torch.bfloat16))
+        w2_scale = interleave_scales(w2_scale.to(torch.bfloat16), group=4)
         layer.w2_weight_scale = Parameter(w2_scale, requires_grad=False)
 
     def process_weights_after_loading(self, layer):
