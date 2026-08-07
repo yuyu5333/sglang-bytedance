@@ -703,6 +703,18 @@ class ModelRunner:
             start_layer=self.layer_info.start_layer,
         )
 
+    def get_pp_proxy_dspark_aux_num_layers(self) -> Optional[int]:
+        return misc_utils.resolve_pp_proxy_dspark_aux_num_layers(
+            model_config=self.model_config,
+            target_layer_ids=self.spec_aux_config.dflash_target_layer_ids,
+            pp_size=self.ps.pp_size,
+            pp_rank=self.ps.pp_rank,
+            start_layer=self.layer_info.start_layer,
+            capture_layer_offset=getattr(
+                self.model, "dflash_capture_layer_offset", 0
+            ),
+        )
+
     def decode_num_tokens_per_req(
         self, *, num_draft_tokens: Optional[int] = None
     ) -> int:

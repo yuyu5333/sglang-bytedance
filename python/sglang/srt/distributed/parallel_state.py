@@ -1536,6 +1536,13 @@ class GroupCoordinator:
             if all_gather_group is not None and tensor.numel() % all_gather_size == 0:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
+            # torch.distributed P2P requires a non-overlapping dense payload.
+            # PP+CP can produce strided views here (and the send-allgather slice
+            # above is also a view), so materialize the payload at the transport
+            # boundary. P2PWork retains this buffer until an async send completes.
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+
             comm_group = metadata_group if tensor.is_cpu else group
             work = send_func(tensor, self.ranks[dst], group=comm_group)
             if async_send:
@@ -2521,8 +2528,7 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         tp_group (GroupCoordinator): the tp group coordinator
     """
     global _TP_STATE_PATCHED
-    assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
-
+    was_patched = _TP_STATE_PATCHED
     _TP_STATE_PATCHED = True
     old_tp_group = get_tp_group()
     global _TP
@@ -2531,8 +2537,8 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         yield
     finally:
         # restore the original state
-        _TP_STATE_PATCHED = False
         _TP = old_tp_group
+        _TP_STATE_PATCHED = was_patched
 
 
 def get_world_size():

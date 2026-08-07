@@ -30,6 +30,14 @@ from sglang.srt.speculative.spec_utils import draft_tp_context
 logger = logging.getLogger(__name__)
 
 
+def _draft_seq_lens_host_bound(
+    committed_seq_lens_cpu: torch.Tensor, gamma: int
+) -> tuple[torch.Tensor, int]:
+    """Build a safe planning bound without synchronizing exact GPU lengths."""
+    seq_lens_cpu = committed_seq_lens_cpu + 2 * (gamma + 1)
+    return seq_lens_cpu, int(seq_lens_cpu.sum())
+
+
 class DraftBlockResult(msgspec.Struct, frozen=True):
     draft_tokens: torch.Tensor
     corrected_logits: Optional[torch.Tensor]
@@ -227,6 +235,7 @@ class DraftBlockProposer:
         mask_token_id: int,
         draft_block_spec_info,
         dp_moe_sync: bool = False,
+        shared_tp_group=None,
     ) -> None:
         self.draft_model = draft_model
         self.draft_model_runner = draft_model_runner
@@ -235,6 +244,7 @@ class DraftBlockProposer:
         self._draft_block_spec_info = draft_block_spec_info
         self._draft_sampler = None
         self._dp_moe_sync = dp_moe_sync
+        self._shared_tp_group = shared_tp_group
 
     def attach_draft_sampler(self, draft_sampler) -> None:
         self._draft_sampler = draft_sampler
@@ -348,9 +358,11 @@ class DraftBlockProposer:
         embed_module,
     ) -> DraftForwardResult:
         gamma = self.gamma
-        prefix_lens = batch.seq_lens
         positions_2d = verify_window.positions_2d
         verify_cache_loc_2d = verify_window.verify_cache_loc_2d
+        # A PP last-stage re-proposal uses post-accept positions while the
+        # scheduler batch still holds the pre-accept length.
+        prefix_lens = positions_2d[:, 0]
 
         draft_block_ids = torch.full(
             (bs, gamma), int(self._mask_token_id), dtype=torch.long, device=device
@@ -362,12 +374,19 @@ class DraftBlockProposer:
         draft_owns_embed = hasattr(self.draft_model, "forward_embed")
         draft_input_embeds: Optional[torch.Tensor] = None
         if not draft_owns_embed:
-            noise_embedding = embed_module(draft_block_ids)
+            embed_context = (
+                draft_tp_context(self._shared_tp_group)
+                if self._shared_tp_group is not None
+                else nullcontext()
+            )
+            with embed_context:
+                noise_embedding = embed_module(draft_block_ids)
             draft_input_embeds = noise_embedding.view(-1, noise_embedding.shape[-1])
 
         if batch.seq_lens_cpu is not None:
-            draft_seq_lens_cpu = batch.seq_lens_cpu + gamma
-            draft_seq_lens_sum = int(draft_seq_lens_cpu.sum())
+            draft_seq_lens_cpu, draft_seq_lens_sum = _draft_seq_lens_host_bound(
+                batch.seq_lens_cpu, gamma
+            )
         elif draft_input.reserved_seq_lens_cpu is not None:
             draft_seq_lens_cpu = draft_input.reserved_seq_lens_cpu
             draft_seq_lens_sum = int(draft_input.reserved_seq_lens_sum)

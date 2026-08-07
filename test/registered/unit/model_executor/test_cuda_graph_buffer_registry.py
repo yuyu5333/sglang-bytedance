@@ -921,8 +921,13 @@ class TestBuildDecodeRegistry(unittest.TestCase):
         from sglang.srt.model_executor.cuda_graph_buffer_registry import (
             build_decode_registry,
         )
+        from sglang.srt.model_executor.runner_utils.buffers import (
+            pp_proxy_buffer_view,
+            pp_proxy_output_view,
+        )
 
         hs = torch.zeros((8, 2), dtype=torch.int32)
+        dspark_aux = torch.zeros((8, 2, 3), dtype=torch.int32)
         src = SimpleNamespace(
             input_ids=torch.zeros(8, dtype=torch.int64),
             positions=torch.zeros(8, dtype=torch.int64),
@@ -933,7 +938,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             mrope_positions=torch.zeros((3, 8), dtype=torch.int64),
             global_num_tokens_gpu=torch.zeros(1, dtype=torch.int32),
             global_num_tokens_for_logprob_gpu=torch.zeros(1, dtype=torch.int32),
-            pp_proxy_tensors={"hidden_states": hs},
+            pp_proxy_tensors={"hidden_states": hs, "dspark_aux": dspark_aux},
         )
         reg = build_decode_registry(
             device=torch.device("cpu"),
@@ -949,10 +954,18 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             reg.get_slot("pp_proxy_tensors.hidden_states").buffer.data_ptr(),
             hs.data_ptr(),
         )
+        self.assertEqual(
+            reg.get_slot("pp_proxy_tensors.dspark_aux").buffer.data_ptr(),
+            dspark_aux.data_ptr(),
+        )
         # The pp input is not on the FB — it rides on the fill_from kwarg.
         fb = _MiniForwardBatch(batch_size=3)
+        aux_source = torch.arange(18, dtype=torch.int32).view(2, 3, 3)
         pp = SimpleNamespace(
-            tensors={"hidden_states": torch.ones((3, 2), dtype=torch.int32)}
+            tensors={
+                "hidden_states": torch.ones((3, 2), dtype=torch.int32),
+                "dspark_aux": aux_source,
+            }
         )
         reg.fill_from(
             fb,
@@ -964,6 +977,14 @@ class TestBuildDecodeRegistry(unittest.TestCase):
         )
         self.assertTrue(torch.all(hs[:3] == 1))
         self.assertTrue(torch.all(hs[3:] == 0))  # stale padded tail cleared
+        torch.testing.assert_close(dspark_aux[:3], aux_source.transpose(0, 1))
+        torch.testing.assert_close(
+            pp_proxy_buffer_view("dspark_aux", dspark_aux, 3), aux_source
+        )
+        torch.testing.assert_close(
+            pp_proxy_output_view("dspark_aux", aux_source, 2), aux_source[:, :2]
+        )
+        self.assertTrue(torch.all(dspark_aux[3:] == 0))
 
     def test_direct_pp_proxy_copy_clears_stale_tail(self):
         hidden = torch.full((8, 2), 9, dtype=torch.int32)

@@ -346,6 +346,9 @@ class DeepseekV2WeightLoaderMixin:
                             ".embed_tokens." in name
                             and not is_nextn
                             and not self.pp_group.is_first_rank
+                            and not getattr(
+                                self.model, "dspark_pp_duplicate_embedding", False
+                            )
                         ):
                             continue
                         # Skip loading norm if not last rank in pipeline parallelism

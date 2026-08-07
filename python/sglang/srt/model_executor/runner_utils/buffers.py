@@ -37,6 +37,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
 
 _has_foreach_copy = hasattr(torch, "_foreach_copy_")
+DSPARK_AUX_PP_KEY = "dspark_aux"
 
 
 def _grouped_foreach_copy_(dsts: List[torch.Tensor], srcs: List[torch.Tensor]) -> None:
@@ -58,6 +59,47 @@ def _grouped_foreach_copy_(dsts: List[torch.Tensor], srcs: List[torch.Tensor]) -
         groups[key][1].append(src)
     for group_dsts, group_srcs in groups.values():
         foreach_copy(group_dsts, group_srcs)
+
+
+def pp_proxy_buffer_view(
+    key: str, buffer: torch.Tensor, num_tokens: int
+) -> torch.Tensor:
+    """Expose model-facing views from token-major PP graph buffers."""
+    if key == DSPARK_AUX_PP_KEY:
+        return buffer[:num_tokens].transpose(0, 1)
+    return buffer[:num_tokens]
+
+
+def pp_proxy_copy_views(
+    key: str, buffer: torch.Tensor, source: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return matching destination/source views for PP replay copies."""
+    if key != DSPARK_AUX_PP_KEY:
+        return buffer[: source.shape[0]], source
+    if source.ndim != 3 or buffer.ndim != 3:
+        raise ValueError(
+            "DSpark PP aux tensors must be rank-3: "
+            f"source={tuple(source.shape)}, buffer={tuple(buffer.shape)}"
+        )
+    if source.shape[0] != buffer.shape[1]:
+        raise ValueError(
+            "DSpark PP aux layer count changed after graph capture: "
+            f"source={source.shape[0]}, captured={buffer.shape[1]}"
+        )
+    if source.shape[1] > buffer.shape[0]:
+        raise ValueError(
+            "DSpark PP aux token count exceeds the graph buffer: "
+            f"source={source.shape[1]}, capacity={buffer.shape[0]}"
+        )
+    return buffer[: source.shape[1]], source.transpose(0, 1)
+
+
+def pp_proxy_output_view(
+    key: str, output: torch.Tensor, num_tokens: int
+) -> torch.Tensor:
+    if key == DSPARK_AUX_PP_KEY:
+        return output[:, :num_tokens]
+    return output[:num_tokens]
 
 
 @dataclass
@@ -105,6 +147,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
         ne_token_table: Optional[torch.Tensor] = None,
         hc_hidden_size: Optional[int] = None,
         pp_proxy_topk_size: Optional[int] = None,
+        pp_proxy_dspark_aux_num_layers: Optional[int] = None,
     ) -> DecodeInputBuffers:
         with torch.device(device):
             input_ids = torch.zeros((max_num_token,), dtype=torch.int64)
@@ -141,6 +184,15 @@ class DecodeInputBuffers(ForwardInputBuffers):
                 if pp_proxy_topk_size is not None:
                     pp_proxy_tensors["topk_indices"] = torch.zeros(
                         (max_num_token, pp_proxy_topk_size), dtype=torch.int32
+                    )
+                if pp_proxy_dspark_aux_num_layers is not None:
+                    pp_proxy_tensors[DSPARK_AUX_PP_KEY] = torch.zeros(
+                        (
+                            max_num_token,
+                            pp_proxy_dspark_aux_num_layers,
+                            hidden_size,
+                        ),
+                        dtype=dtype,
                     )
             else:
                 pp_proxy_tensors = None
@@ -310,8 +362,8 @@ class DecodeInputBuffers(ForwardInputBuffers):
         if pp_proxy_tensors is not None and self.pp_proxy_tensors is not None:
             for key, buf in self.pp_proxy_tensors.items():
                 src = pp_proxy_tensors.tensors[key]
-                dim = src.shape[0]
-                dsts.append(buf[:dim])
+                dst, src = pp_proxy_copy_views(key, buf, src)
+                dsts.append(dst)
                 srcs.append(src)
 
         # Batch all GPU copies, grouped by dtype pair.

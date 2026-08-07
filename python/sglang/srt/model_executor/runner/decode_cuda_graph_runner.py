@@ -84,6 +84,8 @@ from sglang.srt.model_executor.runner_backend_utils import (
 )
 from sglang.srt.model_executor.runner_utils.buffers import (
     DecodeInputBuffers,
+    pp_proxy_buffer_view,
+    pp_proxy_output_view,
 )
 from sglang.srt.model_executor.runner_utils.capture_mode import (
     _set_capture_lora_variant,
@@ -377,6 +379,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                 self.model_runner.model_config, "hc_hidden_size", None
             ),
             pp_proxy_topk_size=self.model_runner.get_pp_proxy_topk_size(),
+            pp_proxy_dspark_aux_num_layers=(
+                self.model_runner.get_pp_proxy_dspark_aux_num_layers()
+            ),
         )
         self.buffers.share_buffers()
         # FB-shared slot registry adopting DecodeInputBuffers storage (same
@@ -730,8 +735,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         if self.pp_size > 1:
             pp_proxy_tensors = PPProxyTensors(
                 {
-                    k: v[
-                        : resolve_pp_proxy_num_tokens(
+                    k: pp_proxy_buffer_view(
+                        k,
+                        v,
+                        resolve_pp_proxy_num_tokens(
                             tensor_name=k,
                             num_tokens=num_tokens,
                             forward_mode=self.capture_forward_mode,
@@ -739,8 +746,8 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                             attn_tp_size=self.model_runner.ps.attn_tp_size,
                             attn_cp_size=self.model_runner.ps.attn_cp_size,
                             require_attn_tp_gather_=self.require_attn_tp_gather,
-                        )
-                    ]
+                        ),
+                    )
                     for k, v in buffers.pp_proxy_tensors.items()
                 }
             )
@@ -1311,8 +1318,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             assert isinstance(output, PPProxyTensors)
             return PPProxyTensors(
                 {
-                    k: v[
-                        : resolve_pp_proxy_num_tokens(
+                    k: pp_proxy_output_view(
+                        k,
+                        v,
+                        resolve_pp_proxy_num_tokens(
                             tensor_name=k,
                             num_tokens=self.raw_num_token,
                             forward_mode=forward_batch.forward_mode,
@@ -1320,8 +1329,8 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                             attn_tp_size=self.model_runner.ps.attn_tp_size,
                             attn_cp_size=self.model_runner.ps.attn_cp_size,
                             require_attn_tp_gather_=self.require_attn_tp_gather,
-                        )
-                    ]
+                        ),
+                    )
                     for k, v in output.tensors.items()
                 }
             )

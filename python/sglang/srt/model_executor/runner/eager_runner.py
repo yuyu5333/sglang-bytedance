@@ -359,21 +359,27 @@ class EagerRunner(BaseRunner):
             input_embeds=input_embeds,
             pp_proxy_tensors=kwargs.get("pp_proxy_tensors"),
         )
+        if not model.pp_group.is_last_rank:
+            # PP models return a PPProxyTensors carrier directly. Auxiliary
+            # DSpark captures are already embedded in that carrier and must
+            # continue to the next stage without tuple-unpacking here.
+            return hidden_states
+
         capture_aux_hidden_states = getattr(model, "capture_aux_hidden_states", False)
         aux_hidden_states = None
         if capture_aux_hidden_states:
             hidden_states, aux_hidden_states = hidden_states
 
-        if not model.pp_group.is_last_rank:
-            return (
-                (hidden_states, aux_hidden_states)
-                if capture_aux_hidden_states
-                else hidden_states
-            )
-
         hidden_states = cp_gather_after_forward(
             hidden_states, forward_batch, torch.cuda.current_stream()
         )
+        if aux_hidden_states is not None:
+            aux_hidden_states = [
+                cp_gather_after_forward(
+                    aux_hidden, forward_batch, torch.cuda.current_stream()
+                )
+                for aux_hidden in aux_hidden_states
+            ]
         return model.logits_processor(
             forward_batch.input_ids,
             hidden_states,

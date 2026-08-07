@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 import torch
 
 from sglang.srt.model_executor.input_buffers import share_input_buffer
+from sglang.srt.model_executor.runner_utils.buffers import pp_proxy_copy_views
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -94,13 +95,9 @@ def copy_pp_proxy_tensors_to_graph_buffers(
         src = source.tensors.get(key)
         if src is None:
             continue
-        if src.shape[0] > buffer.shape[0]:
-            raise ValueError(
-                f"PP proxy tensor {key!r} has {src.shape[0]} rows, but its "
-                f"graph buffer has only {buffer.shape[0]}"
-            )
-        buffer[: src.shape[0]].copy_(src)
-        zero_pp_proxy_buffer_tail(buffer, src)
+        dst_view, src_view = pp_proxy_copy_views(key, buffer, src)
+        dst_view.copy_(src_view)
+        zero_pp_proxy_buffer_tail(buffer, src_view)
 
 
 class PaddingPolicy(Enum):
@@ -780,7 +777,13 @@ def build_decode_registry(
             def _pp_source(key):
                 def _fn(_fb, ctx):
                     ppx = ctx.pp_proxy_tensors
-                    return None if ppx is None else ppx.tensors[key]
+                    if ppx is None:
+                        return None
+                    value = ppx.tensors.get(key)
+                    if value is None:
+                        return None
+                    _, source = pp_proxy_copy_views(key, pp[key], value)
+                    return source
 
                 return _fn
 
@@ -791,7 +794,8 @@ def build_decode_registry(
                         return
                     src = ppx.tensors.get(key)
                     if src is not None:
-                        zero_pp_proxy_buffer_tail(buf, src)
+                        _, source = pp_proxy_copy_views(key, buf, src)
+                        zero_pp_proxy_buffer_tail(buf, source)
 
                 return _fn
 

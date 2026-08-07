@@ -23,9 +23,13 @@ StepSampler = Callable[[torch.Tensor, int], torch.Tensor]
 
 
 def gather_and_crop_vocab(
-    local_logits: torch.Tensor, lm_head: nn.Module
+    local_logits: torch.Tensor, lm_head: nn.Module, tp_group=None
 ) -> torch.Tensor:
-    full_logits = tensor_model_parallel_all_gather(local_logits, dim=-1)
+    full_logits = (
+        tensor_model_parallel_all_gather(local_logits, dim=-1)
+        if tp_group is None
+        else tp_group.all_gather(local_logits, dim=-1)
+    )
     return full_logits[..., : int(lm_head.org_vocab_size)]
 
 
@@ -372,12 +376,17 @@ class DSparkDraftMixin:
         self.markov_head = build_markov_head(config)
         self.confidence_head = build_confidence_head(config)
         self.lm_head: Optional[nn.Module] = None
+        self.shared_tp_group = None
 
     def attach_shared_modules(
         self, *, embed_tokens: nn.Module, lm_head: nn.Module
     ) -> None:
         del embed_tokens
         self.lm_head = lm_head
+
+    def set_shared_tp_group(self, tp_group) -> None:
+        """Use the target TP group for target-sharded shared vocabulary weights."""
+        self.shared_tp_group = tp_group
 
     def compute_base_logits(
         self, hidden: torch.Tensor
@@ -391,7 +400,9 @@ class DSparkDraftMixin:
         if hidden.dtype != weight.dtype:
             hidden = hidden.to(weight.dtype)
         local_logits = torch.matmul(hidden, weight.T)
-        base_logits = gather_and_crop_vocab(local_logits, self.lm_head)
+        base_logits = gather_and_crop_vocab(
+            local_logits, self.lm_head, tp_group=self.shared_tp_group
+        )
         return base_logits, None
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -506,4 +517,4 @@ class Qwen3DSparkModel(DSparkDraftModel):
     pass
 
 
-EntryClass = [Qwen3DSparkModel]
+EntryClass = [Qwen3DSparkModel, DSparkDraftModel]

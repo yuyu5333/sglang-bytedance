@@ -288,6 +288,12 @@ class ModelConfig:
                 **kwargs,
             )
         )
+        if is_draft_model and str(speculative_algorithm or "").upper() == "DSPARK":
+            from sglang.srt.speculative.dspark_components.dspark_config import (
+                normalize_dspark_draft_hf_config,
+            )
+
+            normalize_dspark_draft_hf_config(self.hf_config)
         self.hf_text_config = get_hf_text_config(self.hf_config)
 
         rope_scaling = getattr(self.hf_text_config, "rope_parameters", None) or getattr(

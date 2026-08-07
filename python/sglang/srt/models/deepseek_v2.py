@@ -2353,6 +2353,8 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 class DeepseekV2Model(nn.Module):
     fall_back_to_pt_during_load = False
+    # DFlash captures the input to layer (target_layer_id + 1).
+    dflash_capture_layer_offset = 1
 
     def __init__(
         self,
@@ -2376,7 +2378,13 @@ class DeepseekV2Model(nn.Module):
         else:
             self.cp_size = None
 
-        if self.pp_group.is_first_rank:
+        self.dspark_pp_duplicate_embedding = (
+            self.pp_group.world_size > 1
+            and self.pp_group.is_last_rank
+            and str(get_server_args().speculative_algorithm or "").upper()
+            == "DSPARK"
+        )
+        if self.pp_group.is_first_rank or self.dspark_pp_duplicate_embedding:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -2533,6 +2541,9 @@ class DeepseekV2Model(nn.Module):
                 f"PP stage starting at layer {self.start_layer} requires DSA "
                 "topk_indices from the previous stage."
             )
+        upstream_dspark_aux = None
+        if self.layers_to_capture and pp_proxy_tensors is not None:
+            upstream_dspark_aux = pp_proxy_tensors.tensors.get("dspark_aux")
         device = hidden_states.device
         zero_allocator = BumpAllocator(
             buffer_size=total_num_layers * 2 * (2 if forward_batch.can_run_tbo else 1),
@@ -2636,6 +2647,14 @@ class DeepseekV2Model(nn.Module):
                 "hidden_states": hidden_states,
                 "residual": residual,
             }
+            if self.layers_to_capture:
+                aux_parts = []
+                if upstream_dspark_aux is not None:
+                    aux_parts.append(upstream_dspark_aux)
+                if aux_hidden_states:
+                    aux_parts.append(torch.stack(aux_hidden_states, dim=0))
+                if aux_parts:
+                    proxy_tensors["dspark_aux"] = torch.cat(aux_parts, dim=0)
             if (
                 self.use_dsa
                 and dsa_forward_uses_topk
@@ -2664,20 +2683,32 @@ class DeepseekV2Model(nn.Module):
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
 
+        if self.layers_to_capture and upstream_dspark_aux is not None:
+            aux_hidden_states = [
+                upstream_dspark_aux[i]
+                for i in range(upstream_dspark_aux.shape[0])
+            ] + aux_hidden_states
         if self.pp_group.is_last_rank and use_cp_v1:
-            # allgather + rerrange
+            # Rebuild both the final hidden state and every DSpark capture in
+            # the original token order. The draft KV injector consumes the
+            # same full-token cache layout as the target prefill.
+            stream = torch.cuda.current_stream()
             hidden_states = cp_all_gather_rerange_output(
-                hidden_states,
-                self.cp_size,
-                forward_batch,
-                torch.cuda.current_stream(),
+                hidden_states, self.cp_size, forward_batch, stream
             )
+            aux_hidden_states = [
+                cp_all_gather_rerange_output(
+                    aux_hidden, self.cp_size, forward_batch, stream
+                )
+                for aux_hidden in aux_hidden_states
+            ]
         if len(aux_hidden_states) == 0:
             return hidden_states
         return hidden_states, aux_hidden_states
 
 
 class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
+    dflash_capture_layer_offset = 1
     # Quantization configs (quark, compressed-tensors) unfuse these names back to
     # the checkpoint's layer names when matching ignore/target patterns.
     # DeepseekV2MLP always merges gate_proj/up_proj into one linear, so a config
@@ -2879,7 +2910,7 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                 input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
             )
         aux_hidden_states = None
-        if self.capture_aux_hidden_states:
+        if self.capture_aux_hidden_states and self.pp_group.is_last_rank:
             hidden_states, aux_hidden_states = hidden_states
 
         if self.pp_group.is_last_rank:
@@ -2946,9 +2977,6 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                 self.model.layers_to_capture = list(layer_ids)
 
     def set_dflash_layers_to_capture(self, layer_ids: List[int]):
-        if not self.pp_group.is_last_rank:
-            return
-
         if layer_ids is None:
             raise ValueError(
                 "DFLASH requires explicit layer_ids for aux hidden capture."

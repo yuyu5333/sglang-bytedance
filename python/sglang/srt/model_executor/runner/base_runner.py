@@ -40,6 +40,10 @@ from sglang.srt.model_executor.forward_batch_info import (
     PPProxyTensors,
 )
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+from sglang.srt.model_executor.runner_utils.buffers import (
+    DSPARK_AUX_PP_KEY,
+    pp_proxy_buffer_view,
+)
 from sglang.srt.model_executor.runner.flashinfer_autotune import (
     run_flashinfer_autotune_forward,
     should_run_flashinfer_autotune,
@@ -117,6 +121,7 @@ def _allocate_decode_buffers(
     ne_token_table: Optional[torch.Tensor] = None,
     hc_hidden_size: Optional[int] = None,
     pp_proxy_topk_size: Optional[int] = None,
+    pp_proxy_dspark_aux_num_layers: Optional[int] = None,
 ) -> SimpleNamespace:
     """Allocate the FB-shared decode buffers."""
     with torch.device(device):
@@ -148,15 +153,20 @@ def _allocate_decode_buffers(
             is_mhc = hc_hidden_size is not None
             hs = hc_hidden_size if is_mhc else hidden_size
             pp_proxy_tensors = {
-                "hidden_states": torch.zeros((max_bs, hs), dtype=dtype),
+                "hidden_states": torch.zeros((max_num_token, hs), dtype=dtype),
             }
             if not is_mhc:
                 pp_proxy_tensors["residual"] = torch.zeros(
-                    (max_bs, hidden_size), dtype=dtype
+                    (max_num_token, hidden_size), dtype=dtype
                 )
             if pp_proxy_topk_size is not None:
                 pp_proxy_tensors["topk_indices"] = torch.zeros(
                     (max_num_token, pp_proxy_topk_size), dtype=torch.int32
+                )
+            if pp_proxy_dspark_aux_num_layers is not None:
+                pp_proxy_tensors[DSPARK_AUX_PP_KEY] = torch.zeros(
+                    (max_num_token, pp_proxy_dspark_aux_num_layers, hidden_size),
+                    dtype=dtype,
                 )
         else:
             pp_proxy_tensors = None
@@ -356,6 +366,9 @@ class BaseRunner(ABC):
             ),
             hc_hidden_size=getattr(mr.model_config, "hc_hidden_size", None),
             pp_proxy_topk_size=mr.get_pp_proxy_topk_size(),
+            pp_proxy_dspark_aux_num_layers=(
+                mr.get_pp_proxy_dspark_aux_num_layers()
+            ),
         )
 
     def _dummy_run(
@@ -489,8 +502,10 @@ class BaseRunner(ABC):
         if mr.server_args.pp_size > 1:
             pp_proxy_tensors = PPProxyTensors(
                 {
-                    k: v[
-                        : resolve_pp_proxy_num_tokens(
+                    k: pp_proxy_buffer_view(
+                        k,
+                        v,
+                        resolve_pp_proxy_num_tokens(
                             tensor_name=k,
                             num_tokens=num_tokens,
                             forward_mode=capture_forward_mode,
@@ -500,8 +515,8 @@ class BaseRunner(ABC):
                             require_attn_tp_gather_=require_attn_tp_gather(
                                 mr.server_args
                             ),
-                        )
-                    ]
+                        ),
+                    )
                     for k, v in buffers.pp_proxy_tensors.items()
                 }
             )

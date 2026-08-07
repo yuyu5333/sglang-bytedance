@@ -67,3 +67,20 @@ def resolve_pp_proxy_topk_size(
     ):
         return None
     return getattr(hf_config, "index_topk", None)
+
+
+def resolve_pp_proxy_dspark_aux_num_layers(
+    *,
+    model_config: ModelConfig,
+    target_layer_ids: Any,
+    pp_size: int,
+    pp_rank: int,
+    start_layer: int,
+    capture_layer_offset: int = 0,
+) -> Optional[int]:
+    """Return the fixed number of DSpark aux layers arriving from upstream."""
+    if pp_size <= 1 or pp_rank == 0 or not target_layer_ids:
+        return None
+    exclusive_limit = start_layer - int(capture_layer_offset)
+    count = sum(int(layer_id) < exclusive_limit for layer_id in target_layer_ids)
+    return count or None

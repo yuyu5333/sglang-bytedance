@@ -19,6 +19,9 @@ if TYPE_CHECKING:
         EagleDraftInput,
         EaglePPVerifyInputRaw,
     )
+    from sglang.srt.speculative.dspark_components.dspark_verify import (
+        DSparkPPVerifyInputRaw,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +105,9 @@ class GenerationBatchResult:
     # PP + Spec: produced by the last PP rank after draft/draft_extend_for_decode,
     # consumed by _pp_prepare_tensor_dict for PP ring transmission so non-last PP
     # ranks can rebuild EagleVerifyInput on the next iteration.
-    pp_verify_input_raw: Optional[EaglePPVerifyInputRaw] = None
+    pp_verify_input_raw: Optional[
+        Union[EaglePPVerifyInputRaw, DSparkPPVerifyInputRaw]
+    ] = None
 
     @property
     def has_sampled_token_ids(self) -> bool:

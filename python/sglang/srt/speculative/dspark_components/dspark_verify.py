@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import ClassVar, List, Optional, Tuple, Union
 
 import msgspec
 import torch
@@ -9,7 +10,10 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 from sglang.srt.speculative.dflash_info import DFlashVerifyInput
-from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
+from sglang.srt.speculative.dflash_info_v2 import (
+    DFlashDecodePrepareMixin,
+    DFlashDraftInputV2,
+)
 from sglang.srt.speculative.dflash_utils import apply_dflash_verify_logits_adjustments
 from sglang.srt.speculative.dspark_components.dspark_draft import DraftBlockResult
 from sglang.srt.speculative.dspark_components.dspark_kv_inject import (
@@ -37,6 +41,7 @@ from sglang.srt.speculative.dspark_components.kernels.dspark_verify_window impor
     scatter_compact_to_strided_into,
 )
 from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout
+from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
 
 
 def verify_logits_adjustments_are_noop(sampling_info) -> bool:
@@ -59,6 +64,209 @@ def verify_logits_adjustments_are_noop(sampling_info) -> bool:
 class TargetVerifyResult(msgspec.Struct, frozen=True):
     logits_output: object
     can_run_cuda_graph: bool
+    pp_hidden_states_proxy_tensors: Optional[object] = None
+
+
+@dataclass
+class DSparkPPVerifyInputRaw(DFlashDecodePrepareMixin, SpecInput):
+    """DSpark state relayed from the last PP stage to all verify stages.
+
+    The carrier keeps device tensors at the top level so the PP tensor ring can
+    transfer them without synchronously materializing Python lists. Every rank
+    rebuilds the same linear verify window from this state on the next step.
+    """
+
+    bonus_tokens: Union[List[int], torch.Tensor]
+    draft_tokens: Union[List[List[int]], torch.Tensor]
+    new_seq_lens: Union[List[int], torch.Tensor]
+    accept_lens: Union[List[int], torch.Tensor]
+    reserved_seq_lens_cpu: Optional[Union[List[int], torch.Tensor]] = None
+    reserved_seq_lens_sum: Optional[int] = None
+    confidence: Optional[Union[List[float], torch.Tensor]] = None
+    cap_trim_lens: Optional[Union[List[int], torch.Tensor]] = None
+    verify_lens: Optional[Union[List[int], torch.Tensor]] = None
+    # Linear verify writes directly to the formal req-to-token slots.
+    accept_index: Optional[Union[List, torch.Tensor]] = None
+
+    _TENSOR_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "bonus_tokens",
+        "draft_tokens",
+        "new_seq_lens",
+        "accept_lens",
+        "confidence",
+        "cap_trim_lens",
+        "verify_lens",
+        "accept_index",
+    )
+    _WHOLE_BATCH_OPTIONAL_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "confidence",
+        "verify_lens",
+        "accept_index",
+    )
+
+    def __post_init__(self):
+        super().__init__(SpecInputType.DFLASH_PP_VERIFY_INPUT_RAW)
+
+    def get_spec_adjust_token_coefficient(self) -> Tuple[int, int]:
+        return (1, 1)
+
+    def to_tensor_dict(self) -> dict:
+        result = {}
+        for name in self._TENSOR_FIELDS:
+            value = getattr(self, name)
+            if value is not None:
+                result[f"pp_spec_output.{name}"] = value
+        return result
+
+    @classmethod
+    def has_pp_outputs(cls, pp_outputs) -> bool:
+        tensors = getattr(pp_outputs, "tensors", pp_outputs)
+        return (
+            "pp_spec_output.bonus_tokens" in tensors
+            or "pp_spec_output" in tensors
+        )
+
+    @classmethod
+    def from_pp_outputs(cls, pp_outputs) -> "DSparkPPVerifyInputRaw":
+        tensors = getattr(pp_outputs, "tensors", pp_outputs)
+        # Keep compatibility with early fixtures that nested Python values.
+        if "pp_spec_output" in tensors:
+            return cls(**tensors["pp_spec_output"])
+        values = {}
+        for name in cls._TENSOR_FIELDS:
+            key = f"pp_spec_output.{name}"
+            if key in tensors:
+                values[name] = tensors[key]
+        return cls(**values)
+
+    @classmethod
+    def build_dummy_for_decode(
+        cls, batch: ScheduleBatch, num_draft: int
+    ) -> "DSparkPPVerifyInputRaw":
+        bs = len(batch.reqs)
+        gamma = max(num_draft - 1, 0)
+        bonus = batch.input_ids.reshape(bs).clone()
+        return cls(
+            bonus_tokens=bonus,
+            draft_tokens=bonus[:, None].expand(bs, gamma).clone(),
+            new_seq_lens=batch.seq_lens.clone(),
+            confidence=torch.zeros(bs, dtype=torch.float32, device=bonus.device),
+            accept_lens=torch.ones(bs, dtype=torch.int32, device=bonus.device),
+            cap_trim_lens=torch.zeros(bs, dtype=torch.int32, device=bonus.device),
+            verify_lens=torch.full(
+                (bs,), num_draft, dtype=torch.int32, device=bonus.device
+            ),
+            accept_index=None,
+        )
+
+    def filter_batch(
+        self,
+        new_indices,
+        has_been_filtered: bool = True,
+        new_indices_cpu: Optional[List[int]] = None,
+    ) -> None:
+        del has_been_filtered
+        idx_cpu = new_indices_cpu
+
+        if idx_cpu:
+            max_index = max(idx_cpu)
+            field_sizes = {
+                name: int(value.shape[0])
+                for name in self._TENSOR_FIELDS
+                if torch.is_tensor(value := getattr(self, name))
+            }
+            invalid_fields = {
+                name: size for name, size in field_sizes.items() if max_index >= size
+            }
+            if invalid_fields:
+                raise IndexError(
+                    "DSpark PP filter indices exceed relayed batch fields: "
+                    f"indices={idx_cpu}, field_sizes={field_sizes}, "
+                    f"invalid_fields={invalid_fields}"
+                )
+
+        def pick(value):
+            nonlocal idx_cpu
+            if value is None:
+                return None
+            if torch.is_tensor(value):
+                idx = torch.as_tensor(
+                    new_indices, device=value.device, dtype=torch.long
+                )
+                return value.index_select(0, idx)
+            if idx_cpu is None:
+                idx_cpu = (
+                    new_indices.tolist()
+                    if torch.is_tensor(new_indices)
+                    else list(new_indices)
+                )
+            return [value[i] for i in idx_cpu]
+
+        for name in self._TENSOR_FIELDS:
+            setattr(self, name, pick(getattr(self, name)))
+        if self.reserved_seq_lens_cpu is not None:
+            self.reserved_seq_lens_cpu = pick(self.reserved_seq_lens_cpu)
+            if torch.is_tensor(self.reserved_seq_lens_cpu):
+                self.reserved_seq_lens_sum = int(
+                    self.reserved_seq_lens_cpu.sum().item()
+                )
+            else:
+                self.reserved_seq_lens_sum = sum(self.reserved_seq_lens_cpu)
+
+    def merge_batch(self, other: "DSparkPPVerifyInputRaw") -> None:
+        def is_empty(value):
+            return value is None or (
+                value.numel() == 0 if torch.is_tensor(value) else not value
+            )
+
+        def merge(lhs, rhs):
+            if lhs is None:
+                return rhs
+            if rhs is None:
+                return lhs
+            if torch.is_tensor(lhs) and torch.is_tensor(rhs):
+                return torch.cat([lhs, rhs], dim=0)
+            return lhs + rhs
+
+        def merge_whole_batch_optional(lhs, rhs):
+            # These fields describe every row in the batch. Keeping only the
+            # non-None side would create a shorter tensor after decode and
+            # newly-prefilled batches are merged. None selects the existing
+            # uniform/fallback behavior for the combined batch.
+            if lhs is None or rhs is None:
+                return None
+            return merge(lhs, rhs)
+
+        if is_empty(other.bonus_tokens):
+            return
+        if is_empty(self.bonus_tokens):
+            for name in self._TENSOR_FIELDS:
+                setattr(self, name, getattr(other, name))
+            self.reserved_seq_lens_cpu = other.reserved_seq_lens_cpu
+            self.reserved_seq_lens_sum = other.reserved_seq_lens_sum
+            return
+        for name in self._TENSOR_FIELDS:
+            merge_field = (
+                merge_whole_batch_optional
+                if name in self._WHOLE_BATCH_OPTIONAL_FIELDS
+                else merge
+            )
+            setattr(
+                self,
+                name,
+                merge_field(getattr(self, name), getattr(other, name)),
+            )
+        self.reserved_seq_lens_cpu = merge_whole_batch_optional(
+            self.reserved_seq_lens_cpu,
+            other.reserved_seq_lens_cpu,
+        )
+        if self.reserved_seq_lens_cpu is not None:
+            if torch.is_tensor(self.reserved_seq_lens_cpu):
+                self.reserved_seq_lens_sum = int(
+                    self.reserved_seq_lens_cpu.sum().item()
+                )
+            else:
+                self.reserved_seq_lens_sum = sum(self.reserved_seq_lens_cpu)
 
 
 class TargetVerifyExecutor:
@@ -215,6 +423,7 @@ class TargetVerifyExecutor:
         verify_ids_2d: torch.Tensor,
         verify_window: VerifyWindow,
         sampling_info,
+        pp_proxy_tensors=None,
     ) -> TargetVerifyResult:
         verify_w = self.verify_num_draft_tokens
         positions_2d = verify_window.positions_2d
@@ -243,9 +452,12 @@ class TargetVerifyExecutor:
             verify_input=verify_input,
             seq_lens_cpu_backup=seq_lens_cpu_backup,
             seq_lens_sum_backup=seq_lens_sum_backup,
+            pp_proxy_tensors=pp_proxy_tensors,
         )
 
-        if sampling_info is not None:
+        # Only the last PP rank returns logits. Intermediate ranks return a PP
+        # proxy and must not run sampling-time logit adjustments.
+        if result.logits_output is not None:
             apply_dflash_verify_logits_adjustments(
                 next_token_logits=result.logits_output.next_token_logits,
                 sampling_info=sampling_info,
@@ -261,6 +473,7 @@ class TargetVerifyExecutor:
         verify_input: DFlashVerifyInput,
         seq_lens_cpu_backup,
         seq_lens_sum_backup,
+        pp_proxy_tensors=None,
     ) -> TargetVerifyResult:
         verify_forward_batch, _ = verify_input.prepare_for_verify(
             batch, self.target_worker
@@ -273,10 +486,14 @@ class TargetVerifyExecutor:
             forward_batch=verify_forward_batch,
             is_verify=True,
             skip_attn_backend_init=True,
+            pp_proxy_tensors=pp_proxy_tensors,
         )
         return TargetVerifyResult(
             logits_output=target_out.logits_output,
             can_run_cuda_graph=target_out.can_run_cuda_graph,
+            pp_hidden_states_proxy_tensors=getattr(
+                target_out, "pp_hidden_states_proxy_tensors", None
+            ),
         )
 
     def commit_hidden(

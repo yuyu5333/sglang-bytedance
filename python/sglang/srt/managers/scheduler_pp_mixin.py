@@ -74,6 +74,27 @@ def _pp_can_skip_output_comm(batch: ScheduleBatch) -> bool:
     )
 
 
+def _pp_snapshot_graph_output_tensors(
+    tensor_dict: Dict[str, torch.Tensor], can_run_cuda_graph: bool
+) -> Dict[str, torch.Tensor]:
+    """Detach async PP sends from CUDA-graph-owned output buffers."""
+    if not can_run_cuda_graph:
+        return tensor_dict
+
+    def clone_tensors(value):
+        if torch.is_tensor(value):
+            return value.clone()
+        if isinstance(value, list):
+            return [clone_tensors(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(clone_tensors(item) for item in value)
+        if isinstance(value, dict):
+            return {key: clone_tensors(item) for key, item in value.items()}
+        return value
+
+    return {key: clone_tensors(value) for key, value in tensor_dict.items()}
+
+
 @dataclass
 class PPBatchMetadata:
     can_run_cuda_graph: bool
@@ -154,6 +175,16 @@ class SchedulerPPMixin:
                         self.mb_metadata,
                         self.last_rank_comm_queue,
                     )
+                if not self.pp_group.is_last_rank and cur_batch:
+                    # The next stage posts the proxy receive before launching.
+                    # Enqueue this send before waiting for the tail output to
+                    # circle through the ring, avoiding a PP dependency cycle.
+                    with torch.profiler.record_function(
+                        "send_proxy_dict_to_next_stage"
+                    ):
+                        self.send_proxy_work = self._pp_send_proxy_after_launch(
+                            result.pp_hidden_states_proxy_tensors.tensors
+                        )
                 if self.server_args.pp_async_batch_depth == 0:
                     next_pp_outputs, next_batch_result, d2h_event = (
                         self._pp_commit_send_output_work_and_preprocess_output_tensors(
@@ -169,20 +200,6 @@ class SchedulerPPMixin:
                             next_batch_result,
                         )
                     self.last_mbs[next_mb_id] = self.mbs[next_mb_id]
-                if not self.pp_group.is_last_rank:
-                    if cur_batch:
-                        self.device_module.current_stream().wait_event(
-                            self.launch_event
-                        )
-                        with torch.profiler.record_function(
-                            "send_proxy_dict_to_next_stage"
-                        ):
-                            self.send_proxy_work = self._pp_send_dict_to_next_stage(
-                                result.pp_hidden_states_proxy_tensors.tensors,
-                                async_send=True,
-                                msg_type="proxy",
-                            )
-
                 self.pp_outputs = next_pp_outputs
 
             # When the server is idle, self-check and re-init some states
@@ -950,6 +967,16 @@ class SchedulerPPMixin:
             p2p_work.work.wait()
         work.clear()
 
+    def _pp_send_proxy_after_launch(
+        self: Scheduler, tensor_dict: Dict[str, torch.Tensor]
+    ) -> List[P2PWork]:
+        self.schedule_stream.wait_event(self.launch_event)
+        return self._pp_send_dict_to_next_stage(
+            tensor_dict,
+            async_send=True,
+            msg_type="proxy",
+        )
+
     def _pp_commit_send_output_work_and_preprocess_output_tensors(
         self: Scheduler,
         next_first_rank_mb_id: int,
@@ -1157,7 +1184,16 @@ class SchedulerPPMixin:
         pp_outputs: PPProxyTensors,
     ):
         from sglang.srt.managers.scheduler import GenerationBatchResult
+        from sglang.srt.speculative.dspark_components.dspark_verify import (
+            DSparkPPVerifyInputRaw,
+        )
         from sglang.srt.speculative.eagle_info import EaglePPVerifyInputRaw
+
+        raw_cls = (
+            DSparkPPVerifyInputRaw
+            if self.spec_algorithm.is_dspark()
+            else EaglePPVerifyInputRaw
+        )
 
         logits_output = None
         extend_input_len_per_req = None
@@ -1172,16 +1208,22 @@ class SchedulerPPMixin:
         next_token_ids = pp_outputs["next_token_ids"].to(torch.int64)
         batch.input_ids = next_token_ids
 
-        if not self.spec_algorithm.is_none() and "pp_spec_output" in pp_outputs.tensors:
+        has_pp_spec_output = False
+        if self.spec_algorithm.is_dspark():
+            has_pp_spec_output = DSparkPPVerifyInputRaw.has_pp_outputs(pp_outputs)
+        elif not self.spec_algorithm.is_none():
+            has_pp_spec_output = "pp_spec_output" in pp_outputs.tensors
+
+        if not self.spec_algorithm.is_none() and has_pp_spec_output:
             # Spec-v2 decode path: the last PP rank produced draft tokens for
             # this iter; rebuild the raw draft tree so _build_verify_input_from_pp_raw
             # can construct EagleVerifyInput on this rank.
-            batch.spec_info = EaglePPVerifyInputRaw.from_pp_outputs(pp_outputs)
+            batch.spec_info = raw_cls.from_pp_outputs(pp_outputs)
         elif not self.spec_algorithm.is_none() and batch.forward_mode.is_extend():
             if batch.contains_last_prefill_chunk:
                 # The last PP rank produces no draft tokens for prefill batches;
                 # build a dummy draft for the first decode step.
-                batch.spec_info = EaglePPVerifyInputRaw.build_dummy_for_decode(
+                batch.spec_info = raw_cls.build_dummy_for_decode(
                     batch, self.server_args.speculative_num_draft_tokens
                 )
             else:
@@ -1208,9 +1250,12 @@ class SchedulerPPMixin:
             can_run_cuda_graph=mb_metadata.can_run_cuda_graph,
         )
 
-        if isinstance(batch.spec_info, EaglePPVerifyInputRaw):
-            output_result.accept_lens = torch.tensor(
-                batch.spec_info.accept_lens, dtype=torch.int64
+        if isinstance(batch.spec_info, (EaglePPVerifyInputRaw, DSparkPPVerifyInputRaw)):
+            raw_accept_lens = batch.spec_info.accept_lens
+            output_result.accept_lens = (
+                raw_accept_lens
+                if torch.is_tensor(raw_accept_lens)
+                else torch.tensor(raw_accept_lens, dtype=torch.int64)
             )
             output_result.speculative_num_draft_tokens = (
                 self.server_args.speculative_num_draft_tokens
@@ -1361,6 +1406,12 @@ class SchedulerPPMixin:
                 mb_metadata[mb_id] = PPBatchMetadata(
                     can_run_cuda_graph=result.can_run_cuda_graph,
                 )
+                output_tensors = None
+                if self.pp_group.is_last_rank:
+                    output_tensors = _pp_snapshot_graph_output_tensors(
+                        self._pp_prepare_tensor_dict(result, cur_batch),
+                        result.can_run_cuda_graph,
+                    )
                 event = self.device_module.Event()
                 event.record(self.device_module.current_stream())
                 if self.pp_group.is_last_rank:
@@ -1368,9 +1419,7 @@ class SchedulerPPMixin:
                     last_rank_comm_queue.append(
                         (
                             event,
-                            PPProxyTensors(
-                                self._pp_prepare_tensor_dict(result, cur_batch)
-                            ),
+                            PPProxyTensors(output_tensors),
                         )
                     )
         return result, event

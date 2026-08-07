@@ -5,6 +5,7 @@ context length, GGUF detection, etc.) that don't require actual model files.
 """
 
 import inspect
+import json
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from transformers.image_processing_utils import BaseImageProcessor
 
 import sglang.srt.utils.hf_transformers.processor as processor_utils
 from sglang.srt.utils import hf_transformers_patches
+from sglang.srt.utils.hf_transformers import config as config_utils
 from sglang.srt.utils.hf_transformers.common import (
     _is_deepseek_ocr2_model,
     _is_deepseek_ocr_model,
@@ -30,6 +32,36 @@ from sglang.srt.utils.hf_transformers_patches import normalize_rope_scaling_comp
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=6, suite="base-a-test-cpu")
+
+
+class TestLegacySpeculatorsDsparkConfig(unittest.TestCase):
+    def test_rebuilds_nested_transformer_config_without_top_level_model_type(self):
+        payload = {
+            "architectures": ["DSparkDraftModel"],
+            "speculators_model_type": "dspark",
+            "aux_hidden_state_layer_ids": [8, 23, 39, 55, 70],
+            "transformer_layer_config": {
+                "model_type": "qwen3",
+                "hidden_size": 6144,
+                "intermediate_size": 12288,
+                "num_hidden_layers": 5,
+                "num_attention_heads": 64,
+                "num_key_value_heads": 64,
+                "vocab_size": 154880,
+            },
+        }
+        with tempfile.TemporaryDirectory() as model_dir:
+            with open(f"{model_dir}/config.json", "w") as fout:
+                json.dump(payload, fout)
+
+            config = config_utils._try_load_speculators_dspark_config(
+                model_dir, revision=None
+            )
+
+        self.assertEqual(config.model_type, "qwen3")
+        self.assertEqual(config.architectures, ["DSparkDraftModel"])
+        self.assertEqual(config.hidden_size, 6144)
+        self.assertEqual(config.aux_hidden_state_layer_ids, [8, 23, 39, 55, 70])
 
 
 # ---------------------------------------------------------------------------

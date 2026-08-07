@@ -655,6 +655,10 @@ class SchedulerBatchResultProcessor:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
+        from sglang.srt.speculative.dspark_components.dspark_verify import (
+            DSparkPPVerifyInputRaw,
+        )
+
         if result.copy_done is not None:
             result.copy_done.synchronize()
         if result.routed_experts_output is not None:
@@ -692,7 +696,32 @@ class SchedulerBatchResultProcessor:
 
         accept_lens = None
         accept_lens_cpu = None
-        if isinstance(batch.spec_info, EaglePPVerifyInputRaw):
+        if isinstance(batch.spec_info, DSparkPPVerifyInputRaw):
+            pp_raw = batch.spec_info
+            if torch.is_tensor(pp_raw.accept_lens):
+                accept_lens = pp_raw.accept_lens.to(
+                    device=batch.seq_lens.device,
+                    dtype=torch.int64,
+                    non_blocking=True,
+                )
+                accept_lens_cpu = result.accept_lens
+                assert accept_lens_cpu is not None and accept_lens_cpu.is_cpu
+            else:
+                accept_lens_cpu = torch.tensor(pp_raw.accept_lens, dtype=torch.int64)
+                accept_lens = accept_lens_cpu.to(batch.seq_lens.device)
+            if pp_raw.accept_index is not None:
+                accept_index = torch.as_tensor(
+                    pp_raw.accept_index,
+                    dtype=torch.long,
+                    device=batch.seq_lens.device,
+                )
+                move_accept_tokens_to_target_kvcache(
+                    batch,
+                    accept_index,
+                    accept_lens - 1,
+                    self.model_worker.token_to_kv_pool_allocator,
+                )
+        elif isinstance(batch.spec_info, EaglePPVerifyInputRaw):
             pp_raw = batch.spec_info
             accept_lens_cpu = torch.tensor(pp_raw.accept_lens, dtype=torch.int64)
             accept_lens = accept_lens_cpu.to(batch.seq_lens.device)
@@ -772,7 +801,7 @@ class SchedulerBatchResultProcessor:
         self.output_streamer.stream_output(batch.reqs, batch.return_logprob)
         self.token_to_kv_pool_allocator.free_group_end()
 
-        if isinstance(batch.spec_info, EaglePPVerifyInputRaw):
+        if isinstance(batch.spec_info, (EaglePPVerifyInputRaw, DSparkPPVerifyInputRaw)):
             batch.seq_lens = batch.seq_lens + accept_lens
             if batch.seq_lens_cpu is not None:
                 batch.seq_lens_cpu = batch.seq_lens_cpu + accept_lens_cpu

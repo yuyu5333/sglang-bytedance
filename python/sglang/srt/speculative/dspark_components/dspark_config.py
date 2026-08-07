@@ -161,6 +161,73 @@ def _cfg_get(config: Any, key: str, default: Any = None) -> Any:
     return getattr(config, key, default)
 
 
+def _cfg_set(config: Any, key: str, value: Any) -> None:
+    if isinstance(config, dict):
+        config[key] = value
+    else:
+        setattr(config, key, value)
+
+
+def _cfg_items(config: Any):
+    if isinstance(config, dict):
+        return config.items()
+    if hasattr(config, "to_dict"):
+        return config.to_dict().items()
+    return vars(config).items()
+
+
+def _legacy_speculators_proposal_tokens(config: Any) -> Optional[int]:
+    speculators = _cfg_get(config, "speculators_config", None)
+    methods = _cfg_get(speculators, "proposal_methods", None)
+    if not methods:
+        return None
+    value = _cfg_get(methods[0], "speculative_tokens", None)
+    return int(value) if value is not None else None
+
+
+def normalize_dspark_draft_hf_config(config: Any) -> Any:
+    """Normalize Speculators-exported DSpark configs for SGLang loaders.
+
+    Speculators keeps the Qwen transformer fields under
+    ``transformer_layer_config`` and names target captures
+    ``aux_hidden_state_layer_ids``. SGLang's draft model consumes a flat HF
+    config, so fill only missing top-level fields and preserve native configs.
+    """
+    transformer = _cfg_get(config, "transformer_layer_config", None)
+    if transformer is not None:
+        for key, value in _cfg_items(transformer):
+            if _cfg_get(config, key, None) is None:
+                _cfg_set(config, key, value)
+
+    layer_ids = _cfg_get(config, "aux_hidden_state_layer_ids", None)
+    if layer_ids and _cfg_get(config, "target_layer_ids", None) is None:
+        layer_ids = [int(layer_id) for layer_id in layer_ids]
+        _cfg_set(config, "target_layer_ids", layer_ids)
+        if _cfg_get(config, "num_target_layers", None) is None:
+            # Only used to validate explicit target ids inside the draft model;
+            # the runtime target's actual layer count is resolved separately.
+            _cfg_set(config, "num_target_layers", max(layer_ids) + 1)
+
+    if _cfg_get(config, "vocab_size", None) is None:
+        draft_vocab_size = _cfg_get(config, "draft_vocab_size", None)
+        if draft_vocab_size is not None:
+            _cfg_set(config, "vocab_size", int(draft_vocab_size))
+
+    if _cfg_get(config, "dspark_bonus_anchor", None) is False:
+        proposal_tokens = _legacy_speculators_proposal_tokens(config)
+        if proposal_tokens is not None:
+            # In the legacy sample-from-anchor export, top-level block_size is
+            # the verify width (anchor + proposals), whereas SGLang's DSpark
+            # gamma is the number of proposal tokens.
+            _cfg_set(config, "dspark_block_size", proposal_tokens)
+            logger.info(
+                "Normalized legacy DSpark checkpoint: verify_width=%s, gamma=%s.",
+                _cfg_get(config, "block_size", None),
+                proposal_tokens,
+            )
+    return config
+
+
 def _get_text_config(config: Any) -> Any:
     if config is None:
         return None

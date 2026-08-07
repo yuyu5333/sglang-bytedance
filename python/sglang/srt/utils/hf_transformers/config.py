@@ -58,6 +58,46 @@ _LONGCAT_ARCHS = {
     "LongcatFlashNgramForCausalLM",
 }
 
+_DSPARK_DRAFT_ARCHS = {"DSparkDraftModel"}
+
+
+def _try_load_speculators_dspark_config(
+    model, revision: Optional[str], **kwargs
+):
+    """Load legacy Speculators DSpark exports without a top-level model_type.
+
+    These checkpoints keep the underlying transformer config under
+    ``transformer_layer_config``. Hugging Face AutoConfig rejects them before
+    SGLang can inspect ``architectures``, so reconstruct the regular config
+    from the nested model type while preserving the DSpark-specific fields.
+    """
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model, revision=revision, **kwargs
+    )
+    if config_dict.get("model_type") is not None:
+        return None
+
+    architectures = config_dict.get("architectures") or []
+    is_dspark = (
+        any(arch in _DSPARK_DRAFT_ARCHS for arch in architectures)
+        or config_dict.get("speculators_model_type") == "dspark"
+    )
+    transformer_config = config_dict.get("transformer_layer_config")
+    if not is_dspark or not isinstance(transformer_config, dict):
+        return None
+
+    merged_config = dict(transformer_config)
+    merged_config.update(config_dict)
+    model_type = merged_config.pop("model_type", None)
+    if not model_type:
+        raise ValueError(
+            "DSpark draft config must set transformer_layer_config.model_type."
+        )
+
+    config = AutoConfig.for_model(model_type, **merged_config)
+    config._name_or_path = str(model)
+    return config
+
 
 def _try_load_longcat_config(model, revision: Optional[str], **kwargs):
     config_dict, _ = PretrainedConfig.get_config_dict(
@@ -81,7 +121,9 @@ class HfModelConfigParser(ModelConfigParserBase):
         revision: Optional[str] = None,
         **kwargs,
     ):
-        config = _try_load_longcat_config(model, revision, **kwargs)
+        config = _try_load_speculators_dspark_config(model, revision, **kwargs)
+        if config is None:
+            config = _try_load_longcat_config(model, revision, **kwargs)
         if config is None:
             config = AutoConfig.from_pretrained(
                 model,
@@ -252,6 +294,14 @@ def get_config(
     config = parser.parse(
         model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
     )
+
+    architectures = getattr(config, "architectures", None) or []
+    if any(arch in _DSPARK_DRAFT_ARCHS for arch in architectures):
+        from sglang.srt.speculative.dspark_components.dspark_config import (
+            normalize_dspark_draft_hf_config,
+        )
+
+        normalize_dspark_draft_hf_config(config)
 
     if model_override_args:
         config.update(model_override_args)
