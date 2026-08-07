@@ -592,7 +592,9 @@ def _scatter_act_block_scale_kernel(
 
     dst = expert_start + (blk // A) * (m_pad * A) + local_row * A + (blk % A)
     which is exactly the layout produced by ``_build_grouped_act_block_scale_compact``.
-    (A = PackedScalesNum = TileK / GroupSize = 8 for the TileK=256 mxfp4 kernel.)
+    (A = PackedScalesNum = TileK / GroupSize = 4 for the TileK=128 mxfp4 kernel;
+    SM90 TMA caps the packed scale element at 64-bit = Array<bf16,4>, so TileK is
+    hard-locked to 128 and PackedScalesNum to 4.)
     """
     row = tl.program_id(0)
     e = tl.load(eid_ptr + row)
