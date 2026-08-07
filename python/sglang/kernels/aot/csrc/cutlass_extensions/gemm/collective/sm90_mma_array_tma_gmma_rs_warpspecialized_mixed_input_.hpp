@@ -1200,6 +1200,16 @@ struct CollectiveMmaArrayMixedInput<
         }
       }
     };
+    // MXFP4 prototype: apply the E8M0 weight block scale while converting the
+    // E2M1 register fragment to E4M3. The post-MMA loop then only applies the
+    // per-token activation scale. The existing int4a8 path remains untouched.
+    auto convert_weight_kblock = [&](int k_block) {
+      if constexpr (EnableActBlockScale) {
+        Utils::dequantize_A_kblock(tCrA_load, tCrA_mma, partitioned_extra_info, k_block);
+      } else {
+        Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block);
+      }
+    };
 
     ConsumerToken barrier_token = {BarrierStatus::WaitAgain};
     // First k tile
@@ -1222,7 +1232,7 @@ struct CollectiveMmaArrayMixedInput<
       }
 
       // src: tCrA_load, dst: tCrA_mma
-      Utils::convert_A_kblock(tCrA_load, tCrA_mma, 0);
+      convert_weight_kblock(0);
 
       // Unroll the K mode manually to set scale D to 1
       CUTLASS_PRAGMA_UNROLL
@@ -1252,7 +1262,7 @@ struct CollectiveMmaArrayMixedInput<
                 read_stage);
           }
           if (k_block < K_BLOCK_MAX - 1) {
-            Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block + 1);
+            convert_weight_kblock(k_block + 1);
           }
         }
       }
@@ -1278,7 +1288,7 @@ struct CollectiveMmaArrayMixedInput<
                 float wscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                 float gscale = wscale;
                 if constexpr (EnableActBlockScale) {
-                  gscale = wscale * static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
+                  gscale = static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
                 }
                 if (chunk_id_ == 0) {
                   accum(accum_coord) = intermediate_array[chunk_id_](accum_coord) * gscale;
@@ -1315,7 +1325,7 @@ struct CollectiveMmaArrayMixedInput<
             1,
             smem_pipe_read.index());
 
-        Utils::convert_A_kblock(tCrA_load, tCrA_mma, 0);
+        convert_weight_kblock(0);
       }
     }
 
@@ -1378,7 +1388,7 @@ struct CollectiveMmaArrayMixedInput<
 
                       float gscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                       if constexpr (EnableActBlockScale) {
-                        gscale *= static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
+                        gscale = static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
                       }
                       accum(accum_coord) =
                           fma(intermediate_array[chunk_id_](accum_coord), gscale, accum(accum_coord));
@@ -1407,7 +1417,7 @@ struct CollectiveMmaArrayMixedInput<
                 copy_partitions_extra_info,
                 1,
                 smem_pipe_read.index());
-            Utils::convert_A_kblock(tCrA_load, tCrA_mma, 0);
+            convert_weight_kblock(0);
           } else {
             if (k_block < K_BLOCK_MAX - 2) {
               Utils::copy_tensors_MK(
@@ -1419,7 +1429,7 @@ struct CollectiveMmaArrayMixedInput<
                   k_block + 2,
                   read_stage);
             }
-            Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block + 1);
+            convert_weight_kblock(k_block + 1);
           }
         }
       }
@@ -1462,7 +1472,7 @@ struct CollectiveMmaArrayMixedInput<
               read_stage);
         }
         if (k_block < K_BLOCK_MAX - 1) {
-          Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block + 1);
+          convert_weight_kblock(k_block + 1);
         }
 
         if ((k_block + 1) % NumMMAsPerChunk == 0) {
@@ -1483,7 +1493,7 @@ struct CollectiveMmaArrayMixedInput<
 
                   float gscale = static_cast<float>(tCrS(scale_coord)[scale_idx]);
                   if constexpr (EnableActBlockScale) {
-                    gscale *= static_cast<float>(tCrAS(accum_coord)[scale_idx]);
+                    gscale = static_cast<float>(tCrAS(accum_coord)[scale_idx]);
                   }
                   accum(accum_coord) = fma(intermediate(accum_coord), gscale, accum(accum_coord));
                 }
