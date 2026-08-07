@@ -29,7 +29,7 @@ namespace cutlass {
 // E8M0 的 scale 是精确 2 的幂。对于当前模型主路径的 exponent 范围，
 // 直接更新 E4M3 exponent/mantissa 字段即可完成缩放，不经过 BF16 或浮点乘法。
 CUTLASS_DEVICE
-inline bool mxfp4_e8m0_scale_can_fuse(bfloat16_t const& scale) {
+bool mxfp4_e8m0_scale_can_fuse(bfloat16_t const& scale) {
   uint16_t const bits = reinterpret_cast<uint16_t const&>(scale);
   int const exponent = static_cast<int>((bits >> 7) & 0xff) - 127;
   // e >= -8 保证所有 E2M1 网格值可精确落到 E4M3 normal/subnormal 网格；
@@ -38,7 +38,7 @@ inline bool mxfp4_e8m0_scale_can_fuse(bfloat16_t const& scale) {
 }
 
 CUTLASS_DEVICE
-inline float_e4m3_t mxfp4_apply_e8m0_to_e4m3(float_e4m3_t const& value, bfloat16_t const& scale) {
+float_e4m3_t mxfp4_apply_e8m0_to_e4m3(float_e4m3_t const& value, bfloat16_t const& scale) {
   uint8_t raw = reinterpret_cast<uint8_t const&>(value);
   uint16_t const scale_bits = reinterpret_cast<uint16_t const&>(scale);
   int const scale_exponent = static_cast<int>((scale_bits >> 7) & 0xff) - 127;
