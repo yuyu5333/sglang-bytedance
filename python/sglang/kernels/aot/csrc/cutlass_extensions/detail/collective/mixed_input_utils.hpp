@@ -222,44 +222,6 @@ struct MixedGroupedGemmInputUtils {
     static_check_scale(flatten(Layout{}));
   }
 
-  // MXFP4-only register dequantization used by the scale-fusion prototype.
-  // Keep this separate from dequantize_A_kblock: that legacy helper contains an
-  // unused int4 LUT branch whose inline-asm outputs are not valid for the MXFP4
-  // Array<bf16, 4> scale instantiation.
-  template <class EngineIn, class EngineOut, class LayoutIn, class LayoutOut, class... Ts>
-  CUTLASS_DEVICE static void dequantize_mxfp4_A_kblock(
-      Tensor<EngineIn, LayoutIn> const& tCrA_load,
-      Tensor<EngineOut, LayoutOut>& tCrA_mma,
-      cute::tuple<Ts...>& partitioned_extra_info,
-      int const k_block) {
-    static_assert(is_rmem<EngineIn>::value, "Input tensor for A conversion must be in registers");
-    static_assert(is_rmem<EngineOut>::value, "Output tensor for A conversion must be in registers");
-    static_assert(cosize_v<LayoutIn> == cosize_v<LayoutOut>);
-    using SrcType = typename EngineIn::value_type;
-
-    Tensor src = tCrA_load(_, _, k_block);
-    Tensor dst = tCrA_mma(_, _, k_block);
-    int constexpr NumValPerSrcReg =
-        cute::min(decltype(size(src(_, 0)))::value, ceil_div(32, sizeof_bits_v<SrcType>));
-    Tensor src_vm = cute::group_modes<1, -1>(cute::zipped_divide(src, Int<NumValPerSrcReg>{}));
-    Tensor dst_vm = cute::group_modes<1, -1>(cute::zipped_divide(dst, Int<NumValPerSrcReg>{}));
-    Tensor scales = cute::get<1>(partitioned_extra_info)(_, _, k_block);
-    CUTE_STATIC_ASSERT_V(size(src) == size(scales));
-    Tensor scales_vm =
-        cute::group_modes<1, -1>(cute::zipped_divide(scales, Int<NumValPerSrcReg>{}));
-    auto stage = make_tensor_like<ElementScale>(src_vm(_, 0));
-
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < size<1>(dst_vm); ++i) {
-      LayoutAwareConvert(src_vm(_, i), stage);
-      CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < size<0>(dst_vm); ++j) {
-        stage(j) *= scales_vm(j, i);
-      }
-      LayoutAwareConvert(stage, dst_vm(_, i));
-    }
-  }
-
   template <class EngineIn, class EngineOut, class LayoutIn, class LayoutOut, class... Ts>
   CUTLASS_DEVICE static void dequantize_A_kblock(
       Tensor<EngineIn, LayoutIn> const& tCrA_load,

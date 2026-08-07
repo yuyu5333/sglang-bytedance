@@ -1205,7 +1205,7 @@ struct CollectiveMmaArrayMixedInput<
     // per-token activation scale. The existing int4a8 path remains untouched.
     auto convert_weight_kblock = [&](int k_block) {
       if constexpr (EnableActBlockScale) {
-        Utils::dequantize_mxfp4_A_kblock(tCrA_load, tCrA_mma, partitioned_extra_info, k_block);
+        Utils::dequantize_A_kblock(tCrA_load, tCrA_mma, partitioned_extra_info, k_block);
       } else {
         Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block);
       }
