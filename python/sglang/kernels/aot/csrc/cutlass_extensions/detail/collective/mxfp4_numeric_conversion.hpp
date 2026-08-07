@@ -26,6 +26,42 @@
 
 namespace cutlass {
 
+// E8M0 的 scale 是精确 2 的幂。对于当前模型主路径的 exponent 范围，
+// 直接更新 E4M3 exponent/mantissa 字段即可完成缩放，不经过 BF16 或浮点乘法。
+CUTLASS_DEVICE
+inline bool mxfp4_e8m0_scale_can_fuse(bfloat16_t const& scale) {
+  uint16_t const bits = reinterpret_cast<uint16_t const&>(scale);
+  int const exponent = static_cast<int>((bits >> 7) & 0xff) - 127;
+  // e >= -8 保证所有 E2M1 网格值可精确落到 E4M3 normal/subnormal 网格；
+  // e <= 5 保证 E2M1 最大值 6 不会溢出 E4M3 finite range。
+  return exponent >= -8 && exponent <= 5;
+}
+
+CUTLASS_DEVICE
+inline float_e4m3_t mxfp4_apply_e8m0_to_e4m3(float_e4m3_t const& value, bfloat16_t const& scale) {
+  uint8_t raw = reinterpret_cast<uint8_t const&>(value);
+  uint16_t const scale_bits = reinterpret_cast<uint16_t const&>(scale);
+  int const scale_exponent = static_cast<int>((scale_bits >> 7) & 0xff) - 127;
+  int const e4m3_exponent = static_cast<int>((raw >> 3) & 0x0f);
+
+  // E2M1 的零经 LUT 后仍为 E4M3 零，保留其符号位。
+  if (e4m3_exponent != 0) {
+    int const scaled_exponent = e4m3_exponent + scale_exponent;
+    if (scaled_exponent > 0) {
+      raw = static_cast<uint8_t>((raw & 0x87) | (scaled_exponent << 3));
+    } else {
+      // 进入 E4M3 subnormal 区。主路径 exponent >= -8 时此右移无舍入损失。
+      int const significand = 8 + static_cast<int>(raw & 0x07);
+      int const shift = 1 - scaled_exponent;
+      raw = static_cast<uint8_t>((raw & 0x80) | (significand >> shift));
+    }
+  }
+
+  float_e4m3_t result;
+  reinterpret_cast<uint8_t&>(result) = raw;
+  return result;
+}
+
 /// Partial specialization for Array<cutlass::float_e4m3_t, N> <= Array<cutlass::float_e2m1_t, N>
 ///
 /// Mirrors NumericArrayConverter<float_e4m3_t, int4b_t, N> (numeric_conversion.h),
