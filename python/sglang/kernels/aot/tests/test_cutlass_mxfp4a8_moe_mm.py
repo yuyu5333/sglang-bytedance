@@ -72,11 +72,11 @@ def pack_nibbles_ordermap(codes: torch.Tensor) -> torch.Tensor:
 
 
 def interleave_scales(scales: torch.Tensor) -> torch.Tensor:
-    """[E, N, K//CHUNK] -> [E, K//(CHUNK*8), N*8] (8-wide interleave).
+    """[E, N, K//CHUNK] -> [E, K//(CHUNK*4), N*4] (4-wide interleave).
 
-    8-wide matches the mxfp4 kernel PackedScalesNum = TileK(256)/GroupSize(32)."""
+    4-wide matches the mxfp4 kernel PackedScalesNum = TileK(128)/GroupSize(32)."""
     s0, s1, s2 = scales.shape
-    alignment = 8 if s2 % 8 == 0 else (4 if s2 % 4 == 0 else 1)
+    alignment = 4 if s2 % 4 == 0 else 1
     si = scales.reshape(s0, s1, s2 // alignment, alignment)
     si = si.permute(0, 2, 1, 3)
     si = si.reshape(s0, s2 // alignment, s1 * alignment)
@@ -150,13 +150,13 @@ def run_case(pack_fn, label, num_experts, m, k, n, device, seed=0):
 
 
 def interleave_act_scale(scale: torch.Tensor) -> torch.Tensor:
-    """[M, K//CHUNK] -> [K//(CHUNK*8), M*8] (8-wide interleave over K-blocks),
+    """[M, K//CHUNK] -> [K//(CHUNK*4), M*4] (4-wide interleave over K-blocks),
     mirroring the weight-scale interleave but tiled over tokens (M) instead of
     weight channels (N). This is the physical layout the kernel's activation
     block-scale TMA expects: token unit-stride, scale_k stride = M.
-    8-wide matches PackedScalesNum = TileK(256)/GroupSize(32)."""
+    4-wide matches PackedScalesNum = TileK(128)/GroupSize(32)."""
     m, sk = scale.shape
-    alignment = 8 if sk % 8 == 0 else (4 if sk % 4 == 0 else 1)
+    alignment = 4 if sk % 4 == 0 else 1
     si = scale.reshape(m, sk // alignment, alignment)  # [M, sk/A, A]
     si = si.permute(1, 0, 2)  # [sk/A, M, A]
     si = si.reshape(sk // alignment, m * alignment)  # [sk/A, M*A]
