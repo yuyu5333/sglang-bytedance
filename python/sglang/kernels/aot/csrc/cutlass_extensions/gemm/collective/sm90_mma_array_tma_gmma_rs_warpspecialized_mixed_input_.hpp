@@ -1270,13 +1270,12 @@ struct CollectiveMmaArrayMixedInput<
         auto tCrS = cute::get<1>(partitioned_extra_info);
         for (int mma_m = 0; mma_m < size<1>(accum); mma_m++) {
           for (int m = 0; m < size<0, 1>(accum); m++) {
-            // wscale (weight block-scale) depends only on (m, mma_m, chunk); hoist
-            // its read + cast out of the inner n/e loops (was recomputed e*n times).
-            auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
-            float wscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
             for (int n = 0; n < size<0, 2>(accum); n++) {
               for (int e = 0; e < size<0, 0>(accum); e++) {
                 auto accum_coord = make_coord(make_tuple(e, m, n), mma_m, 0);
+                auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
+
+                float wscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                 float gscale = wscale;
                 if constexpr (EnableActBlockScale) {
                   gscale = wscale * static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
@@ -1372,15 +1371,14 @@ struct CollectiveMmaArrayMixedInput<
               auto tCrS = cute::get<1>(partitioned_extra_info);
               for (int mma_m = 0; mma_m < size<1>(accum); mma_m++) {
                 for (int m = 0; m < size<0, 1>(accum); m++) {
-                  auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
-                  float wscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                   for (int n = 0; n < size<0, 2>(accum); n++) {
                     for (int e = 0; e < size<0, 0>(accum); e++) {
                       auto accum_coord = make_coord(make_tuple(e, m, n), mma_m, 0);
+                      auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
 
-                      float gscale = wscale;
+                      float gscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                       if constexpr (EnableActBlockScale) {
-                        gscale = wscale * static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
+                        gscale *= static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
                       }
                       accum(accum_coord) =
                           fma(intermediate_array[chunk_id_](accum_coord), gscale, accum(accum_coord));
@@ -1475,18 +1473,17 @@ struct CollectiveMmaArrayMixedInput<
 
           // Apply the group-wise scaling
           auto tCrS = cute::get<1>(partitioned_extra_info);
-          int scale_idx = k_block / NumMMAsPerChunk;
           for (int mma_m = 0; mma_m < size<1>(accum); mma_m++) {
             for (int m = 0; m < size<0, 1>(accum); m++) {
-              auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
-              float wscale = static_cast<float>(tCrS(scale_coord)[scale_idx]);
               for (int n = 0; n < size<0, 2>(accum); n++) {
                 for (int e = 0; e < size<0, 0>(accum); e++) {
                   auto accum_coord = make_coord(make_tuple(e, m, n), mma_m, 0);
+                  auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
+                  int scale_idx = k_block / NumMMAsPerChunk;
 
-                  float gscale = wscale;
+                  float gscale = static_cast<float>(tCrS(scale_coord)[scale_idx]);
                   if constexpr (EnableActBlockScale) {
-                    gscale = wscale * static_cast<float>(tCrAS(accum_coord)[scale_idx]);
+                    gscale *= static_cast<float>(tCrAS(accum_coord)[scale_idx]);
                   }
                   accum(accum_coord) = fma(intermediate(accum_coord), gscale, accum(accum_coord));
                 }
