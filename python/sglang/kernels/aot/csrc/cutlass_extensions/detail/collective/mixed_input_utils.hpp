@@ -222,48 +222,6 @@ struct MixedGroupedGemmInputUtils {
     static_check_scale(flatten(Layout{}));
   }
 
-  // MXFP4 主路径：先复用无损 E2M1->E4M3 LUT，再直接更新 E4M3 byte 的
-  // exponent/mantissa。packed_scale 的外层 lane 对齐当前 source vector，
-  // 内层 lane 对齐 TileK 内的 E8M0 K=32 chunk。
-  template <class EngineIn, class EngineOut, class LayoutIn, class LayoutOut, class... Ts>
-  CUTLASS_DEVICE static void convert_mxfp4_scaled_A_kblock(
-      Tensor<EngineIn, LayoutIn> const& tCrA_load,
-      Tensor<EngineOut, LayoutOut>& tCrA_mma,
-      cute::tuple<Ts...> const& partitioned_extra_info,
-      int const k_block,
-      int const scale_lane) {
-    static_assert(is_rmem<EngineIn>::value, "Input tensor for A conversion must be in registers");
-    static_assert(is_rmem<EngineOut>::value, "Output tensor for A conversion must be in registers");
-    static_assert(cosize_v<LayoutIn> == cosize_v<LayoutOut>);
-    using SrcType = typename EngineIn::value_type;
-
-    Tensor src = tCrA_load(_, _, k_block);
-    Tensor dst = tCrA_mma(_, _, k_block);
-    int constexpr NumValPerSrcReg =
-        cute::min(decltype(size(src(_, 0)))::value, ceil_div(32, sizeof_bits_v<SrcType>));
-    Tensor src_vm = cute::group_modes<1, -1>(cute::zipped_divide(src, Int<NumValPerSrcReg>{}));
-    Tensor dst_vm = cute::group_modes<1, -1>(cute::zipped_divide(dst, Int<NumValPerSrcReg>{}));
-    Tensor packed_scales = cute::get<1>(partitioned_extra_info)(_, _, k_block);
-    CUTE_STATIC_ASSERT_V(size(src) == size(packed_scales));
-    Tensor packed_scales_vm =
-        cute::group_modes<1, -1>(cute::zipped_divide(packed_scales, Int<NumValPerSrcReg>{}));
-
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < size<1>(dst_vm); ++i) {
-      LayoutAwareConvert(src_vm(_, i), dst_vm(_, i));
-      CUTLASS_PRAGMA_UNROLL
-      for (int j = 0; j < size<0>(dst_vm); ++j) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int c = 0; c < NumValPerSrcReg; ++c) {
-          auto const& scale = packed_scales_vm(j, i)[c][scale_lane];
-          if (mxfp4_e8m0_scale_can_fuse(scale)) {
-            dst_vm(j, i)[c] = mxfp4_apply_e8m0_to_e4m3(dst_vm(j, i)[c], scale);
-          }
-        }
-      }
-    }
-  }
-
   template <class EngineIn, class EngineOut, class LayoutIn, class LayoutOut, class... Ts>
   CUTLASS_DEVICE static void dequantize_A_kblock(
       Tensor<EngineIn, LayoutIn> const& tCrA_load,

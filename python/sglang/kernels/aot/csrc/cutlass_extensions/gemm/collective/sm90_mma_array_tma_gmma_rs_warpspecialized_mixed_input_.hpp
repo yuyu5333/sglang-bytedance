@@ -1200,18 +1200,6 @@ struct CollectiveMmaArrayMixedInput<
         }
       }
     };
-    auto convert_weight_kblock = [&](int k_block) {
-      if constexpr (EnableActBlockScale) {
-        Utils::convert_mxfp4_scaled_A_kblock(
-            tCrA_load,
-            tCrA_mma,
-            partitioned_extra_info,
-            k_block,
-            k_block / NumMMAsPerChunk);
-      } else {
-        Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block);
-      }
-    };
 
     ConsumerToken barrier_token = {BarrierStatus::WaitAgain};
     // First k tile
@@ -1234,7 +1222,7 @@ struct CollectiveMmaArrayMixedInput<
       }
 
       // src: tCrA_load, dst: tCrA_mma
-      convert_weight_kblock(0);
+      Utils::convert_A_kblock(tCrA_load, tCrA_mma, 0);
 
       // Unroll the K mode manually to set scale D to 1
       CUTLASS_PRAGMA_UNROLL
@@ -1264,7 +1252,7 @@ struct CollectiveMmaArrayMixedInput<
                 read_stage);
           }
           if (k_block < K_BLOCK_MAX - 1) {
-            convert_weight_kblock(k_block + 1);
+            Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block + 1);
           }
         }
       }
@@ -1287,13 +1275,10 @@ struct CollectiveMmaArrayMixedInput<
                 auto accum_coord = make_coord(make_tuple(e, m, n), mma_m, 0);
                 auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
 
-                auto const& packed_wscale = tCrS(scale_coord);
-                auto const& wscale_bf16 = packed_wscale[chunk_id_];
-                float wscale = static_cast<float>(wscale_bf16);
+                float wscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                 float gscale = wscale;
                 if constexpr (EnableActBlockScale) {
-                  float act_scale = static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
-                  gscale = mxfp4_e8m0_scale_can_fuse(wscale_bf16) ? act_scale : wscale * act_scale;
+                  gscale = wscale * static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
                 }
                 if (chunk_id_ == 0) {
                   accum(accum_coord) = intermediate_array[chunk_id_](accum_coord) * gscale;
@@ -1330,7 +1315,7 @@ struct CollectiveMmaArrayMixedInput<
             1,
             smem_pipe_read.index());
 
-        convert_weight_kblock(0);
+        Utils::convert_A_kblock(tCrA_load, tCrA_mma, 0);
       }
     }
 
@@ -1391,13 +1376,9 @@ struct CollectiveMmaArrayMixedInput<
                       auto accum_coord = make_coord(make_tuple(e, m, n), mma_m, 0);
                       auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
 
-                      auto const& packed_wscale = tCrS(scale_coord);
-                      auto const& wscale_bf16 = packed_wscale[chunk_id_];
-                      float wscale = static_cast<float>(wscale_bf16);
-                      float gscale = wscale;
+                      float gscale = static_cast<float>(tCrS(scale_coord)[chunk_id_]);
                       if constexpr (EnableActBlockScale) {
-                        float act_scale = static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
-                        gscale = mxfp4_e8m0_scale_can_fuse(wscale_bf16) ? act_scale : wscale * act_scale;
+                        gscale *= static_cast<float>(tCrAS(accum_coord)[chunk_id_]);
                       }
                       accum(accum_coord) =
                           fma(intermediate_array[chunk_id_](accum_coord), gscale, accum(accum_coord));
@@ -1426,7 +1407,7 @@ struct CollectiveMmaArrayMixedInput<
                 copy_partitions_extra_info,
                 1,
                 smem_pipe_read.index());
-            convert_weight_kblock(0);
+            Utils::convert_A_kblock(tCrA_load, tCrA_mma, 0);
           } else {
             if (k_block < K_BLOCK_MAX - 2) {
               Utils::copy_tensors_MK(
@@ -1438,7 +1419,7 @@ struct CollectiveMmaArrayMixedInput<
                   k_block + 2,
                   read_stage);
             }
-            convert_weight_kblock(k_block + 1);
+            Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block + 1);
           }
         }
       }
@@ -1481,7 +1462,7 @@ struct CollectiveMmaArrayMixedInput<
               read_stage);
         }
         if (k_block < K_BLOCK_MAX - 1) {
-          convert_weight_kblock(k_block + 1);
+          Utils::convert_A_kblock(tCrA_load, tCrA_mma, k_block + 1);
         }
 
         if ((k_block + 1) % NumMMAsPerChunk == 0) {
@@ -1500,13 +1481,9 @@ struct CollectiveMmaArrayMixedInput<
                   auto scale_coord = make_coord(make_tuple(0, m, 0), mma_m, 0);
                   int scale_idx = k_block / NumMMAsPerChunk;
 
-                  auto const& packed_wscale = tCrS(scale_coord);
-                  auto const& wscale_bf16 = packed_wscale[scale_idx];
-                  float wscale = static_cast<float>(wscale_bf16);
-                  float gscale = wscale;
+                  float gscale = static_cast<float>(tCrS(scale_coord)[scale_idx]);
                   if constexpr (EnableActBlockScale) {
-                    float act_scale = static_cast<float>(tCrAS(accum_coord)[scale_idx]);
-                    gscale = mxfp4_e8m0_scale_can_fuse(wscale_bf16) ? act_scale : wscale * act_scale;
+                    gscale *= static_cast<float>(tCrAS(accum_coord)[scale_idx]);
                   }
                   accum(accum_coord) = fma(intermediate(accum_coord), gscale, accum(accum_coord));
                 }
