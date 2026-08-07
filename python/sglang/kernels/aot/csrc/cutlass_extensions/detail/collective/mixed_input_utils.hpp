@@ -253,9 +253,12 @@ struct MixedGroupedGemmInputUtils {
       LayoutAwareConvert(src_vm(_, i), dst_vm(_, i));
       CUTLASS_PRAGMA_UNROLL
       for (int j = 0; j < size<0>(dst_vm); ++j) {
-        auto const& scale = packed_scales_vm(j, i)[scale_lane];
-        if (mxfp4_e8m0_scale_can_fuse(scale)) {
-          dst_vm(j, i) = mxfp4_apply_e8m0_to_e4m3(dst_vm(j, i), scale);
+        CUTLASS_PRAGMA_UNROLL
+        for (int c = 0; c < NumValPerSrcReg; ++c) {
+          auto const& scale = packed_scales_vm(j, i)[c][scale_lane];
+          if (mxfp4_e8m0_scale_can_fuse(scale)) {
+            dst_vm(j, i)[c] = mxfp4_apply_e8m0_to_e4m3(dst_vm(j, i)[c], scale);
+          }
         }
       }
     }
