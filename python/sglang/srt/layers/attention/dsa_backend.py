@@ -1946,7 +1946,12 @@ class DeepseekSparseAttnBackend(
                 pool.kv_lora_rank, dtype=torch.bfloat16, device=out.device
             )
             self._kvbit_decode_R = R
-        out = (out.to(torch.bfloat16) @ R).to(out.dtype)
+        # Keep bf16 out of the matmul (drop the .to(out.dtype) back-cast): the
+        # bf16 @ bf16 GMMA result widened to fp32 carries no extra info, and
+        # downstream (W_vc up-projection) consumes bf16 — the back-cast was a
+        # free-floating elementwise launch inflating the CUDA graph (graph-size
+        # lever per REPORT §10). Lossless.
+        out = out.to(torch.bfloat16) @ R
         return out
 
     def _forward_flashmla_sparse(

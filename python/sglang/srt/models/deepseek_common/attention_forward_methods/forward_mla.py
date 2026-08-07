@@ -453,7 +453,13 @@ class DeepseekMLAForwardMixin:
             # BF16 GMMA tensor-core matmul (fp32 accumulate) — matches the
             # decode out@R dtype in dsa_backend._forward_kvbit; ~1.8x faster
             # than the fp32 sm80-XMMA CUDA-core path.
-            q_nope_out = (q_nope_out.to(torch.bfloat16) @ R).to(q_nope_out.dtype)
+            # Keep bf16 out of the matmul (drop the .to(fp32) back-cast): the
+            # bf16 @ bf16 GMMA result widened to fp32 carries no extra info
+            # (bf16->fp32 is lossless), and downstream (kvbit decode kernel,
+            # fa3 target_verify, W_vc) all consume bf16 — so the back-cast was
+            # a free-floating elementwise launch that only inflated the CUDA
+            # graph (graph-size lever per REPORT §10). Lossless.
+            q_nope_out = q_nope_out.to(torch.bfloat16) @ R
 
         return (
             q_pe,

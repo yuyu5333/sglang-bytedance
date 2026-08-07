@@ -2655,7 +2655,11 @@ class KVBit4MLATokenToKVPool(DSATokenToKVPool):
         if R is None or R.shape[0] != self.kv_lora_rank or R.dtype != torch.bfloat16:
             R = build_hadamard(self.kv_lora_rank, dtype=torch.bfloat16, device=nope.device)
             self._kvbit_encode_R = R
-        rotated = (nope @ R).to(torch.float32)  # bf16 GMMA → fp32 for the quant kernel
+        # bf16 GMMA rotate; pass bf16 rotated directly — the fused kernel casts
+        # to fp32 internally (triton_kernels.py:239 .to(tl.float32)) for the
+        # amin/amax/quant, so dropping the outer .to(fp32) is bit-identical and
+        # cuts one elementwise cast per layer (graph-size lever per §10).
+        rotated = nope @ R  # bf16; fused kernel upcasts internally
         # Fused: quant+pack+header+scatter (nope) + raw rope scatter, ONE kernel.
         # rope_in: (n, drope) contiguous bf16 (view of cache_k_rope, last-dim contig).
         # rope_out: rope_buffer is stored (num_slots, 1, drope); reshape to 2D for
