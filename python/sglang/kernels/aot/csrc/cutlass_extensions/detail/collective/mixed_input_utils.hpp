@@ -254,10 +254,7 @@ struct MixedGroupedGemmInputUtils {
       LayoutAwareConvert(src_vm(_, i), stage);
       CUTLASS_PRAGMA_UNROLL
       for (int j = 0; j < size<0>(dst_vm); ++j) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int c = 0; c < ElementScale::kElements; ++c) {
-          stage(j)[c] *= scales_vm(j, i)[c];
-        }
+        stage(j) *= scales_vm(j, i);
       }
       LayoutAwareConvert(stage, dst_vm(_, i));
     }
