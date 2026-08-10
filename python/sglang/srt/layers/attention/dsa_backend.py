@@ -1926,8 +1926,8 @@ class DeepseekSparseAttnBackend(
             self._kvbit_num_splits_cache = (bs, num_kv_splits)
 
         out = mla_decode_fwd(
-            q_nope.contiguous(),
-            q_rope.contiguous(),
+            q_nope,
+            q_rope,
             kvbit_packed,
             rope_buffer,
             page_table_1,
