@@ -45,6 +45,7 @@ from sglang.srt.mem_cache.memory_pool import (
     DSATokenToKVPool,
     HybridLinearKVPool,
     HybridReqToTokenPool,
+    KVBit4MLATokenToKVPool,
     KVCache,
     MHATokenToKVPool,
     MHATokenToKVPoolFP4,
@@ -1055,6 +1056,47 @@ class KVCacheConfigurator:
             dsa_cp_layer_shard_rank,
             dsa_cp_layer_shard_size,
         ) = get_glm_dsa_cp_layer_shard_info(self)
+
+        # kvbit no_alloc: store the MLA nope latent as kvbit 4bit (Hadamard
+        # rotated + groupwise quantized) + raw BF16 rope, drop the full BF16
+        # kv_buffer. Gated by SGLANG_KVBIT_NO_ALLOC=1 on the DSA bf16 path
+        # (GLM-5.2). The decode path bypasses fa3 via a kvbit triton kernel
+        # (see dsa_backend.py). NOT for fp8 DSA / hisparse / float4 / DSA
+        # cache layer-split (kvbit4 needs the plain bf16 DSA path).
+        if (
+            envs.SGLANG_KVBIT_NO_ALLOC.get()
+            and not self.server_args.enable_hisparse
+            and dsa_cp_layer_shard_rank is None
+            and not is_float4_e2m1fn_x2(self.kv_cache_dtype)
+        ):
+            kv_cache_dim = calculate_mla_kv_cache_dim(
+                model_config=self.model_config,
+                kv_cache_dtype=self.kv_cache_dtype,
+                server_args=self.server_args,
+            )
+            fp8_dim_mismatch = (
+                self.kv_cache_dtype == torch.float8_e4m3fn
+                and kv_cache_dim
+                != self.model_config.kv_lora_rank
+                + self.model_config.qk_rope_head_dim
+            )
+            if not fp8_dim_mismatch:
+                return KVBit4MLATokenToKVPool(
+                    max_total_num_tokens,
+                    page_size=self.server_args.page_size,
+                    dtype=self.kv_cache_dtype,
+                    kv_lora_rank=self.model_config.kv_lora_rank,
+                    qk_rope_head_dim=self.model_config.qk_rope_head_dim,
+                    layer_num=self.layer_info.num_effective_layers,
+                    device=self.device,
+                    enable_memory_saver=self.server_args.enable_memory_saver,
+                    start_layer=self.layer_info.start_layer,
+                    end_layer=self.layer_info.end_layer,
+                    use_dsa=True,
+                    override_kv_cache_dim=kv_cache_dim,
+                    index_head_dim=get_dsa_index_head_dim(self.model_config.hf_config),
+                )
+
         pool_kwargs = {}
         if self.server_args.enable_hisparse:
             PoolCls = HiSparseDSATokenToKVPool

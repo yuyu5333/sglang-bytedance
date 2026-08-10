@@ -603,6 +603,46 @@ class DeepseekMLAForwardMixin:
                     f"not supported forward_mode {forward_batch.forward_mode}"
                 )
 
+        # Q-FHT fold (kvbit no_alloc): when the MLA nope latent is stored kvbit
+        # 4bit Hadamard-ROTATED (K_nope @ R, R = kv_lora_rank Hadamard, symmetric
+        # & orthogonal), fold the rotation to the query side so the decode kernel
+        # reads rotated K directly without per-K inverse-rotate. q_nope_out is the
+        # absorbed query (q_nope @ W_kc, shape (n_tokens, n_heads, kv_lora_rank));
+        # apply q_nope_out <- q_nope_out @ R so q_nope_out @ K_nope^T == (q_nope_out
+        # @ R) @ (K_nope @ R)^T. DECODE ONLY: the kvbit bypass kernel reads rotated
+        # K and inverse-rotates its own output (compensating the V-path rotation,
+        # since MLA's V == K_nope latent) before the model's W_vc up-projection.
+        # Prefill keeps unfolded q + unrotated K (get_key_buffer inverse-rotates)
+        # so the flashmla/fa3 path stays in the native latent domain end-to-end.
+        # Gated by SGLANG_KVBIT_NO_ALLOC; no-op otherwise. Covers BOTH pure
+        # decode and speculative target_verify: verify also reads the rotated
+        # 4bit KV store (set_mla_kv_buffer rotates unconditionally), so the
+        # query MUST be Q-FHT folded there too, else (unfolded q) @ (rotated
+        # K)^T gives wrong scores. draft_extend stays unfolded (prefill-domain).
+        if envs.SGLANG_KVBIT_NO_ALLOC.get() and (
+            forward_batch.forward_mode.is_decode_or_idle()
+            or forward_batch.forward_mode.is_target_verify()
+        ):
+            R = getattr(self, "_kvbit_qfht_R", None)
+            if R is None or R.shape[0] != self.kv_lora_rank or R.dtype != torch.bfloat16:
+                from kvbit.rotation import build_hadamard
+
+                R = build_hadamard(
+                    self.kv_lora_rank, dtype=torch.bfloat16, device=q_nope_out.device
+                )
+                self._kvbit_qfht_R = R
+            # (n_tokens, n_heads, kv_lora_rank) @ (kv_lora_rank, kv_lora_rank)
+            # BF16 GMMA tensor-core matmul (fp32 accumulate) — matches the
+            # decode out@R dtype in dsa_backend._forward_kvbit; ~1.8x faster
+            # than the fp32 sm80-XMMA CUDA-core path.
+            # Keep bf16 out of the matmul (drop the .to(fp32) back-cast): the
+            # bf16 @ bf16 GMMA result widened to fp32 carries no extra info
+            # (bf16->fp32 is lossless), and downstream (kvbit decode kernel,
+            # fa3 target_verify, W_vc) all consume bf16 — so the back-cast was
+            # a free-floating elementwise launch that only inflated the CUDA
+            # graph (graph-size lever per REPORT §10). Lossless.
+            q_nope_out = q_nope_out.to(torch.bfloat16) @ R
+
         return (
             q_pe,
             k_pe,

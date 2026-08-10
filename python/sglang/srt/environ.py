@@ -1065,6 +1065,29 @@ class Envs:
     SGLANG_KV_CANARY_SWA_DIVERGENCE_STATS_INTERVAL = EnvInt(0)
     SGLANG_KV_CANARY_ENABLE_MHA_V = EnvBool(False)
 
+    # KVBit low-bit KV cache plugin (opt-in). Wraps DeepSeekV4TokenToKVPool
+    # SWA write/read to build a rotated+packed KV mirror. No-op unless
+    # SGLANG_ENABLE_KVBIT is set. See kvbit docs/INTEGRATION_ROADMAP.md.
+    SGLANG_ENABLE_KVBIT = EnvBool(False)
+    SGLANG_KVBIT_BITS = EnvInt(4)                # 3 or 4 (BU3/BU4)
+    SGLANG_KVBIT_MODE = EnvStr("capture_only")   # off|capture_only|hybrid|full_kvbit
+    # KVBit no_alloc (sglang-native): store the MLA nope latent as kvbit 4bit
+    # (Hadamard-rotated + groupwise quantized) + raw BF16 rope, drop the full
+    # BF16 kv_buffer. Decode bypasses fa3 via a kvbit triton kernel. DSA bf16
+    # path only (GLM-5.2). ~2.77x token capacity. See kvbit docs/multi_model_arch.md.
+    SGLANG_KVBIT_NO_ALLOC = EnvBool(False)
+    # Split-K parallelism for the kvbit no_alloc decode kernel. The kernel's
+    # grid third dim splits each seq's KV across programs; max_kv_splits=1
+    # (Phase-1) serializes the KV scan and is the dominant decode bottleneck
+    # (kvbit kernel is 5.6x-29x slower than fa3, mostly from no split-K).
+    # SPLIT_TILE: KV tokens per split (device-side num_kv_splits = ceil(seqlen /
+    #   tile), clamped to [1, MAX_SPLITS]). 0 disables split-K (=> 1 split).
+    # MAX_SPLITS: host literal upper bound (grid dim, must NOT be derived from a
+    #   GPU tensor or CUDA-graph capture breaks). Size the att_out/att_lse
+    #   staging buffers — keep modest to bound HBM.
+    SGLANG_KVBIT_DECODE_SPLIT_TILE = EnvInt(64)
+    SGLANG_KVBIT_DECODE_MAX_SPLITS = EnvInt(128)
+
 
 envs = Envs()
 EnvField._allow_set_name = False
