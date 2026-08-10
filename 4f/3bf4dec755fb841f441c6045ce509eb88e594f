@@ -1,0 +1,41 @@
+python/sglang/srt/environ.py
+  s_e438893c037c2d::t_ba86dbf47dc89c 1068-1090
+python/sglang/srt/hardware_backend/musa/attention/flashattention_backend.py
+  s_e438893c037c2d::t_75114a4e3e6b3b 270-280,681-691
+python/sglang/srt/layers/attention/dsa_backend.py
+  s_e438893c037c2d::t_7f527c7511d40b 61,1890-1926,2142-2182,2325-2433
+python/sglang/srt/mem_cache/kv_cache_configurator.py
+  s_e438893c037c2d::t_6c23de238f101b 48,1059-1099
+python/sglang/srt/mem_cache/memory_pool.py
+  s_e438893c037c2d::t_fd1a1d55b608d3 4399-4631
+python/sglang/srt/mem_cache/swa_memory_pool.py
+  s_e438893c037c2d::t_772404e568c771 181
+python/sglang/srt/model_executor/model_runner.py
+  s_e438893c037c2d::t_0db8854eeb91d4 774-786
+python/sglang/srt/model_executor/pool_configurator.py
+  s_e438893c037c2d::t_deb6dde2e2f981 192-217
+python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py
+  s_e438893c037c2d::t_fac31baf64783c 606-645
+python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
+  s_e438893c037c2d::t_d982864fe4f575 205-207,302-303
+python/sglang/srt/models/deepseek_v2.py
+  s_e438893c037c2d::t_4812e0cb773a34 2740-2743
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4f3bf4dec755fb841f441c6045ce509eb88e594f",
+  "prompts": {},
+  "sessions": {
+    "s_e438893c037c2d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9b1e60f1-9671-41cd-88bf-1c13d90a440e",
+        "model": "unknown"
+      },
+      "human_author": "wangyuzhan <wangyuzhan@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
