@@ -1902,14 +1902,28 @@ class DeepseekSparseAttnBackend(
         # [1, max_kv_splits]. tile=0 disables split-K (1 split, Phase-1 path).
         split_tile = envs.SGLANG_KVBIT_DECODE_SPLIT_TILE.get()
         max_kv_splits = envs.SGLANG_KVBIT_DECODE_MAX_SPLITS.get()
-        if split_tile <= 0 or max_kv_splits <= 1:
+        # num_kv_splits depends ONLY on cache_seqlens, which is identical across
+        # all 78 layers in a decode forward (same metadata). Computing it every
+        # layer = ~4 graph nodes/layer x 78 = ~312 redundant nodes. Hoist: compute
+        # once on the FIRST layer of each forward (layer_id == start_layer), reuse
+        # the cached tensor on layers 2..78. Graph-safe: the captured graph holds
+        # one compute (layer 0) + 77 reuses of the same static-address tensor; on
+        # replay, layer 0 rewrites num_kv_splits from the replayed cache_seqlens
+        # before any later layer reads it (layer order is preserved in the graph).
+        is_first_layer = (layer.layer_id == pool.start_layer)
+        cached = getattr(self, "_kvbit_num_splits_cache", None)
+        if cached is not None and cached[0] == bs and not is_first_layer:
+            num_kv_splits = cached[1]
+        elif split_tile <= 0 or max_kv_splits <= 1:
             max_kv_splits = 1
             num_kv_splits = torch.full((bs,), 1, dtype=torch.int32, device=q_nope.device)
+            self._kvbit_num_splits_cache = (bs, num_kv_splits)
         else:
             # device-side: ceil(cache_seqlens / tile), clamp to [1, max_kv_splits].
             num_kv_splits = torch.clamp(
                 (cache_seqlens + split_tile - 1) // split_tile, 1, max_kv_splits
             ).to(torch.int32)
+            self._kvbit_num_splits_cache = (bs, num_kv_splits)
 
         out = mla_decode_fwd(
             q_nope.contiguous(),
