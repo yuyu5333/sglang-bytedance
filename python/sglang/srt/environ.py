@@ -277,6 +277,10 @@ class Envs:
     SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE = EnvBool(False)
     SGLANG_FORCE_SHUTDOWN = EnvBool(False)
     SGLANG_DEBUG_MEMORY_POOL = EnvBool(False)
+    # TEMPORARY (PP+DSPARK+graph aux-cat fix): log per-layer aux hidden-state
+    # shapes so the TP token-dim mismatch in _get_hidden_states_to_store can be
+    # diagnosed across PP/TP configs. Remove once the fix lands.
+    SGLANG_DEBUG_DSPARK_AUX = EnvBool(False)
     SGLANG_DSPARK_DEBUG_CONFIDENCE_PREFIX_SCHEDULER = EnvBool(False)
     SGLANG_DSPARK_DEBUG_CONFIDENCE_METRICS = EnvBool(False)
     SGLANG_DSPARK_DEBUG_DUMP = EnvTuple(tuple())
