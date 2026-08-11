@@ -73,6 +73,7 @@ from sglang.srt.layers.communicator import (
     enable_moe_dense_fully_dp,
     get_attn_tp_context,
 )
+from sglang.srt.layers.dp_attention import attn_tp_all_gather_into_tensor
 from sglang.srt.layers.communicator_dsa_cp import (
     DSACPLayerCommunicator,
     maybe_prefetch_next_full_attention_kv,
@@ -237,6 +238,45 @@ logger = logging.getLogger(__name__)
 _enable_pcg_dsv2_dual_stream = (
     _is_cuda and envs.SGLANG_ENABLE_PCG_DSV2_DUAL_STREAM.get()
 )
+
+
+def _gather_aux_to_full_tp(
+    aux_hidden_states: List[torch.Tensor], target_dim0: int
+) -> List[torch.Tensor]:
+    """All-gather DSPARK aux hidden states to a consistent TP token-dim.
+
+    Under pipeline parallelism, aux captured on a non-last PP rank can be
+    TP-local (dim-0 = batch / attn_tp_size) while the last rank's own
+    captures are all-gathered (dim-0 = batch). The non-PP path always
+    gathers, so the draft KV injector and ``torch.cat(..., dim=-1)`` in
+    ``_get_hidden_states_to_store`` both expect the full gathered layout.
+
+    This gathers every aux whose dim-0 is smaller than ``target_dim0`` up
+    to ``target_dim0`` (the full-batch token count), and leaves tensors
+    that are already at ``target_dim0`` untouched. A tensor is gathered
+    only when ``dim0 * attn_tp_size == target_dim0`` (the exact
+    scattered->gathered relationship); anything else is passed through so
+    a genuinely inconsistent list still raises a clear error at the cat
+    instead of being silently corrupted by an over-gather.
+    """
+    attn_tp_size = get_parallel().attn_tp_size
+    if attn_tp_size == 1 or not aux_hidden_states:
+        return aux_hidden_states
+    gathered: List[torch.Tensor] = []
+    for aux in aux_hidden_states:
+        if aux.shape[0] == target_dim0:
+            gathered.append(aux)
+        elif aux.shape[0] * attn_tp_size == target_dim0:
+            full = torch.empty(
+                (target_dim0, *aux.shape[1:]),
+                dtype=aux.dtype,
+                device=aux.device,
+            )
+            attn_tp_all_gather_into_tensor(full, aux)
+            gathered.append(full)
+        else:
+            gathered.append(aux)
+    return gathered
 
 
 class DeepseekV2MLP(nn.Module):
@@ -2648,11 +2688,34 @@ class DeepseekV2Model(nn.Module):
                 "residual": residual,
             }
             if self.layers_to_capture:
+                # PP ranks may capture aux at different TP token-dims: a
+                # non-last rank's own captures can be TP-local (dim-0 =
+                # batch/attn_tp_size) while an upstream stage may send
+                # gathered aux (dim-0 = batch). Align every aux to the max
+                # token-dim before stacking so the inter-stage cat below and
+                # the last rank's draft both see a single layout.
+                local_aux = list(aux_hidden_states)
+                upstream_aux_list = (
+                    [
+                        upstream_dspark_aux[i]
+                        for i in range(upstream_dspark_aux.shape[0])
+                    ]
+                    if upstream_dspark_aux is not None
+                    else []
+                )
+                align_target = max(
+                    (t.shape[0] for t in local_aux + upstream_aux_list),
+                    default=0,
+                )
                 aux_parts = []
-                if upstream_dspark_aux is not None:
-                    aux_parts.append(upstream_dspark_aux)
-                if aux_hidden_states:
-                    aux_parts.append(torch.stack(aux_hidden_states, dim=0))
+                if upstream_aux_list:
+                    upstream_aux_list = _gather_aux_to_full_tp(
+                        upstream_aux_list, align_target
+                    )
+                    aux_parts.append(torch.stack(upstream_aux_list, dim=0))
+                if local_aux:
+                    local_aux = _gather_aux_to_full_tp(local_aux, align_target)
+                    aux_parts.append(torch.stack(local_aux, dim=0))
                 if aux_parts:
                     proxy_tensors["dspark_aux"] = torch.cat(aux_parts, dim=0)
             if (
@@ -2688,6 +2751,20 @@ class DeepseekV2Model(nn.Module):
                 upstream_dspark_aux[i]
                 for i in range(upstream_dspark_aux.shape[0])
             ] + aux_hidden_states
+        if (
+            self.pp_group.is_last_rank
+            and aux_hidden_states
+            and hidden_states.shape[0] > 0
+        ):
+            # Non-last PP ranks may have captured/sent TP-local aux (dim-0 =
+            # batch / attn_tp_size). The draft KV injector and the
+            # torch.cat(dim=-1) in _get_hidden_states_to_store both expect the
+            # full gathered token layout that the non-PP path always
+            # produces. Gather every aux up to the last rank's full-batch
+            # token-dim (hidden_states.shape[0]) so all tensors share dim-0.
+            aux_hidden_states = _gather_aux_to_full_tp(
+                aux_hidden_states, hidden_states.shape[0]
+            )
         if envs.SGLANG_DEBUG_DSPARK_AUX.get() and self.pp_group.is_last_rank:
             up_n = (
                 upstream_dspark_aux.shape[0]
