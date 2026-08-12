@@ -2765,21 +2765,6 @@ class DeepseekV2Model(nn.Module):
             aux_hidden_states = _gather_aux_to_full_tp(
                 aux_hidden_states, hidden_states.shape[0]
             )
-        if envs.SGLANG_DEBUG_DSPARK_AUX.get() and self.pp_group.is_last_rank:
-            up_n = (
-                upstream_dspark_aux.shape[0]
-                if upstream_dspark_aux is not None
-                else 0
-            )
-            logger.warning(
-                "SGLANG_DEBUG_DSPARK_AUX assemble pp_last=1 layers_to_capture=%s "
-                "upstream_n=%d local_n=%d total=%d shapes=%s",
-                self.layers_to_capture,
-                up_n,
-                len(aux_hidden_states) - up_n,
-                len(aux_hidden_states),
-                [tuple(t.shape) for t in aux_hidden_states],
-            )
         if self.pp_group.is_last_rank and use_cp_v1:
             # Rebuild both the final hidden state and every DSpark capture in
             # the original token order. The draft KV injector consumes the

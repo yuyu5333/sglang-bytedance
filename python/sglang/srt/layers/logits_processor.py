@@ -46,7 +46,6 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
 )
-from sglang.srt.environ import envs
 from sglang.srt.runtime_context import get_parallel, get_server_args
 from sglang.srt.utils.common import (
     is_cpu,
@@ -633,13 +632,6 @@ class LogitsProcessor(nn.Module):
         if logits_metadata.capture_hidden_mode.need_capture():
             if logits_metadata.capture_hidden_mode.is_full():
                 if aux_hidden_states is not None:
-                    if envs.SGLANG_DEBUG_DSPARK_AUX.get():
-                        shapes = [tuple(t.shape) for t in aux_hidden_states]
-                        logging.warning(
-                            "SGLANG_DEBUG_DSPARK_AUX cat(is_full) n=%d shapes=%s",
-                            len(aux_hidden_states),
-                            shapes,
-                        )
                     aux_hidden_states = torch.cat(aux_hidden_states, dim=-1)
                     hidden_states_to_store = aux_hidden_states
                 else:
