@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 import msgspec
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
@@ -81,8 +82,7 @@ def build_draft_tp_worker(
     # fa4-draft KV dtype override in configure_kv_cache_dtype), so nulling it
     # would silently skip those paths. context_length keeps the draft aligned
     # with the target.
-    draft_server_args.override(
-        "draft_worker.build",
+    override_fields = dict(
         skip_tokenizer_init=True,
         speculative_draft_attention_backend=draft_backend,
         prefill_attention_backend=None,
@@ -90,6 +90,15 @@ def build_draft_tp_worker(
         attention_backend=draft_backend,
         context_length=target_model_config.context_len,
     )
+    # Optionally compress the draft KV independent of the target
+    # (SGLANG_DRAFT_KV_CACHE_DTYPE). fp8 halves the draft KV footprint, which
+    # is the dominant cost on the last PP rank hosting the replicated draft and
+    # caps the shared KV pool. The draft's set_kv_buffer quantized path and the
+    # resolved draft attention backend must support the chosen dtype.
+    draft_kv_cache_dtype = envs.SGLANG_DRAFT_KV_CACHE_DTYPE.get()
+    if draft_kv_cache_dtype is not None:
+        override_fields["kv_cache_dtype"] = draft_kv_cache_dtype
+    draft_server_args.override("draft_worker.build", **override_fields)
 
     saved_server_args = get_server_args()
     try:

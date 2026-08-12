@@ -764,6 +764,15 @@ class Envs:
     # extend_attention_fwd for unsupported cases or when set false (e.g. for
     # debugging). Correctness is unaffected; this only changes performance.
     SGLANG_ENABLE_SPLITKV_VERIFY = EnvBool(True)
+    # Override the speculative draft worker's KV cache dtype independent of the
+    # target. Set to "fp8_e4m3" / "fp8_e5m2" to halve the draft KV footprint —
+    # the dominant memory cost on the last PP rank that hosts the (replicated)
+    # draft, which caps the shared KV pool (e.g. DSPARK under PP). None inherits
+    # the target's kv_cache_dtype. The draft pool must be an MHA-shaped pool
+    # whose set_kv_buffer supports the quantized path, and the resolved draft
+    # attention backend must read that dtype (flashinfer/fa3 read fp8; fa4
+    # forces bf16 back via configure_kv_cache_dtype, so fp8 is a no-op there).
+    SGLANG_DRAFT_KV_CACHE_DTYPE = EnvStr(None)
     # Master switch for all async-asserted invariant probes (NaN, Inf, OOB,
     # page alignment). Off in prod; tests turn it on to fail-fast on
     # numerical / index violations instead of getting silent NaN cascades.
