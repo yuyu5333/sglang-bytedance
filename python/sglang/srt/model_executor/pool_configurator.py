@@ -231,15 +231,32 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                 calculate_mla_kv_cache_dim,
             )
 
-            cell_size = (
-                calculate_mla_kv_cache_dim(
-                    model_config=model_config,
-                    kv_cache_dtype=kv_cache_dtype,
-                    server_args=kvc.server_args,
+            if envs.SGLANG_KVBIT_NO_ALLOC.get():
+                # KVBit no_alloc: MLA latent is kvbit 4bit packed (Hadamard-
+                # rotated + groupwise quantized). Use the real compressed
+                # per-layer cost so the scheduler admits ~2.3x more tokens.
+                from kvbit.layout import packed_row_bytes
+
+                kvbit_bits = 4
+                kvbit_group_size = 64
+                nope_bytes_per_layer = packed_row_bytes(
+                    dim=model_config.kv_lora_rank,
+                    bits=kvbit_bits,
+                    rope_dim=0,
+                    group_size=kvbit_group_size,
                 )
-                * effective_num_layers
-                * kv_size
-            )
+                rope_bytes_per_layer = model_config.qk_rope_head_dim * kv_size
+                cell_size = (nope_bytes_per_layer + rope_bytes_per_layer) * effective_num_layers
+            else:
+                cell_size = (
+                    calculate_mla_kv_cache_dim(
+                        model_config=model_config,
+                        kv_cache_dtype=kv_cache_dtype,
+                        server_args=kvc.server_args,
+                    )
+                    * effective_num_layers
+                    * kv_size
+                )
             if is_float4_e2m1fn_x2(kv_cache_dtype):
                 # kv_scale_buffer
                 scale_block_size = 16

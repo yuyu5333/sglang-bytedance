@@ -68,6 +68,7 @@ from sglang.srt.layers.utils.cp_utils import (
     cp_all_gather_rerange_output,
     cp_split_and_rebuild_position,
 )
+from sglang.srt.mem_cache.memory_pool import KVBit4MLATokenToKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.runtime_context import get_buffer
 from sglang.srt.utils import (
@@ -1953,6 +1954,37 @@ class DeepseekSparseAttnBackend(
 
         # Do absorbed multi-latent attention (MLA path)
         assert q_rope is not None
+
+        # KVBit no_alloc bypass for speculative target_verify: verify goes
+        # through forward_extend (not forward_decode), which otherwise calls
+        # get_key_buffer (full-pool 4bit->bf16 materialize) -- OOMs on large
+        # pools AND runs every verify step (hot path). Route verify to the same
+        # kvbit paged decode kernel as decode.
+        if (
+            envs.SGLANG_KVBIT_NO_ALLOC.get()
+            and isinstance(self.token_to_kv_pool, KVBit4MLATokenToKVPool)
+            and forward_batch.forward_mode.is_target_verify()
+        ):
+            if q_rope is not None:
+                kvb_q_nope = q.view(-1, layer.tp_q_head_num, layer.v_head_dim)
+                kvb_q_rope = q_rope.view(
+                    -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
+                )
+            else:
+                kvb_q_all = q.contiguous().view(
+                    -1, layer.tp_q_head_num, layer.head_dim
+                )
+                kvb_q_nope = kvb_q_all[:, :, : layer.v_head_dim]
+                kvb_q_rope = kvb_q_all[:, :, layer.v_head_dim :]
+            return self._forward_kvbit(
+                q_nope=kvb_q_nope,
+                q_rope=kvb_q_rope,
+                layer=layer,
+                metadata=metadata,
+                topk_indices=topk_indices,
+                forward_batch=forward_batch,
+            )
+
         kv_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
 
         if q_rope is not None:
@@ -2235,6 +2267,37 @@ class DeepseekSparseAttnBackend(
                     k_rope,
                 )
 
+        # KVBit no_alloc bypass: when the pool is KVBit4MLATokenToKVPool, the
+        # nope latent is stored as 4bit (Hadamard-rotated + groupwise quantized)
+        # and the full BF16 kv_buffer is NOT allocated. Skip fa3 / flashmla and
+        # run the kvbit-owned triton paged MLA decode kernel, which reads the
+        # 4bit packed store + raw rope buffer on-the-fly. Q-FHT (applied in
+        # forward_absorb_prepare) folded the Hadamard to the query side.
+        if envs.SGLANG_KVBIT_NO_ALLOC.get() and isinstance(
+            self.token_to_kv_pool, KVBit4MLATokenToKVPool
+        ):
+            if q_rope is not None:
+                kvb_q_nope = q.view(-1, layer.tp_q_head_num, layer.v_head_dim)
+                kvb_q_rope = q_rope.view(
+                    -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
+                )
+            else:
+                kvb_q_all = q.contiguous().view(
+                    -1, layer.tp_q_head_num, layer.head_dim
+                )
+                kvb_q_nope = kvb_q_all[:, :, : layer.v_head_dim]
+                kvb_q_rope = kvb_q_all[:, :, layer.v_head_dim :]
+            if topk_indices is not None:
+                topk_indices = self._pad_topk_indices(topk_indices, kvb_q_nope.shape[0])
+            return self._forward_kvbit(
+                q_nope=kvb_q_nope,
+                q_rope=kvb_q_rope,
+                layer=layer,
+                metadata=metadata,
+                topk_indices=topk_indices,
+                forward_batch=forward_batch,
+            )
+
         # Do absorbed multi-latent attention
         kv_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
         if q_rope is not None:
@@ -2351,6 +2414,86 @@ class DeepseekSparseAttnBackend(
 
         else:
             assert False, f"Unsupported {self.dsa_decode_impl = }"
+
+
+    def _forward_kvbit(
+        self,
+        q_nope: torch.Tensor,
+        q_rope: torch.Tensor,
+        layer: RadixAttention,
+        metadata: DSAMetadata,
+        topk_indices: Optional[torch.Tensor],
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        """KVBit no_alloc decode: absorbed MLA attention via the kvbit triton
+        paged kernel, reading 4bit nope latent + raw rope on-the-fly (no fa3,
+        no full BF16 kv_buffer). q_nope is already Q-FHT-folded (q@R) by
+        forward_absorb_prepare; the kernel reads rotated K directly.
+        """
+        from kvbit.triton_kernels import mla_decode_fwd
+
+        pool = self.token_to_kv_pool
+        local = layer.layer_id - pool.start_layer
+        kvbit_packed = pool.kvbit_packed[local]   # (num_slots, row_bytes) uint8
+        rope_buffer = pool.rope_buffer[local]      # (num_slots, 1, qk_rope) bf16
+
+        # page_table_1 (topk-transformed slot indices, page_size=1) +
+        # dsa_cache_seqlens_int32 (valid KV length per seq, clipped to topk)
+        page_table_1 = self._get_fused_topk_page_table(topk_indices) if (
+            topk_indices is not None and envs.SGLANG_DSA_FUSE_TOPK.get()
+        ) else transform_index_page_table_decode(
+            page_table=metadata.page_table_1,
+            topk_indices=topk_indices,
+            page_size=1,
+        )
+        cache_seqlens = metadata.dsa_cache_seqlens_int32
+        bs = q_nope.shape[0]
+
+        # Split-K parallelism.
+        split_tile = envs.SGLANG_KVBIT_DECODE_SPLIT_TILE.get()
+        max_kv_splits = envs.SGLANG_KVBIT_DECODE_MAX_SPLITS.get()
+        is_first_layer = (layer.layer_id == pool.start_layer)
+        cached = getattr(self, "_kvbit_num_splits_cache", None)
+        if cached is not None and cached[0] == bs and not is_first_layer:
+            num_kv_splits = cached[1]
+        elif split_tile <= 0 or max_kv_splits <= 1:
+            max_kv_splits = 1
+            num_kv_splits = torch.full((bs,), 1, dtype=torch.int32, device=q_nope.device)
+            self._kvbit_num_splits_cache = (bs, num_kv_splits)
+        else:
+            num_kv_splits = torch.clamp(
+                (cache_seqlens + split_tile - 1) // split_tile, 1, max_kv_splits
+            ).to(torch.int32)
+            self._kvbit_num_splits_cache = (bs, num_kv_splits)
+
+        out = mla_decode_fwd(
+            q_nope,
+            q_rope,
+            kvbit_packed,
+            rope_buffer,
+            page_table_1,
+            cache_seqlens,
+            num_kv_splits=num_kv_splits,
+            max_kv_splits=max_kv_splits,
+            sm_scale=layer.scaling,
+            kv_lora_rank=pool.kv_lora_rank,
+            qk_rope_head_dim=pool.qk_rope_head_dim,
+            bits=pool.kvbit_bits,
+            group_size=pool.kvbit_group_size,
+        )
+        # Inverse-rotate the V-path. In MLA absorbed form V == K_nope latent, so
+        # attending over rotated K (K@R) produces output in the ROTATED domain.
+        # Undo the rotation: out @ R. R is symmetric (R^T == R) and orthogonal.
+        R = getattr(self, "_kvbit_decode_R", None)
+        if R is None or R.shape[0] != pool.kv_lora_rank or R.dtype != torch.bfloat16:
+            from kvbit.rotation import build_hadamard
+
+            R = build_hadamard(
+                pool.kv_lora_rank, dtype=torch.bfloat16, device=out.device
+            )
+            self._kvbit_decode_R = R
+        out = out.to(torch.bfloat16) @ R
+        return out
 
     def _forward_fa3(
         self,

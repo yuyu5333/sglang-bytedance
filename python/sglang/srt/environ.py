@@ -1519,6 +1519,17 @@ class Envs:
     SGLANG_KV_CANARY_ENABLE_MHA_V = EnvBool(False)
 
     # ===================================================================
+    # KVBit low-bit KV cache plugin (opt-in).
+    # ===================================================================
+    SGLANG_ENABLE_KVBIT = EnvBool(False)
+    SGLANG_KVBIT_BITS = EnvInt(4)
+    SGLANG_KVBIT_MODE = EnvStr("capture_only")
+    SGLANG_KVBIT_NO_ALLOC = EnvBool(False)
+    SGLANG_KVBIT_DECODE_SPLIT_TILE = EnvInt(64)
+    SGLANG_KVBIT_DECODE_MAX_SPLITS = EnvInt(128)
+
+
+    # ===================================================================
     # Rust server
     # ===================================================================
     SGLANG_RUST_SERVER = EnvBool(False)

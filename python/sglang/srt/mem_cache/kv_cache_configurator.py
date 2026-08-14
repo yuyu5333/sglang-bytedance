@@ -48,6 +48,7 @@ from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.mem_cache.hisparse_memory_pool import HiSparseDSATokenToKVPool
 from sglang.srt.mem_cache.memory_pool import (
     DSATokenToKVPool,
+    KVBit4MLATokenToKVPool,
     HybridLinearKVPool,
     HybridReqToTokenPool,
     KVCache,
@@ -1306,7 +1307,13 @@ class KVCacheConfigurator:
             dsa_cp_layer_shard_size,
         ) = get_glm_dsa_cp_layer_shard_info(self)
         pool_kwargs = {}
-        if get_memory().enable_hisparse:
+        if envs.SGLANG_KVBIT_NO_ALLOC.get() and not get_memory().enable_hisparse and dsa_cp_layer_shard_rank is None:
+            # KVBit no_alloc: store MLA nope latent as kvbit 4bit + raw BF16 rope.
+            # DSA bf16 path only (GLM-5.2). NOT for fp8 DSA / hisparse / layer-split.
+            from sglang.srt.utils import is_float4_e2m1fn_x2
+            assert not is_float4_e2m1fn_x2(self.kv_cache_dtype), 'kvbit no_alloc requires bf16 KV cache'
+            PoolCls = KVBit4MLATokenToKVPool
+        elif get_memory().enable_hisparse:
             PoolCls = HiSparseDSATokenToKVPool
             from sglang.srt.mem_cache.sparsity import parse_hisparse_config
 
