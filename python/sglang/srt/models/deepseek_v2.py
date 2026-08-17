@@ -2948,6 +2948,14 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                 "q_a_proj",
                 "kv_a_proj_with_mqa",
             ]
+        # W4A16 (compressed-tensors) quant matching: dense MLP registers a fused
+        # gate_up_proj, but the checkpoint / ignore list references the unfused
+        # gate_proj / up_proj source names. Provide the mapping so exclusion
+        # checks can unfuse gate_up_proj back to the checkpoint layer names.
+        self.packed_modules_mapping["gate_up_proj"] = [
+            "gate_proj",
+            "up_proj",
+        ]
 
         # Quant configs like Quark may rely on the model to provide fused-module
         # mappings so exclusion checks can unfuse derived names back to the

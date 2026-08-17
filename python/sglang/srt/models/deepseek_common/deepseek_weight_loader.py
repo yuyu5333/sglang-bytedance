@@ -202,7 +202,11 @@ class DeepseekV2WeightLoaderMixin:
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
-            params_dict = dict(self.named_parameters())
+            # Keep alias parameters such as weight/weight_packed visible for
+            # quantized (W4A16 compressed-tensors) layers that register both
+            # names to the same tensor; remove_duplicate=True would drop the
+            # alias and break the stacked-mapping lookup below.
+            params_dict = dict(self.named_parameters(remove_duplicate=False))
             weight_names = []
 
             for name, loaded_weight in weights:
@@ -287,6 +291,11 @@ class DeepseekV2WeightLoaderMixin:
                     name = name.replace(weight_name, param_name)
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # W4A16: ignored dense-MLP source names (gate_proj/up_proj)
+                    # may not be registered as params after unfusing; skip them
+                    # instead of raising KeyError.
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
