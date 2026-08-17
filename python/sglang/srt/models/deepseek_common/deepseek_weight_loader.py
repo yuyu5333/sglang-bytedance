@@ -399,6 +399,13 @@ class DeepseekV2WeightLoaderMixin:
                                 )
                                 param = params_dict[param_name]
 
+                                if tuple(param.shape) != tuple(fused_weight.shape):
+                                    logger.warning(
+                                        f"[KVBIT-DBG] fused mismatch param_name={param_name} "
+                                        f"param={tuple(param.shape)} fused={tuple(fused_weight.shape)} "
+                                        f"q_a={tuple(q_a_proj_weight.shape)} kv_a={tuple(kv_a_proj_weight.shape)}"
+                                    )
+
                                 weight_loader = getattr(
                                     param, "weight_loader", default_weight_loader
                                 )
@@ -429,6 +436,11 @@ class DeepseekV2WeightLoaderMixin:
                                 logger.warning(f"{name} not found in params_dict.")
                                 continue
                             param = params_dict[name]
+                            if tuple(param.shape) != tuple(loaded_weight.shape):
+                                logger.warning(
+                                    f"[KVBIT-DBG] shape mismatch name={name} "
+                                    f"param={tuple(param.shape)} loaded={tuple(loaded_weight.shape)}"
+                                )
                             weight_loader = getattr(
                                 param, "weight_loader", default_weight_loader
                             )
