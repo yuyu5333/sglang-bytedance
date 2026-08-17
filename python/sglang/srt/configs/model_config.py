@@ -892,6 +892,22 @@ class ModelConfig:
             self.kv_lora_rank = self.hf_text_config.kv_lora_rank
             self.qk_nope_head_dim = self.hf_text_config.qk_nope_head_dim
             self.qk_rope_head_dim = self.hf_text_config.qk_rope_head_dim
+            # NOTE: transformers GlmMoeDsaConfig maps head_dim -> qk_rope_head_dim
+            # via attribute_map, so reading qk_rope_head_dim returns the checkpoint's
+            # head_dim (e.g. 192) instead of the real rope dim (e.g. 64). When the
+            # config exposes qk_head_dim, derive the correct value from
+            # qk_head_dim - qk_nope_head_dim to avoid the clobbered alias.
+            _qk_head_dim = getattr(self.hf_text_config, "qk_head_dim", None)
+            if (
+                _qk_head_dim is not None
+                and self.qk_rope_head_dim != _qk_head_dim - self.qk_nope_head_dim
+            ):
+                self.qk_rope_head_dim = _qk_head_dim - self.qk_nope_head_dim
+                # Write back so downstream model construction (which reads
+                # config.qk_rope_head_dim directly) also sees the corrected value.
+                object.__setattr__(
+                    self.hf_text_config, "qk_rope_head_dim", self.qk_rope_head_dim
+                )
             self.v_head_dim = self.hf_text_config.v_head_dim
             self.index_head_dim = (
                 get_dsa_index_head_dim(self.hf_text_config)
