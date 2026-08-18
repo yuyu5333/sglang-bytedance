@@ -15,16 +15,47 @@ SGL_FA3_KERNEL_REPO = "kernels-community/sgl-flash-attn3"
 SGL_FA3_KERNEL_REVISION = "v1"
 DEFAULT_FA3_KERNEL_LOCKFILE = "kernels.lock"
 
+# Newer FA3 kwargs that older sgl-kernel builds (e.g. 0.4.3) do not accept.
+# They may be safely dropped ONLY when left at these default values, so that
+# behavior never silently changes on older kernels.
+_FA3_OPTIONAL_KWARG_DEFAULTS = {
+    "only_qv": False,
+    "sinks": None,
+    "sm_margin": 0,
+    "return_softmax_lse": False,
+}
+
 
 def _call_fa3_kernel(kernel, *args, out=None, **kwargs):
-    if out is None:
-        return kernel(*args, **kwargs)
-    try:
-        return kernel(*args, **kwargs, out=out)
-    except TypeError as exc:
-        if "unexpected keyword argument 'out'" not in str(exc):
-            raise
-        return kernel(*args, **kwargs)
+    def _invoke(extra):
+        merged = {**kwargs, **extra}
+        return kernel(*args, **merged)
+
+    while True:
+        try:
+            if out is None:
+                return _invoke({})
+            try:
+                return _invoke({"out": out})
+            except TypeError as exc:
+                if "unexpected keyword argument 'out'" not in str(exc):
+                    raise
+                return _invoke({})
+        except TypeError as exc:
+            msg = str(exc)
+            dropped = False
+            for name, default in _FA3_OPTIONAL_KWARG_DEFAULTS.items():
+                if (
+                    f"unexpected keyword argument '{name}'" in msg
+                    and name in kwargs
+                ):
+                    if kwargs[name] != default:
+                        raise
+                    kwargs.pop(name)
+                    dropped = True
+                    break
+            if not dropped:
+                raise
 
 
 @cache_once
