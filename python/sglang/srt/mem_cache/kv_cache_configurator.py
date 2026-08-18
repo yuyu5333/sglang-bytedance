@@ -1307,9 +1307,22 @@ class KVCacheConfigurator:
             dsa_cp_layer_shard_size,
         ) = get_glm_dsa_cp_layer_shard_info(self)
         pool_kwargs = {}
-        if envs.SGLANG_KVBIT_NO_ALLOC.get() and not get_memory().enable_hisparse and dsa_cp_layer_shard_rank is None:
+        if (
+            envs.SGLANG_KVBIT_NO_ALLOC.get()
+            and not get_memory().enable_hisparse
+            and dsa_cp_layer_shard_rank is None
+            and not self.is_draft_worker
+        ):
             # KVBit no_alloc: store MLA nope latent as kvbit 4bit + raw BF16 rope.
             # DSA bf16 path only (GLM-5.2). NOT for fp8 DSA / hisparse / layer-split.
+            # TARGET only -- the draft worker stays on the native BF16 pool. The
+            # draft-extend CUDA graph calls get_key_buffer per draft layer; on a
+            # kvbit pool that materializes a full (max_total_num_tokens, 576) BF16
+            # tensor per layer (scales with max_tokens, erases the 416 B/token
+            # compression -- measured 4.39 GB at 513k tokens vs 0.46 GB native).
+            # The native pool's get_key_buffer returns its pre-allocated kv_buffer
+            # (O(1), no materialization). Draft model is small; keeping it native
+            # costs little and removes the regression root cause.
             from sglang.srt.utils import is_float4_e2m1fn_x2
             assert not is_float4_e2m1fn_x2(self.kv_cache_dtype), 'kvbit no_alloc requires bf16 KV cache'
             PoolCls = KVBit4MLATokenToKVPool
