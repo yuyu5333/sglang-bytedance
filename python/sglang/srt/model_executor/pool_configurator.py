@@ -233,28 +233,23 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
 
             if envs.SGLANG_KVBIT_NO_ALLOC.get():
                 # KVBit no_alloc: MLA latent is kvbit 4bit packed (Hadamard-
-                # rotated + groupwise quantized). The real compressed per-layer
-                # cost is 416 B/token (288 nope 4bit + 128 rope bf16) vs native
-                # 1152 B/token. The pool itself always allocates the compressed
-                # footprint (KVBit4MLATokenToKVPool._create_buffers), so this
-                # cell_size only governs max_total_num_tokens sizing.
+                # rotated + groupwise quantized). Budget at the real compressed
+                # per-layer cost (416 B/token: 288 nope 4bit + 128 rope bf16)
+                # vs native 1152 B/token, so with mem-fraction-static set and
+                # NO --max-total-tokens the scheduler admits ~2.3x more tokens
+                # than native bf16 -- the intended capacity-expansion behavior
+                # (same GPU -> 2x+ tokens), NOT a token-count cap.
                 #
-                # Budgeting at the compressed cost would inflate capacity
-                # ~2.34x (219072 -> 513280 tokens at mem-fraction 0.80). That
-                # inflation is a net LOSS, not a win: the draft-extend CUDA
-                # graph materializes a full BF16 pool per draft layer (see
-                # KVBit4MLATokenToKVPool.get_key_buffer) whose size scales with
-                # max_total_num_tokens, so it grows 2.34x too and erases the
-                # compression savings -- measured 9.02 GB free vs native 13.71
-                # GB, i.e. a 4.69 GB regression.
-                #
-                # Cap the max_tokens budget at the NATIVE cell_size so the
-                # 416 B/token compression shows up as free VRAM instead of
-                # token-count inflation: measured 23.26 GB free at equal
-                # 219072 tokens (kvbit E test) vs native 13.71 GB -- a 9.55 GB
-                # saving, matching the "kvbit uses LESS memory" expectation.
-                # Capacity expansion is still available by passing
-                # --max-total-tokens explicitly (overrides this budget).
+                # The pool itself always allocates the compressed footprint
+                # (KVBit4MLATokenToKVPool._create_buffers); this cell_size only
+                # governs max_total_num_tokens sizing. The draft worker is kept
+                # on the native BF16 pool (see kv_cache_configurator
+                # _build_dsa_kv_pool `and not self.is_draft_worker`), so the
+                # draft-extend CUDA graph's get_key_buffer stays O(1) and does
+                # NOT materialize a full (max_tokens, 576) BF16 tensor per
+                # graph-batch-size. That materialization previously wasted 4.39
+                # GB at 513k tokens and ate the capacity budget; with the draft
+                # native it is gone, so the full 2.3x expansion is usable.
                 from kvbit.layout import packed_row_bytes
 
                 kvbit_bits = 4
@@ -266,23 +261,7 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     group_size=kvbit_group_size,
                 )
                 rope_bytes_per_layer = model_config.qk_rope_head_dim * kv_size
-                kvbit_cell = (
-                    (nope_bytes_per_layer + rope_bytes_per_layer)
-                    * effective_num_layers
-                )
-                native_cell = (
-                    calculate_mla_kv_cache_dim(
-                        model_config=model_config,
-                        kv_cache_dtype=kv_cache_dtype,
-                        server_args=kvc.server_args,
-                    )
-                    * effective_num_layers
-                    * kv_size
-                )
-                # Cap: never let the compressed cost inflate max_tokens beyond
-                # the native-equivalent budget. max() = native_cell here since
-                # kvbit_cell (416 B/tok) < native_cell (1152 B/tok).
-                cell_size = max(kvbit_cell, native_cell)
+                cell_size = (nope_bytes_per_layer + rope_bytes_per_layer) * effective_num_layers
             else:
                 cell_size = (
                     calculate_mla_kv_cache_dim(
