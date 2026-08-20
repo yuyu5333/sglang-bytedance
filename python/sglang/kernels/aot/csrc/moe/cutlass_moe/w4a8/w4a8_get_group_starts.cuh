@@ -55,17 +55,13 @@ __global__ void int4_fp8_get_group_gemm_starts(
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + (per_out_ch ? expert_id * n * k / weight_scale_group : expert_id);
   if (as_offsets != nullptr && as_base_as_int != nullptr) {
-    // Exclusive cumsum of the PADDED per-expert token strides (as_strides[j][0],
-    // laid out as [E,2] so element j is at index j*2). Falls back to the real
-    // expert_offset when no stride array is supplied (defensive; the mxfp4a8
-    // caller always passes as_strides). E is tiny (<=256) so the serial scan is
-    // negligible in this single-block launch.
+    // as_strides is laid out as [E,2]. Column 0 is the per-expert padded token
+    // stride consumed by the TMA descriptor. Column 1 is the exclusive
+    // padded-token prefix, precomputed by the caller to avoid an O(E^2) serial
+    // scan in this launch.
     int64_t as_tok_off = expert_offset;
     if (as_strides != nullptr) {
-      as_tok_off = 0;
-      for (int j = 0; j < expert_id; ++j) {
-        as_tok_off += as_strides[j * 2];
-      }
+      as_tok_off = as_strides[expert_id * 2 + 1];
     }
     as_offsets[expert_id] = as_base_as_int + as_tok_off * (k / act_scale_group);
   }

@@ -319,6 +319,24 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     } else {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 64, 128, 1, 1, 1>));
     }
+  } else if (n == 4096 && k == 4096) {
+    // GPT-OSS-like MXFP4A8 GEMM1 (hidden=4096, 2*inter=4096, E=256, topk=6).
+    if (m <= 256) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
+    } else if (m <= 2048) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
+    } else {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 1, 1, 1>));
+    }
+  } else if (n == 4096 && k == 2048) {
+    // GPT-OSS-like MXFP4A8 GEMM2 (inter=2048, hidden=4096, E=256, topk=6).
+    if (m <= 256) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
+    } else if (m <= 2048) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
+    } else {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
+    }
   } else {
     if (k % 128 == 0) {
       // TileK=128 uses the legal 64-bit Array<bf16,4> TMA scale element.
