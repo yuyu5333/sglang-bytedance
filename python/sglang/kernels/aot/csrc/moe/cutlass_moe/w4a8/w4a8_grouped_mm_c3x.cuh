@@ -186,13 +186,14 @@ void cutlass_w4a8_group_gemm_caller(
     // so the aggregate leaves ptr_AS/dAS default-null and the kernel is byte-identical.
     std::optional<torch::Tensor> act_block_scales = std::nullopt,
     std::optional<torch::Tensor> as_strides = std::nullopt,
-    int64_t act_scale_group = 0) {
+    int64_t act_scale_group = 0,
+    std::optional<torch::Tensor> expert_ids = std::nullopt) {
   //   using Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
   using Args = typename Gemm::GemmScaleOnly::Arguments;
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
   bool per_act_token = a_scales.numel() != 1;
-  bool per_out_ch = b_scales.numel() != num_experts;
+  bool per_out_ch = b_scales.numel() != b_tensors.size(0);
 
   // Check inputs
   TORCH_CHECK(a_tensors.dim() == 2 or a_tensors.dim() == 3, "A tensor must be 2D/3D");
@@ -205,8 +206,14 @@ void cutlass_w4a8_group_gemm_caller(
   // Check tensor shapes
   TORCH_CHECK(problem_sizes.size(0) == num_experts, "problem_sizes must have num_experts rows");
   TORCH_CHECK(problem_sizes.size(1) == 3, "problem_sizes must have 3 columns (N, M, K)");
-  TORCH_CHECK(b_tensors.size(0) == num_experts, "B tensor first dimension must match number of groups");
-  TORCH_CHECK(b_scales.size(0) == num_experts, "Scale tensor first dimension must match number of groups");
+  if (expert_ids.has_value()) {
+    TORCH_CHECK(expert_ids->dim() == 1, "expert_ids must be a 1D tensor");
+    TORCH_CHECK(expert_ids->size(0) == num_experts, "expert_ids must match problem_sizes rows");
+    TORCH_CHECK(expert_ids->scalar_type() == torch::kInt32, "expert_ids must be int32");
+  } else {
+    TORCH_CHECK(b_tensors.size(0) == num_experts, "B tensor first dimension must match number of groups");
+    TORCH_CHECK(b_scales.size(0) == num_experts, "Scale tensor first dimension must match number of groups");
+  }
   TORCH_CHECK(
       b_tensors.size(2) * 2 == a_tensors.size(1) or b_tensors.size(2) * 2 == a_tensors.size(2),
       "B tensor K/2 dimension must match A tensor K dimension");
@@ -272,7 +279,8 @@ void cutlass_w4a8_group_gemm_caller(
       static_cast<int64_t>(Gemm::GroupSize),
       // MXFP4A8: per-expert act-scale stride tensor [E,2] so get_group_starts can
       // advance the act-scale pointer by the PADDED (16B-aligned) cumsum.
-      use_act_block_scale ? as_strides : std::nullopt);
+      use_act_block_scale ? as_strides : std::nullopt,
+      expert_ids);
 
   arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGrouped,

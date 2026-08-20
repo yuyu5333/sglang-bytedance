@@ -41,7 +41,8 @@ void cutlass_mxfp4a8_moe_mm_sm90(
     int64_t topk,
     std::optional<torch::Tensor> act_block_scales,
     std::optional<torch::Tensor> as_strides,
-    int64_t act_scale_group);
+    int64_t act_scale_group,
+    std::optional<torch::Tensor> expert_ids);
 
 void get_cutlass_w4a8_moe_mm_data_caller(
     const torch::Tensor& topk_ids,
@@ -101,7 +102,8 @@ void cutlass_mxfp4a8_moe_mm(
     int64_t topk,
     std::optional<torch::Tensor> act_block_scales,
     std::optional<torch::Tensor> as_strides,
-    int64_t act_scale_group) {
+    int64_t act_scale_group,
+    std::optional<torch::Tensor> expert_ids) {
   cutlass_mxfp4a8_moe_mm_sm90(
       d_tensors,
       a_tensors,
@@ -118,7 +120,8 @@ void cutlass_mxfp4a8_moe_mm(
       topk,
       act_block_scales,
       as_strides,
-      act_scale_group);
+      act_scale_group,
+      expert_ids);
   return;
 }
 

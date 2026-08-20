@@ -82,7 +82,8 @@ inline void invoke_gemm(
     // nullopt so all int4a8 call sites are unchanged.
     std::optional<torch::Tensor> act_block_scales = std::nullopt,
     std::optional<torch::Tensor> as_strides = std::nullopt,
-    int64_t act_scale_group = 0) {
+    int64_t act_scale_group = 0,
+    std::optional<torch::Tensor> expert_ids = std::nullopt) {
   using GemmT = typename Config::Cutlass3xW4A8Gemm;
   cutlass_w4a8_group_gemm_caller<GemmT>(
       d_tensors,
@@ -99,7 +100,8 @@ inline void invoke_gemm(
       chunk_size,
       act_block_scales,
       as_strides,
-      act_scale_group);
+      act_scale_group,
+      expert_ids);
 }
 
 // Helper macro to reduce code duplication
@@ -138,7 +140,8 @@ inline void invoke_gemm(
       chunk_size,                              \
       act_block_scales,                        \
       as_strides,                              \
-      act_scale_group)
+      act_scale_group,                         \
+      expert_ids)
 #define INVOKE_GEMM_WITH_CONFIG_AS(Config) INVOKE_GEMM_WITH_CONFIG_AS_HELPER Config
 
 void dispatch_w4a8_moe_mm_sm90(
@@ -256,7 +259,8 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     // activation path; otherwise it falls back to per-tensor (epilogue alpha).
     std::optional<torch::Tensor> act_block_scales,
     std::optional<torch::Tensor> as_strides,
-    int64_t act_scale_group) {
+    int64_t act_scale_group,
+    std::optional<torch::Tensor> expert_ids = std::nullopt) {
   uint32_t const m = a_tensors.size(0) / topk;
   uint32_t const n = d_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
@@ -411,7 +415,8 @@ void cutlass_mxfp4a8_moe_mm_sm90(
     int64_t topk,
     std::optional<torch::Tensor> act_block_scales,
     std::optional<torch::Tensor> as_strides,
-    int64_t act_scale_group) {
+    int64_t act_scale_group,
+    std::optional<torch::Tensor> expert_ids) {
   dispatch_w4a8_mxfp4_moe_mm_sm90(
       d_tensors,
       a_tensors,
@@ -428,5 +433,6 @@ void cutlass_mxfp4a8_moe_mm_sm90(
       topk,
       act_block_scales,
       as_strides,
-      act_scale_group);
+      act_scale_group,
+      expert_ids);
 }

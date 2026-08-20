@@ -131,6 +131,7 @@ def cutlass_mxfp4a8_moe_mm(
     act_block_scales: Optional[torch.Tensor] = None,
     as_strides: Optional[torch.Tensor] = None,
     act_scale_group: int = 0,
+    expert_ids: Optional[torch.Tensor] = None,
 ):
     """
     Perform grouped matrix multiplication between MXFP4 weights and fp8 activations.
@@ -175,4 +176,5 @@ def cutlass_mxfp4a8_moe_mm(
         act_block_scales,
         as_strides,
         act_scale_group,
+        expert_ids,
     )

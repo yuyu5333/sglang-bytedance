@@ -44,15 +44,17 @@ __global__ void int4_fp8_get_group_gemm_starts(
     // pointer must advance by the exclusive cumsum of these padded strides -- NOT
     // by the (real) expert_offset used for the M-contiguous activation tensor.
     // nullptr for int4a8 (act-scale path disabled).
-    int64_t const* as_strides = nullptr) {
-  int expert_id = threadIdx.x;
-  int32_t expert_offset = expert_offsets[expert_id];
+    int64_t const* as_strides = nullptr,
+    int32_t const* expert_ids = nullptr) {
+  int group_id = threadIdx.x;
+  int expert_id = expert_ids != nullptr ? expert_ids[group_id] : group_id;
+  int32_t expert_offset = expert_offsets[group_id];
 
-  a_offsets[expert_id] = a_base_as_int + expert_offset * k;
-  b_offsets[expert_id] = b_base_as_int + expert_id * k * n / 2;
-  out_offsets[expert_id] = out_base_as_int + expert_offset * n;
-  a_scales_offsets[expert_id] = a_scales_base_as_int + (per_act_token ? expert_offset : 0);
-  b_scales_offsets[expert_id] =
+  a_offsets[group_id] = a_base_as_int + expert_offset * k;
+  b_offsets[group_id] = b_base_as_int + expert_id * k * n / 2;
+  out_offsets[group_id] = out_base_as_int + expert_offset * n;
+  a_scales_offsets[group_id] = a_scales_base_as_int + (per_act_token ? expert_offset : 0);
+  b_scales_offsets[group_id] =
       b_scales_base_as_int + (per_out_ch ? expert_id * n * k / weight_scale_group : expert_id);
   if (as_offsets != nullptr && as_base_as_int != nullptr) {
     // as_strides is laid out as [E,2]. Column 0 is the per-expert padded token
@@ -61,9 +63,9 @@ __global__ void int4_fp8_get_group_gemm_starts(
     // scan in this launch.
     int64_t as_tok_off = expert_offset;
     if (as_strides != nullptr) {
-      as_tok_off = as_strides[expert_id * 2 + 1];
+      as_tok_off = as_strides[group_id * 2 + 1];
     }
-    as_offsets[expert_id] = as_base_as_int + as_tok_off * (k / act_scale_group);
+    as_offsets[group_id] = as_base_as_int + as_tok_off * (k / act_scale_group);
   }
 }
 
@@ -124,7 +126,8 @@ __global__ void int4_fp8_get_group_gemm_starts_3d(
             as_base_raw,                                                                  \
             act_scale_group,                                                              \
             weight_scale_group,                                                           \
-            as_strides_raw);                                                              \
+            as_strides_raw,                                                               \
+            expert_ids_raw);                                                              \
   }
 
 #define __CALL_W4A8_GET_STARTS_KERNEL_3D(TENSOR_C_TYPE, C_TYPE)                              \
@@ -177,7 +180,8 @@ void run_int4_fp8_get_group_gemm_starts(
     // compute the exclusive cumsum of PADDED per-expert token strides so the
     // per-expert act-scale pointer lands on the correctly-padded (16B-aligned)
     // sub-buffer. Left empty for int4a8.
-    std::optional<torch::Tensor> as_strides = std::nullopt) {
+    std::optional<torch::Tensor> as_strides = std::nullopt,
+    std::optional<torch::Tensor> expert_ids = std::nullopt) {
   TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b_tensors.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -199,6 +203,12 @@ void run_int4_fp8_get_group_gemm_starts(
       TORCH_CHECK(as_strides->dtype() == torch::kInt64, "as_strides must be int64");
       as_strides_raw = static_cast<int64_t const*>(as_strides->data_ptr());
     }
+  }
+  int32_t const* expert_ids_raw = nullptr;
+  if (expert_ids.has_value()) {
+    TORCH_CHECK(expert_ids->dtype() == torch::kInt32, "expert_ids must be int32");
+    TORCH_CHECK(expert_ids->numel() == num_experts, "expert_ids must have one entry per grouped problem");
+    expert_ids_raw = static_cast<int32_t const*>(expert_ids->data_ptr());
   }
 
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
