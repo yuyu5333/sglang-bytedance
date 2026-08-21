@@ -35,6 +35,9 @@
 #include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #endif
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+#include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
+#endif
 #include "w4a8_get_group_starts.cuh"
 
 using namespace cute;
@@ -87,11 +90,7 @@ template <
     int GroupSizeK = 128,
     bool UseSingleWarpgroup = false>
 struct cutlass_3x_w4a8_group_gemm {
-  // The current in-tree FlashInfer/CUTLASS dependency does not provide
-  // SingleWarpgroupPersistentGemm. Keep the experimental instantiations
-  // compileable as constrained 128xN x128 MXFP4A8 probes, but do not mark them
-  // as a real persistent single-warpgroup kernel until the scheduler is added.
-  static constexpr bool UseSingleWarpgroupKernel = false;
+  static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScalePacked = cutlass::Array<ElementScale, PackedScalesNum>;
@@ -149,8 +148,20 @@ struct cutlass_3x_w4a8_group_gemm {
        SingleWarpgroupTileN == 40));
   static constexpr int SingleWarpgroupCtasPerSm = SingleWarpgroupTileN <= 16 ? 5 : (SingleWarpgroupTileN == 32 ? 4 : 3);
 
-  using GemmKernelScaleOnly =
-      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>;
+  using GemmKernelScaleOnly = std::conditional_t<
+      UseSingleWarpgroupKernel,
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+      cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
+          ProblemShape,
+          CollectiveMainloopScaleOnly,
+          CollectiveEpilogue,
+          SingleWarpgroupCtasPerSm,
+          3,
+          cutlass::gemm::kernel::SingleWarpgroupPipelineMode::PrefillAll>,
+#else
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>,
+#endif
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>>;
 
   using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
 
