@@ -60,9 +60,9 @@ def _scatter_fixed_act_block_scale_kernel(
     scale_ptr,
     packed_ptr,
     expert_offsets_ptr,
-    total_m: tl.constexpr,
-    nblk: tl.constexpr,
-    m_stride: tl.constexpr,
+    total_m,
+    nblk,
+    m_stride,
     num_experts: tl.constexpr,
     A: tl.constexpr,
     BLKN: tl.constexpr,
@@ -96,12 +96,15 @@ class CutlassMxfp4A8FusedMoeRunner:
         dtype: torch.dtype,
         device: torch.device,
     ) -> torch.Tensor:
-        key = (name, shape, dtype, device.index or 0)
+        key = ("tensor", name, dtype, device.index or 0)
+        numel = 1
+        for dim in shape:
+            numel *= dim
         tensor = self._workspace.get(key)
-        if tensor is None or tensor.device != device:
-            tensor = torch.empty(shape, dtype=dtype, device=device)
+        if tensor is None or tensor.device != device or tensor.numel() < numel:
+            tensor = torch.empty((numel,), dtype=dtype, device=device)
             self._workspace[key] = tensor
-        return tensor
+        return tensor[:numel].view(shape)
 
     def _fixed_act_scale_strides(
         self,
