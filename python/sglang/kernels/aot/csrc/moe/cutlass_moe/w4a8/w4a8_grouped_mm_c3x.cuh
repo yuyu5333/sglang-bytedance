@@ -35,6 +35,7 @@
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #endif
+#include "cutlass_extensions/epilogue/collective/default_epilogue_array_per_token_scale.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
@@ -81,6 +82,45 @@ static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
 static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
 template <
+    bool UseSingleWarpgroup,
+    typename TileShape,
+    typename ClusterShape,
+    typename EpilogueSchedule>
+struct W4A8EpilogueSelector;
+
+template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
+struct W4A8EpilogueSelector<false, TileShape, ClusterShape, EpilogueSchedule> {
+  using Type = typename cutlass::epilogue::collective::CollectiveBuilder<
+      ArchTag,
+      OperatorClass,
+      TileShape,
+      ClusterShape,
+      cutlass::epilogue::collective::EpilogueTileAuto,
+      ElementAccumulator,
+      ElementAccumulator,
+      ElementC,
+      LayoutC_Transpose*,
+      AlignmentC,
+      ElementD,
+      LayoutD_Transpose*,
+      AlignmentD,
+      EpilogueSchedule>::CollectiveOp;
+};
+
+template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
+struct W4A8EpilogueSelector<true, TileShape, ClusterShape, EpilogueSchedule> {
+  using Epilogue = cutlass::epilogue::collective::SmemEpilogueArrayPerTokenScale<
+      TileShape,
+      ElementC,
+      cutlass::detail::TagToStrideC_t<LayoutC_Transpose*>,
+      ElementD,
+      cutlass::detail::TagToStrideC_t<LayoutD_Transpose*>,
+      ElementAccumulator,
+      ElementAccumulator>;
+  using Type = cutlass::epilogue::collective::detail::Sm90TmaWarpSpecializedAdapter<Epilogue>;
+};
+
+template <
     typename TileShape,
     typename ClusterShape,
     typename KernelSchedule,
@@ -104,21 +144,11 @@ struct cutlass_3x_w4a8_group_gemm {
   static_assert(!UseSingleWarpgroup || cute::size<0>(TileShape{}) == 128);
   static_assert(!UseSingleWarpgroup || cute::size<2>(TileShape{}) == 128);
 
-  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-      ArchTag,
-      OperatorClass,
+  using CollectiveEpilogue = typename W4A8EpilogueSelector<
+      UseSingleWarpgroupKernel,
       TileShape,
       ClusterShape,
-      cutlass::epilogue::collective::EpilogueTileAuto,
-      ElementAccumulator,
-      ElementAccumulator,
-      ElementC,
-      LayoutC_Transpose*,
-      AlignmentC,
-      ElementD,
-      LayoutD_Transpose*,
-      AlignmentD,
-      EpilogueSchedule>::CollectiveOp;
+      EpilogueSchedule>::Type;
 
   using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
       ArchTag,
@@ -263,6 +293,11 @@ void cutlass_w4a8_group_gemm_caller(
   TORCH_CHECK(b_tensors.scalar_type() == torch::kInt8, "B tensor must contain packed int4 values (stored as int8)");
   TORCH_CHECK(expert_offsets.scalar_type() == torch::kInt32, "Expert offsets must be int32 type");
   TORCH_CHECK(problem_sizes.scalar_type() == torch::kInt32, "Problem sizes must be int32 type");
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    TORCH_CHECK(
+        d_tensors.dim() == 2 && d_tensors.is_contiguous(),
+        "Single-warpgroup GEMM requires contiguous 2D D");
+  }
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
   auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
@@ -293,16 +328,6 @@ void cutlass_w4a8_group_gemm_caller(
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   torch::Tensor swg_work_map_storage;
 #endif
-  decltype(arguments.epilogue.thread) fusion_args;
-  fusion_args.alpha = 0;
-  fusion_args.beta = 0;
-  fusion_args.alpha_ptr = a_scales.data_ptr<float>();
-  ;
-  fusion_args.beta_ptr = nullptr;
-  fusion_args.alpha_ptr_array = nullptr;
-  fusion_args.beta_ptr_array = nullptr;
-  fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
-  fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr());
@@ -330,22 +355,56 @@ void cutlass_w4a8_group_gemm_caller(
       use_act_block_scale ? as_strides : std::nullopt,
       expert_ids);
 
-  arguments = Args{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {num_experts, problem_sizes_as_shapes, nullptr},
-      {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs.data_ptr()),
-       static_cast<typename Gemm::StrideB*>(b_strides.data_ptr()),
-       static_cast<const MmaType**>(a_ptrs.data_ptr()),
-       static_cast<typename Gemm::StrideA*>(a_strides.data_ptr()),
-       static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs.data_ptr()),
-       static_cast<typename Gemm::StrideS*>(s_strides.data_ptr()),
-       static_cast<int>(chunk_size)},
-      {fusion_args,
-       nullptr,
-       nullptr,
-       static_cast<ElementD**>(out_ptrs.data_ptr()),
-       static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
-      hw_info};
+  decltype(arguments.epilogue.thread) fusion_args;
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    fusion_args.token_scale_default = ElementAccumulator(1);
+    fusion_args.token_scale_ptr_array = nullptr;
+    arguments = Args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {num_experts, problem_sizes_as_shapes, nullptr},
+        {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideB*>(b_strides.data_ptr()),
+         static_cast<const MmaType**>(a_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideA*>(a_strides.data_ptr()),
+         static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideS*>(s_strides.data_ptr()),
+         static_cast<int>(chunk_size)},
+        {fusion_args,
+         nullptr,
+         nullptr,
+         static_cast<ElementD**>(out_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideD*>(d_strides.data_ptr()),
+         static_cast<ElementD*>(d_tensors.data_ptr()),
+         d_tensors.size(1),
+         d_tensors.size(1),
+         ElementAccumulator(0)},
+        hw_info};
+  } else {
+    fusion_args.alpha = 0;
+    fusion_args.beta = 0;
+    fusion_args.alpha_ptr = a_scales.data_ptr<float>();
+    fusion_args.beta_ptr = nullptr;
+    fusion_args.alpha_ptr_array = nullptr;
+    fusion_args.beta_ptr_array = nullptr;
+    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
+    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
+    arguments = Args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {num_experts, problem_sizes_as_shapes, nullptr},
+        {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideB*>(b_strides.data_ptr()),
+         static_cast<const MmaType**>(a_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideA*>(a_strides.data_ptr()),
+         static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideS*>(s_strides.data_ptr()),
+         static_cast<int>(chunk_size)},
+        {fusion_args,
+         nullptr,
+         nullptr,
+         static_cast<ElementD**>(out_ptrs.data_ptr()),
+         static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
+        hw_info};
+  }
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
