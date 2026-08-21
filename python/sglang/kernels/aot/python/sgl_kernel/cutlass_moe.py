@@ -79,6 +79,7 @@ def compact_cutlass_w4a8_moe_mm_data(
     compact_problem_sizes2: torch.Tensor,
     compact_expert_ids: torch.Tensor,
     num_experts: int,
+    max_groups: int,
 ):
     """Compact non-empty expert GEMM problems to the front of fixed-size buffers."""
     torch.ops.sgl_kernel.compact_cutlass_w4a8_moe_mm_data.default(
@@ -90,6 +91,7 @@ def compact_cutlass_w4a8_moe_mm_data(
         compact_problem_sizes2,
         compact_expert_ids,
         num_experts,
+        max_groups,
     )
 
 

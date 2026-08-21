@@ -224,11 +224,15 @@ __global__ void compact_cutlass_w4a8_moe_mm_data_kernel(
     int32_t* __restrict__ compact_problem_sizes1,
     int32_t* __restrict__ compact_problem_sizes2,
     int32_t* __restrict__ compact_expert_ids,
-    const int64_t num_experts) {
+    const int64_t num_experts,
+    const int64_t max_groups) {
   int32_t out = 0;
   int32_t total = expert_offsets[num_experts];
 
   for (int32_t e = 0; e < num_experts; ++e) {
+    if (out >= max_groups) {
+      break;
+    }
     int32_t m = problem_sizes1[e * 3 + 1];
     if (m <= 0) {
       continue;
@@ -245,7 +249,7 @@ __global__ void compact_cutlass_w4a8_moe_mm_data_kernel(
     ++out;
   }
 
-  for (int32_t i = out; i < num_experts; ++i) {
+  for (int32_t i = out; i < max_groups; ++i) {
     compact_expert_offsets[i] = total;
     compact_problem_sizes1[i * 3] = 0;
     compact_problem_sizes1[i * 3 + 1] = 0;
@@ -265,7 +269,8 @@ void compact_cutlass_w4a8_moe_mm_data(
     torch::Tensor& compact_problem_sizes1,
     torch::Tensor& compact_problem_sizes2,
     torch::Tensor& compact_expert_ids,
-    const int64_t num_experts) {
+    const int64_t num_experts,
+    const int64_t max_groups) {
   TORCH_CHECK(expert_offsets.dtype() == torch::kInt32, "expert_offsets must be int32");
   TORCH_CHECK(problem_sizes1.dtype() == torch::kInt32, "problem_sizes1 must be int32");
   TORCH_CHECK(problem_sizes2.dtype() == torch::kInt32, "problem_sizes2 must be int32");
@@ -276,10 +281,11 @@ void compact_cutlass_w4a8_moe_mm_data(
   TORCH_CHECK(expert_offsets.numel() >= num_experts + 1, "expert_offsets must have num_experts + 1 entries");
   TORCH_CHECK(problem_sizes1.numel() >= num_experts * 3, "problem_sizes1 must have num_experts rows");
   TORCH_CHECK(problem_sizes2.numel() >= num_experts * 3, "problem_sizes2 must have num_experts rows");
-  TORCH_CHECK(compact_expert_offsets.numel() >= num_experts, "compact_expert_offsets must have num_experts entries");
-  TORCH_CHECK(compact_problem_sizes1.numel() >= num_experts * 3, "compact_problem_sizes1 must have num_experts rows");
-  TORCH_CHECK(compact_problem_sizes2.numel() >= num_experts * 3, "compact_problem_sizes2 must have num_experts rows");
-  TORCH_CHECK(compact_expert_ids.numel() >= num_experts, "compact_expert_ids must have num_experts entries");
+  TORCH_CHECK(max_groups > 0 && max_groups <= num_experts, "max_groups must be in (0, num_experts]");
+  TORCH_CHECK(compact_expert_offsets.numel() >= max_groups, "compact_expert_offsets must have max_groups entries");
+  TORCH_CHECK(compact_problem_sizes1.numel() >= max_groups * 3, "compact_problem_sizes1 must have max_groups rows");
+  TORCH_CHECK(compact_problem_sizes2.numel() >= max_groups * 3, "compact_problem_sizes2 must have max_groups rows");
+  TORCH_CHECK(compact_expert_ids.numel() >= max_groups, "compact_expert_ids must have max_groups entries");
 
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
   compact_cutlass_w4a8_moe_mm_data_kernel<<<1, 1, 0, stream>>>(
@@ -290,5 +296,6 @@ void compact_cutlass_w4a8_moe_mm_data(
       static_cast<int32_t*>(compact_problem_sizes1.data_ptr()),
       static_cast<int32_t*>(compact_problem_sizes2.data_ptr()),
       static_cast<int32_t*>(compact_expert_ids.data_ptr()),
-      num_experts);
+      num_experts,
+      max_groups);
 }

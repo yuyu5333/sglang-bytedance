@@ -194,7 +194,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def(
       "compact_cutlass_w4a8_moe_mm_data(Tensor expert_offsets, Tensor problem_sizes1, Tensor problem_sizes2, "
       "Tensor compact_expert_offsets, Tensor compact_problem_sizes1, Tensor compact_problem_sizes2, "
-      "Tensor compact_expert_ids, int num_experts) -> ()");
+      "Tensor compact_expert_ids, int num_experts, int max_groups) -> ()");
   m.impl("compact_cutlass_w4a8_moe_mm_data", torch::kCUDA, &compact_cutlass_w4a8_moe_mm_data);
 
   m.def("shuffle_rows(Tensor input, Tensor dst2src_map, Tensor output) -> ()");

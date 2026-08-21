@@ -341,7 +341,8 @@ void compact_cutlass_w4a8_moe_mm_data(
     torch::Tensor& compact_problem_sizes1,
     torch::Tensor& compact_problem_sizes2,
     torch::Tensor& compact_expert_ids,
-    const int64_t num_experts);
+    const int64_t num_experts,
+    const int64_t max_groups);
 
 void shuffle_rows(const torch::Tensor& input_tensor, const torch::Tensor& dst2src_map, torch::Tensor& output_tensor);
 

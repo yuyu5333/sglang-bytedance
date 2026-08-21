@@ -170,18 +170,19 @@ class CutlassMxfp4A8FusedMoeRunner:
         problem_sizes1: torch.Tensor,
         problem_sizes2: torch.Tensor,
         num_experts: int,
+        max_groups: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         compact_expert_offsets = self._empty(
-            "compact_expert_offsets", (num_experts,), torch.int32, expert_offsets.device
+            "compact_expert_offsets", (max_groups,), torch.int32, expert_offsets.device
         )
         compact_problem_sizes1 = self._empty(
-            "compact_problem_sizes1", tuple(problem_sizes1.shape), torch.int32, expert_offsets.device
+            "compact_problem_sizes1", (max_groups, 3), torch.int32, expert_offsets.device
         )
         compact_problem_sizes2 = self._empty(
-            "compact_problem_sizes2", tuple(problem_sizes2.shape), torch.int32, expert_offsets.device
+            "compact_problem_sizes2", (max_groups, 3), torch.int32, expert_offsets.device
         )
         compact_expert_ids = self._empty(
-            "compact_expert_ids", (num_experts,), torch.int32, expert_offsets.device
+            "compact_expert_ids", (max_groups,), torch.int32, expert_offsets.device
         )
         compact_cutlass_w4a8_moe_mm_data(
             expert_offsets,
@@ -192,6 +193,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             compact_problem_sizes2,
             compact_expert_ids,
             num_experts,
+            max_groups,
         )
         return (
             compact_expert_offsets,
@@ -433,13 +435,18 @@ class CutlassMxfp4A8FusedMoeRunner:
 
         use_compact_groups = compact_cutlass_w4a8_moe_mm_data is not None and m <= 256
         if use_compact_groups:
+            max_compact_groups = max(1, min(num_local_experts, topk_ids.numel()))
             (
                 expert_offsets_gemm,
                 problem_sizes1_gemm,
                 problem_sizes2_gemm,
                 active_expert_ids,
             ) = self._compact_moe_metadata(
-                expert_offsets, problem_sizes1, problem_sizes2, num_local_experts
+                expert_offsets,
+                problem_sizes1,
+                problem_sizes2,
+                num_local_experts,
+                max_compact_groups,
             )
         else:
             expert_offsets_gemm = expert_offsets[:-1]
