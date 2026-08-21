@@ -45,7 +45,7 @@
 
 using namespace cute;
 
-namespace {
+namespace sgl_kernel::w4a8_detail {
 
 // Type definitions
 using MmaType = cutlass::float_e4m3_t;     // FP8 e4m3 type
@@ -530,4 +530,4 @@ void cutlass_w4a8_group_gemm_caller(
   }
 }
 
-}  // namespace
+}  // namespace sgl_kernel::w4a8_detail

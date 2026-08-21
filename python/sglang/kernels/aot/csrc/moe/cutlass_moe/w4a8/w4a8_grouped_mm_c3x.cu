@@ -9,6 +9,8 @@
 #include "w4a8_grouped_mm_c3x.cuh"
 
 using namespace cute;
+using sgl_kernel::w4a8_detail::cutlass_3x_w4a8_group_gemm;
+using sgl_kernel::w4a8_detail::cutlass_w4a8_group_gemm_caller;
 
 namespace {
 
