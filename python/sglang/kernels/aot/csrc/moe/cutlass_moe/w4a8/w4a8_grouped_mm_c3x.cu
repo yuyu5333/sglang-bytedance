@@ -2,6 +2,7 @@
 #include <cudaTypedefs.h>
 #include <torch/all.h>
 
+#include <cstdlib>
 #include <type_traits>
 
 #include "cutlass/cutlass.h"
@@ -143,6 +144,14 @@ inline void invoke_gemm(
       act_scale_group,                         \
       expert_ids)
 #define INVOKE_GEMM_WITH_CONFIG_AS(Config) INVOKE_GEMM_WITH_CONFIG_AS_HELPER Config
+
+inline int get_forced_mxfp4_config(char const* name) {
+  char const* value = std::getenv(name);
+  if (value == nullptr || value[0] == '\0') {
+    return -1;
+  }
+  return std::atoi(value);
+}
 
 void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,
@@ -343,6 +352,31 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 4096 && k == 4096) {
     // GPT-OSS-like MXFP4A8 GEMM1 (hidden=4096, 2*inter=4096, E=256, topk=6).
+    int const forced_config = get_forced_mxfp4_config("SGL_MXFP4A8_GEMM1_CONFIG");
+    if (forced_config >= 0) {
+      switch (forced_config) {
+        case 0:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
+          return;
+        case 1:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
+          return;
+        case 2:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
+          return;
+        case 3:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 2, 1, 1>));
+          return;
+        case 4:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 1, 1, 1>));
+          return;
+        case 5:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 2, 1, 1>));
+          return;
+        default:
+          TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM1_CONFIG=", forced_config);
+      }
+    }
     if (compact_groups && m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
     } else if (m <= 256) {
@@ -356,6 +390,31 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 4096 && k == 2048) {
     // GPT-OSS-like MXFP4A8 GEMM2 (inter=2048, hidden=4096, E=256, topk=6).
+    int const forced_config = get_forced_mxfp4_config("SGL_MXFP4A8_GEMM2_CONFIG");
+    if (forced_config >= 0) {
+      switch (forced_config) {
+        case 0:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
+          return;
+        case 1:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
+          return;
+        case 2:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
+          return;
+        case 3:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 2, 1, 1>));
+          return;
+        case 4:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 1, 1, 1>));
+          return;
+        case 5:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 2, 1, 1>));
+          return;
+        default:
+          TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM2_CONFIG=", forced_config);
+      }
+    }
     if (compact_groups && m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 256) {
