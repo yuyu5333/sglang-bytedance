@@ -65,6 +65,22 @@ using SM90_PP_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::PP, WType::MXFP4>;
 template <int M, int N, int K, int A, int B, int C>
 using SM90_CO_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::CO, WType::MXFP4>;
 
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+template <int N>
+struct SM90_SWG_MXFP4 {
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<128>>;
+  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
+  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
+      TileShape,
+      ClusterShape,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
+      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
+      typename QuantTraits<WType::MXFP4>::Element,
+      QuantTraits<WType::MXFP4>::GroupSize,
+      true>;
+};
+#endif
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -379,6 +395,20 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
         case 7:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 2, 1, 1>));
           return;
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+        case 100:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
+          return;
+        case 101:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
+          return;
+        case 102:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
+          return;
+        case 103:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
+          return;
+#endif
         default:
           TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM1_CONFIG=", forced_config);
       }
@@ -423,6 +453,20 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
         case 7:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 2, 1, 1>));
           return;
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+        case 100:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
+          return;
+        case 101:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
+          return;
+        case 102:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
+          return;
+        case 103:
+          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
+          return;
+#endif
         default:
           TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM2_CONFIG=", forced_config);
       }

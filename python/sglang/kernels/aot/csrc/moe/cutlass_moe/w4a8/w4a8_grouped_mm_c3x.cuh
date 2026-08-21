@@ -23,13 +23,21 @@
 #include <cuda_runtime.h>
 #include <torch/all.h>
 
+#include <type_traits>
+
 #include "cutlass/cutlass.h"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+#include "cutlass/gemm/kernel/tile_scheduler_params.h"
+#endif
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+#include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
+#endif
 #include "w4a8_get_group_starts.cuh"
 
 using namespace cute;
@@ -79,13 +87,20 @@ template <
     // int4a8 instantiations are byte-identical; pass cutlass::float_e2m1_t for mxfp4a8.
     typename QuantTypeB = QuantType,
     // K-wise quant group size. int4a8 uses 128; mxfp4a8 (E8M0 block) uses 32.
-    int GroupSizeK = 128>
+    int GroupSizeK = 128,
+    bool UseSingleWarpgroup = false>
 struct cutlass_3x_w4a8_group_gemm {
+  static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScalePacked = cutlass::Array<ElementScale, PackedScalesNum>;
   // Alignment for the 4-bit weight operand (int4b_t / float_e2m1_t are both 4-bit).
   static constexpr int AlignmentQuantB = 128 / cutlass::sizeof_bits<QuantTypeB>::value;
+  static_assert(!UseSingleWarpgroup || std::is_same_v<QuantTypeB, cutlass::float_e2m1_t>);
+  static_assert(!UseSingleWarpgroup || GroupSize == 32);
+  static_assert(!UseSingleWarpgroup || cute::size(ClusterShape{}) == 1);
+  static_assert(!UseSingleWarpgroup || cute::size<0>(TileShape{}) == 128);
+  static_assert(!UseSingleWarpgroup || cute::size<2>(TileShape{}) == 128);
 
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       ArchTag,
@@ -115,16 +130,38 @@ struct cutlass_3x_w4a8_group_gemm {
       ElementAccumulator,
       TileShape,
       ClusterShape,
-      cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-          sizeof(typename CollectiveEpilogue::SharedStorage))>,
+      std::conditional_t<
+          UseSingleWarpgroup,
+          cutlass::gemm::collective::StageCount<3>,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+              sizeof(typename CollectiveEpilogue::SharedStorage))>>,
       KernelSchedule>::CollectiveOp;
 
   // Expose the weight quant type so the caller can cast device pointers correctly.
   using ElementQuantB = QuantTypeB;
 
   // Define the final kernel and GEMM operation types
-  using GemmKernelScaleOnly =
-      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>;
+  static constexpr int SingleWarpgroupTileN = cute::size<1>(TileShape{});
+  static_assert(
+      !UseSingleWarpgroup ||
+      (SingleWarpgroupTileN == 8 || SingleWarpgroupTileN == 16 || SingleWarpgroupTileN == 32 ||
+       SingleWarpgroupTileN == 40));
+  static constexpr int SingleWarpgroupCtasPerSm = SingleWarpgroupTileN <= 16 ? 5 : (SingleWarpgroupTileN == 32 ? 4 : 3);
+
+  using GemmKernelScaleOnly = std::conditional_t<
+      UseSingleWarpgroup,
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+      cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
+          ProblemShape,
+          CollectiveMainloopScaleOnly,
+          CollectiveEpilogue,
+          SingleWarpgroupCtasPerSm,
+          3,
+          cutlass::gemm::kernel::SingleWarpgroupPipelineMode::PrefillAll>,
+#else
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>,
+#endif
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>>;
 
   using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
 
@@ -243,6 +280,11 @@ void cutlass_w4a8_group_gemm_caller(
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = a_tensors.device().index();
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
+  }
+#endif
 
   Args arguments;
   decltype(arguments.epilogue.thread) fusion_args;
@@ -298,6 +340,14 @@ void cutlass_w4a8_group_gemm_caller(
        static_cast<ElementD**>(out_ptrs.data_ptr()),
        static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
       hw_info};
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    using RasterOrderOptions =
+        typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
+    arguments.scheduler.max_swizzle_size = 8;
+    arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
+  }
+#endif
 
   // MXFP4A8: feed the activation block-scale into the mainloop's optional path.
   // These members default to nullptr, so the int4a8 path is unaffected.
