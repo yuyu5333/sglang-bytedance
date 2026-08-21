@@ -157,7 +157,7 @@ struct cutlass_3x_w4a8_group_gemm {
           CollectiveEpilogue,
           SingleWarpgroupCtasPerSm,
           3,
-          cutlass::gemm::kernel::SingleWarpgroupPipelineMode::PrefillAll>,
+          cutlass::gemm::kernel::SingleWarpgroupPipelineMode::RollingRefill>,
 #else
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>,
 #endif
