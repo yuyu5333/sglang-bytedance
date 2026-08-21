@@ -287,7 +287,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         if output.numel() == 0:
             return
         m, row_stride = output.shape
-        block = min(1024, triton.next_power_of_2(row_stride))
+        block = 256
         _apply_shuffle_mul_sum_fp32_factors_kernel[
             (m, triton.cdiv(row_stride, block))
         ](
