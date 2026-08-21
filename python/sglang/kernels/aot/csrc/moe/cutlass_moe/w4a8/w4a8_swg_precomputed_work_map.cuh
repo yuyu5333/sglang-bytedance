@@ -6,7 +6,7 @@
 #include "cutlass/kernel_hardware_info.hpp"
 #include "cutlass_extensions/gemm/kernel/sm90_tile_scheduler_group_precomputed.hpp"
 
-namespace {
+namespace sgl_kernel::swg_detail {
 
 using SwgWorkTile = cutlass::gemm::kernel::detail::PrecomputedGroupWorkTile;
 
@@ -187,4 +187,4 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   return result;
 }
 
-}  // namespace
+}  // namespace sgl_kernel::swg_detail

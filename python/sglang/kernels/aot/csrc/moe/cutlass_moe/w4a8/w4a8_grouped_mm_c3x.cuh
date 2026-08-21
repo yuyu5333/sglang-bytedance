@@ -350,7 +350,7 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
-    auto swg_work_map = build_swg_precomputed_work_map<Gemm>(
+    auto swg_work_map = sgl_kernel::swg_detail::build_swg_precomputed_work_map<Gemm>(
         problem_sizes_as_shapes,
         num_experts,
         static_cast<uint64_t>(d_tensors.size(0)),
@@ -359,7 +359,7 @@ void cutlass_w4a8_group_gemm_caller(
         a_tensors.device(),
         stream);
     swg_work_map_storage = std::move(swg_work_map.storage);
-    arguments.scheduler.max_swizzle_size = kSwgWorkMapMaxSwizzle;
+    arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
     arguments.scheduler.precomputed_work_tiles =
         static_cast<uint64_t const*>(swg_work_map_storage.data_ptr());
