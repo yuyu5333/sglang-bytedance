@@ -210,6 +210,7 @@ struct CollectiveBuilderMixedInput<
                                                   ElementScale,
                                                   ElementZero,
                                                   TileShape_MNK,
+                                                  StageCountType::bytes,
                                                   SmemAlignment>(StageCountType{})
                                             : detail::compute_stage_count_or_override_single_affine_transformed_input<
                                                   detail::sm90_smem_capacity_bytes,
@@ -218,12 +219,14 @@ struct CollectiveBuilderMixedInput<
                                                   ElementScale,
                                                   ElementZero,
                                                   TileShape_MNK,
+                                                  StageCountType::bytes,
                                                   SmemAlignment>(StageCountType{}))
                    : detail::compute_stage_count_or_override<
                          detail::sm90_smem_capacity_bytes,
                          ElementAMma,
                          ElementBMma,
                          TileShape_MNK,
+                         StageCountType::bytes,
                          SmemAlignment>(StageCountType{});
 
   using DispatchPolicy = cute::conditional_t<
