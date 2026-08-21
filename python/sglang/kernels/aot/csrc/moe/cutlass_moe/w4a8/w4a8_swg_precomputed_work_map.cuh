@@ -83,10 +83,10 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
       int64_t const term_m = static_cast<int64_t>(M) * static_cast<int64_t>(stride_m);
       int64_t const term_k = static_cast<int64_t>(K) * static_cast<int64_t>(stride_k);
       int64_t const stride_l = term_m > term_k ? term_m : term_k;
-      auto tensor_a = make_tensor(
+      auto tensor_a = cute::make_tensor(
           ptr_a,
-          make_layout(
-              make_shape(M, K, static_cast<uint32_t>(mainloop_params.num_groups)),
+          cute::make_layout(
+              cute::make_shape(M, K, static_cast<uint32_t>(mainloop_params.num_groups)),
               cute::make_stride(stride_m, stride_k, stride_l)));
 
       smem_desc = *mainloop_params.tma_load_a.get_tma_descriptor();
@@ -118,10 +118,10 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     auto d_b = mainloop_params.ptr_dB[group];
     auto stride_n = cute::get<0>(d_b);
     auto stride_k = cute::get<1>(d_b);
-    auto tensor_b = make_tensor(
+    auto tensor_b = cute::make_tensor(
         ptr_b,
-        make_layout(
-            make_shape(N, K, uint32_t(1)),
+        cute::make_layout(
+            cute::make_shape(N, K, uint32_t(1)),
             cute::make_stride(stride_n, stride_k, int64_t(0))));
 
     smem_desc = *mainloop_params.tma_load_b.get_tma_descriptor();
