@@ -191,7 +191,8 @@ struct cutlass_3x_w4a8_group_gemm {
       !UseSingleWarpgroup ||
       (SingleWarpgroupTileN == 8 || SingleWarpgroupTileN == 16 || SingleWarpgroupTileN == 32 ||
        SingleWarpgroupTileN == 40));
-  static constexpr int SingleWarpgroupCtasPerSm = 1;
+  static constexpr int SingleWarpgroupCtasPerSm =
+      SingleWarpgroupTileN <= 16 ? 5 : (SingleWarpgroupTileN == 32 ? 4 : 3);
 
   using GemmKernelScaleOnly = std::conditional_t<
       UseSingleWarpgroupKernel,
