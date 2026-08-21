@@ -37,16 +37,20 @@ namespace cutlass::gemm::collective {
 namespace detail {
 
 template <class StageCountType>
-struct stage_count_carveout_bytes;
+struct stage_count_traits;
 
 template <int Stages>
-struct stage_count_carveout_bytes<StageCount<Stages>> {
-  static constexpr int value = 0;
+struct stage_count_traits<StageCount<Stages>> {
+  static constexpr bool is_fixed = true;
+  static constexpr int stages = Stages;
+  static constexpr int carveout_bytes = 0;
 };
 
 template <int CarveoutBytes>
-struct stage_count_carveout_bytes<StageCountAutoCarveout<CarveoutBytes>> {
-  static constexpr int value = CarveoutBytes;
+struct stage_count_traits<StageCountAutoCarveout<CarveoutBytes>> {
+  static constexpr bool is_fixed = false;
+  static constexpr int stages = 0;
+  static constexpr int carveout_bytes = CarveoutBytes;
 };
 
 }  // namespace detail
@@ -219,32 +223,41 @@ struct CollectiveBuilderMixedInput<
   static constexpr int KernelSmemCarveout = static_cast<int>(TensorMapStorage);
   static constexpr int Sm90ReducedSmemCapacityBytes = detail::sm90_smem_capacity_bytes - KernelSmemCarveout;
 
-  static constexpr int PipelineStages =
-      IsMixedInput ? (IsArrayOfPointersGemm ? detail::compute_stage_count_or_override_single_affine_transformed_input<
-                                                  Sm90ReducedSmemCapacityBytes,
-                                                  RealElementA,
-                                                  RealElementB,
-                                                  ElementScale,
-                                                  ElementZero,
-                                                  TileShape_MNK,
-                                                  detail::stage_count_carveout_bytes<StageCountType>::value,
-                                                  SmemAlignment>(StageCountType{})
-                                            : detail::compute_stage_count_or_override_single_affine_transformed_input<
-                                                  detail::sm90_smem_capacity_bytes,
-                                                  RealElementA,
-                                                  RealElementB,
-                                                  ElementScale,
-                                                  ElementZero,
-                                                  TileShape_MNK,
-                                                  detail::stage_count_carveout_bytes<StageCountType>::value,
-                                                  SmemAlignment>(StageCountType{}))
-                   : detail::compute_stage_count_or_override<
-                         detail::sm90_smem_capacity_bytes,
-                         ElementAMma,
-                         ElementBMma,
-                         TileShape_MNK,
-                         detail::stage_count_carveout_bytes<StageCountType>::value,
-                         SmemAlignment>(StageCountType{});
+  static constexpr int PipelineStages = [] {
+    if constexpr (detail::stage_count_traits<StageCountType>::is_fixed) {
+      return detail::stage_count_traits<StageCountType>::stages;
+    } else if constexpr (IsMixedInput) {
+      if constexpr (IsArrayOfPointersGemm) {
+        return detail::compute_stage_count_or_override_single_affine_transformed_input<
+            Sm90ReducedSmemCapacityBytes,
+            RealElementA,
+            RealElementB,
+            ElementScale,
+            ElementZero,
+            TileShape_MNK,
+            detail::stage_count_traits<StageCountType>::carveout_bytes,
+            SmemAlignment>(StageCountType{});
+      } else {
+        return detail::compute_stage_count_or_override_single_affine_transformed_input<
+            detail::sm90_smem_capacity_bytes,
+            RealElementA,
+            RealElementB,
+            ElementScale,
+            ElementZero,
+            TileShape_MNK,
+            detail::stage_count_traits<StageCountType>::carveout_bytes,
+            SmemAlignment>(StageCountType{});
+      }
+    } else {
+      return detail::compute_stage_count_or_override<
+          detail::sm90_smem_capacity_bytes,
+          ElementAMma,
+          ElementBMma,
+          TileShape_MNK,
+          detail::stage_count_traits<StageCountType>::carveout_bytes,
+          SmemAlignment>(StageCountType{});
+    }
+  }();
 
   using DispatchPolicy = cute::conditional_t<
       IsMixedInput,
