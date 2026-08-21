@@ -283,7 +283,7 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
       // problem count at the metadata level.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
     } else if (m <= 4) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 2, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
     } else if (m <= 32) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
     } else if (m <= 256) {
@@ -304,7 +304,7 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
       // expert; compact metadata removes empty grouped problems.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 16, 128, 1, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 512) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 4096) {
@@ -318,7 +318,7 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     if (compact_groups && m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
     } else if (m <= 4) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 2, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
     } else if (m <= 32) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
     } else if (m <= 256) {
@@ -333,13 +333,13 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     if (compact_groups && m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 8) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 16, 128, 1, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 32) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
     } else if (m <= 512) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 2, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 2, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 64, 128, 1, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 1, 1, 1>));
     }
   } else if (n == 4096 && k == 4096) {
     // GPT-OSS-like MXFP4A8 GEMM1 (hidden=4096, 2*inter=4096, E=256, topk=6).
@@ -380,10 +380,10 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     } else {
       if (m <= 32) {
         // Decode: target batch size (16-32) - use larger tile for better throughput
-        INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
+        INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
       } else {
         // Prefill: larger sequence length
-        INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 64, 128, 1, 1, 1>));
+        INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 1, 1, 1>));
       }
     }
   }
