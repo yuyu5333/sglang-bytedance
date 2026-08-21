@@ -21,12 +21,12 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import torch
+import triton
+import triton.language as tl
 
 from sglang.srt.model_executor.runner_utils.capture_mode import get_is_capture_mode
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import is_cuda_alike
-
-from sglang.srt.layers.mxfp4a8_utils import build_grouped_act_block_scale
 
 _is_cuda_alike = is_cuda_alike()
 
@@ -51,7 +51,36 @@ if _is_cuda_alike:
 
 
 MXFP4_CHUNK_SIZE = 32
+MXFP4_PACKED_SCALES = 4
 _FP8_QUANT_EPS = 1e-10
+
+
+@triton.jit
+def _scatter_fixed_act_block_scale_kernel(
+    scale_ptr,
+    packed_ptr,
+    expert_offsets_ptr,
+    total_m: tl.constexpr,
+    nblk: tl.constexpr,
+    m_stride: tl.constexpr,
+    num_experts: tl.constexpr,
+    A: tl.constexpr,
+    BLKN: tl.constexpr,
+):
+    row = tl.program_id(0)
+    blk = tl.program_id(1) * BLKN + tl.arange(0, BLKN)
+    mask = blk < nblk
+
+    eid = tl.full((), 0, tl.int64)
+    for e in tl.range(0, num_experts):
+        next_off = tl.load(expert_offsets_ptr + e + 1).to(tl.int64)
+        eid = tl.where(row >= next_off, e + 1, eid)
+    local_row = row - tl.load(expert_offsets_ptr + eid).to(tl.int64)
+
+    val = tl.load(scale_ptr + row * nblk + blk, mask=mask, other=0.0)
+    expert_base = eid * m_stride * nblk
+    dst = expert_base + (blk // A) * (m_stride * A) + local_row * A + (blk % A)
+    tl.store(packed_ptr + dst, val.to(packed_ptr.dtype.element_ty), mask=mask)
 
 
 class CutlassMxfp4A8FusedMoeRunner:
@@ -73,6 +102,63 @@ class CutlassMxfp4A8FusedMoeRunner:
             tensor = torch.empty(shape, dtype=dtype, device=device)
             self._workspace[key] = tensor
         return tensor
+
+    def _fixed_act_scale_strides(
+        self,
+        num_experts: int,
+        m_stride: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        key = ("as_strides", (num_experts, m_stride), torch.int64, device.index or 0)
+        tensor = self._workspace.get(key)
+        if tensor is None or tensor.device != device:
+            expert_prefix = torch.arange(
+                num_experts, dtype=torch.int64, device=device
+            ) * m_stride
+            tensor = torch.stack(
+                [
+                    torch.full(
+                        (num_experts,), m_stride, dtype=torch.int64, device=device
+                    ),
+                    expert_prefix,
+                ],
+                dim=1,
+            ).contiguous()
+            self._workspace[key] = tensor
+        return tensor
+
+    def _build_fixed_act_block_scale(
+        self,
+        scale: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        num_experts: int,
+        name: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        total_m, nblk = scale.shape
+        assert nblk % MXFP4_PACKED_SCALES == 0
+        m_stride = max(2, (total_m + 1) & ~1)
+        packed = self._empty(
+            name,
+            (num_experts * m_stride * nblk,),
+            torch.bfloat16,
+            scale.device,
+        )
+        strides = self._fixed_act_scale_strides(num_experts, m_stride, scale.device)
+        if total_m > 0:
+            _scatter_fixed_act_block_scale_kernel[
+                (total_m, triton.cdiv(nblk, triton.next_power_of_2(nblk)))
+            ](
+                scale,
+                packed,
+                expert_offsets,
+                total_m,
+                nblk,
+                m_stride,
+                num_experts,
+                A=MXFP4_PACKED_SCALES,
+                BLKN=triton.next_power_of_2(nblk),
+            )
+        return packed, strides
 
     def _quantize_mxfp8_into(
         self,
@@ -240,11 +326,8 @@ class CutlassMxfp4A8FusedMoeRunner:
             "a1_blk_scale", (m * topk, k // MXFP4_CHUNK_SIZE), torch.float32, device
         )
         self._quantize_mxfp8_into(gateup_input_bf16, gateup_input, a1_blk_scale)
-        a1_as_packed, a1_as_strides = build_grouped_act_block_scale(
-            a1_blk_scale,
-            expert_offsets,
-            block_size=MXFP4_CHUNK_SIZE,
-            capture_safe=True,
+        a1_as_packed, a1_as_strides = self._build_fixed_act_block_scale(
+            a1_blk_scale, expert_offsets, num_local_experts, "a1_as_packed"
         )
 
         active_expert_ids = None
@@ -318,11 +401,8 @@ class CutlassMxfp4A8FusedMoeRunner:
             "a2_blk_scale", (m * topk, n // MXFP4_CHUNK_SIZE), torch.float32, device
         )
         self._silu_mul_quant_into(c1, intermediate_q, a2_blk_scale, n, swiglu_limit)
-        a2_as_packed, a2_as_strides = build_grouped_act_block_scale(
-            a2_blk_scale,
-            expert_offsets,
-            block_size=MXFP4_CHUNK_SIZE,
-            capture_safe=True,
+        a2_as_packed, a2_as_strides = self._build_fixed_act_block_scale(
+            a2_blk_scale, expert_offsets, num_local_experts, "a2_as_packed"
         )
         a2_as_strides_gemm = (
             a2_as_strides.index_select(0, active_expert_ids.to(torch.long))
