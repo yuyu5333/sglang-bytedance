@@ -53,6 +53,49 @@ struct stage_count_traits<StageCountAutoCarveout<CarveoutBytes>> {
   static constexpr int carveout_bytes = CarveoutBytes;
 };
 
+template <
+    int CapacityBytes,
+    class ElementA,
+    class ElementB,
+    class ElementScale,
+    class ElementZero,
+    class TileShapeMNK,
+    int Alignment = 128,
+    int CarveoutBytes>
+constexpr int compute_stage_count_or_override_folded_weight_scale(
+    StageCountAutoCarveout<CarveoutBytes>) {
+  constexpr auto mainloop_pipeline_bytes =
+      sizeof(typename cutlass::PipelineTmaAsync<1>::SharedStorage);
+  constexpr auto a_bits = cute::sizeof_bits_v<ElementA>;
+  constexpr auto b_bits = cute::sizeof_bits_v<ElementB>;
+  constexpr auto s_bits = cute::sizeof_bits_v<ElementScale>;
+  constexpr auto z_bits = get_bits_for_possibly_void_element<ElementZero>();
+  constexpr int scale_group_size = DefaultWeightScaleGroupSize<ElementA>::value;
+
+  static_assert(
+      (size<2>(TileShapeMNK{}) % scale_group_size) == 0,
+      "Folded weight-scale storage requires TileK to cover complete scale groups.");
+
+  constexpr auto scale_bytes = cutlass::bits_to_bytes(
+      s_bits * size<0>(TileShapeMNK{}) * size<2>(TileShapeMNK{}) / scale_group_size);
+  constexpr auto zero_bytes = cutlass::bits_to_bytes(z_bits * size<0>(TileShapeMNK{}));
+  static_assert(
+      scale_bytes % 16 == 0,
+      "Folded weight-scale bulk copy must be at least 16B aligned.");
+  static_assert(zero_bytes % 128 == 0, "Zero bytes must be a multiple of 128");
+
+  constexpr int stage_bytes_ =
+      cutlass::bits_to_bytes(a_bits * size<0>(TileShapeMNK{}) * size<2>(TileShapeMNK{})) +
+      cutlass::bits_to_bytes(b_bits * size<1>(TileShapeMNK{}) * size<2>(TileShapeMNK{})) +
+      scale_bytes + zero_bytes;
+  constexpr int stage_bytes =
+      cutlass::round_up(stage_bytes_, Alignment) + static_cast<int>(mainloop_pipeline_bytes);
+  constexpr int carveout_bytes = cutlass::round_up(CarveoutBytes, Alignment);
+  constexpr int capacity_bytes = CapacityBytes / Alignment * Alignment;
+  constexpr int computed_stage_count = (capacity_bytes - carveout_bytes) / stage_bytes;
+  return computed_stage_count < 2 ? 2 : computed_stage_count;
+}
+
 }  // namespace detail
 
 // GMMA_TMA_WS_RS
@@ -67,7 +110,8 @@ template <
     class TileShape_MNK,
     class ClusterShape_MNK,
     class StageCountType,
-    class KernelScheduleType>
+    class KernelScheduleType,
+    MixedInputScaleMode ScaleMode>
 struct CollectiveBuilderMixedInput<
     arch::Sm90,
     arch::OpClassTensorOp,
@@ -82,6 +126,7 @@ struct CollectiveBuilderMixedInput<
     ClusterShape_MNK,
     StageCountType,
     KernelScheduleType,
+    ScaleMode,
     cute::enable_if_t<
         (cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecialized> ||
          cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedPingpong> ||
@@ -223,20 +268,33 @@ struct CollectiveBuilderMixedInput<
   static constexpr int KernelSmemCarveout = static_cast<int>(TensorMapStorage);
   static constexpr int Sm90ReducedSmemCapacityBytes = detail::sm90_smem_capacity_bytes - KernelSmemCarveout;
 
+  static constexpr bool UseFusedE8M0PreMmaScale = ScaleMode == MixedInputScaleMode::kPreMmaE8M0;
+
   static constexpr int PipelineStages = [] {
     if constexpr (detail::stage_count_traits<StageCountType>::is_fixed) {
       return detail::stage_count_traits<StageCountType>::stages;
     } else if constexpr (IsMixedInput) {
       if constexpr (IsArrayOfPointersGemm) {
-        return detail::compute_stage_count_or_override_single_affine_transformed_input<
-            Sm90ReducedSmemCapacityBytes,
-            RealElementA,
-            RealElementB,
-            ElementScale,
-            ElementZero,
-            TileShape_MNK,
-            detail::stage_count_traits<StageCountType>::carveout_bytes,
-            SmemAlignment>(StageCountType{});
+        if constexpr (UseFusedE8M0PreMmaScale) {
+          return detail::compute_stage_count_or_override_folded_weight_scale<
+              Sm90ReducedSmemCapacityBytes,
+              RealElementA,
+              RealElementB,
+              ElementScale,
+              ElementZero,
+              TileShape_MNK,
+              SmemAlignment>(StageCountType{});
+        } else {
+          return detail::compute_stage_count_or_override_single_affine_transformed_input<
+              Sm90ReducedSmemCapacityBytes,
+              RealElementA,
+              RealElementB,
+              ElementScale,
+              ElementZero,
+              TileShape_MNK,
+              detail::stage_count_traits<StageCountType>::carveout_bytes,
+              SmemAlignment>(StageCountType{});
+        }
       } else {
         return detail::compute_stage_count_or_override_single_affine_transformed_input<
             detail::sm90_smem_capacity_bytes,
@@ -259,11 +317,24 @@ struct CollectiveBuilderMixedInput<
     }
   }();
 
+  static_assert(
+      !UseFusedE8M0PreMmaScale || (IsArrayOfPointersGemm && IsATransformed &&
+                                   cute::is_same_v<ElementA, cutlass::float_e2m1_t> &&
+                                   cute::is_same_v<ElementB, cutlass::float_e4m3_t>),
+      "Pre-MMA E8M0 scale mode is only implemented for grouped MXFP4 weight x FP8 activation.");
+
+  using ArrayMixedInputDispatchPolicy = cute::conditional_t<
+      UseFusedE8M0PreMmaScale,
+      MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+          PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+      MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<
+          PipelineStages, ClusterShape_MNK, KernelScheduleType>>;
+
   using DispatchPolicy = cute::conditional_t<
       IsMixedInput,
       cute::conditional_t<
           IsArrayOfPointersGemm,
-          MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+          ArrayMixedInputDispatchPolicy,
           MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
       MainloopSm90TmaGmmaRmemAWarpSpecialized<PipelineStages, ClusterShape_MNK, KernelScheduleType>>;
 
