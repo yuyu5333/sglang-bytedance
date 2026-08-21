@@ -32,7 +32,6 @@ _is_cuda_alike = is_cuda_alike()
 
 if _is_cuda_alike:
     from sgl_kernel import (
-        apply_shuffle_mul_sum_fp32_factors,
         cutlass_mxfp4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
         prepare_moe_input,
@@ -113,6 +112,36 @@ def _shuffle_quantize_mxfp8_kernel(
 
     tl.store(out_q_ptr + row * k + cols, q_vals.to(out_q_ptr.dtype.element_ty), mask=mask)
     tl.store(out_s_ptr + row * nblk + groups, scales, mask=(row < total_m) & (groups < nblk))
+
+
+@triton.jit
+def _apply_shuffle_mul_sum_fp32_factors_kernel(
+    input_ptr,
+    output_ptr,
+    perm_ptr,
+    factors_ptr,
+    m,
+    topk: tl.constexpr,
+    row_stride: tl.constexpr,
+    routed_scaling_factor: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    block = tl.program_id(1)
+    offs = block * BLOCK + tl.arange(0, BLOCK)
+    mask = (token < m) & (offs < row_stride)
+
+    acc = tl.zeros((BLOCK,), tl.float32)
+    for j in tl.range(0, topk):
+        token_major_idx = token * topk + j
+        src_row = tl.load(perm_ptr + token_major_idx).to(tl.int64)
+        vals = tl.load(
+            input_ptr + src_row * row_stride + offs, mask=mask, other=0.0
+        ).to(tl.float32)
+        factor = tl.load(factors_ptr + token_major_idx).to(tl.float32)
+        acc += vals * factor * routed_scaling_factor
+
+    tl.store(output_ptr + token * row_stride + offs, acc, mask=mask)
 
 
 class CutlassMxfp4A8FusedMoeRunner:
@@ -244,6 +273,33 @@ class CutlassMxfp4A8FusedMoeRunner:
             fp8_max=float(fp8_max),
             GROUP_SIZE=MXFP4_CHUNK_SIZE,
             BLOCK_GROUPS=8,
+        )
+
+    def _apply_shuffle_mul_sum_fp32_factors(
+        self,
+        c2: torch.Tensor,
+        output: torch.Tensor,
+        c_map: torch.Tensor,
+        factors: torch.Tensor,
+        routed_scaling_factor: float,
+        topk: int,
+    ) -> None:
+        if output.numel() == 0:
+            return
+        m, row_stride = output.shape
+        block = min(1024, triton.next_power_of_2(row_stride))
+        _apply_shuffle_mul_sum_fp32_factors_kernel[
+            (m, triton.cdiv(row_stride, block))
+        ](
+            c2,
+            output,
+            c_map,
+            factors,
+            m,
+            topk,
+            row_stride,
+            routed_scaling_factor,
+            BLOCK=block,
         )
 
     def _silu_mul_quant_into(
@@ -490,8 +546,8 @@ class CutlassMxfp4A8FusedMoeRunner:
 
         output = self._empty("output", tuple(a.shape), a.dtype, device)
         factors = topk_weights.reshape(-1).contiguous()
-        apply_shuffle_mul_sum_fp32_factors(
-            c2, output, c_map, factors, float(routed_scaling_factor)
+        self._apply_shuffle_mul_sum_fp32_factors(
+            c2, output, c_map, factors, float(routed_scaling_factor), topk
         )
         return output
 

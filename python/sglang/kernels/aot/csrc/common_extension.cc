@@ -197,11 +197,6 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("apply_shuffle_mul_sum(Tensor input, Tensor output, Tensor permutation, Tensor? factors) -> ()");
   m.impl("apply_shuffle_mul_sum", torch::kCUDA, &apply_shuffle_mul_sum);
 
-  m.def(
-      "apply_shuffle_mul_sum_fp32_factors(Tensor input, Tensor output, Tensor permutation, Tensor factors, "
-      "float routed_scaling_factor) -> ()");
-  m.impl("apply_shuffle_mul_sum_fp32_factors", torch::kCUDA, &apply_shuffle_mul_sum_fp32_factors);
-
   // DeepSeek-V4 fused norm + rope
   m.def(
       "dsv4_fused_q_norm_rope(Tensor q_input, Tensor! q_output, Tensor freqs_cis, Tensor positions, float eps) -> ()");

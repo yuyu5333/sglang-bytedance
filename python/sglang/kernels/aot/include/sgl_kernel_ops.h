@@ -341,13 +341,6 @@ void apply_shuffle_mul_sum(
     const torch::Tensor& permutation,
     const std::optional<torch::Tensor>& factors);
 
-void apply_shuffle_mul_sum_fp32_factors(
-    const torch::Tensor& input,
-    torch::Tensor& output,
-    const torch::Tensor& permutation,
-    const torch::Tensor& factors,
-    double routed_scaling_factor);
-
 /*
  * From csrc/elementwise (DeepSeek-V4 norm + rope)
  */
