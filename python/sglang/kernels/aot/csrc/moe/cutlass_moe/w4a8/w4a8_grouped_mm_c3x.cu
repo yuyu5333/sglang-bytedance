@@ -268,6 +268,7 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
   uint32_t const m = a_tensors.size(0) / topk;
   uint32_t const n = d_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
+  bool const compact_groups = expert_ids.has_value();
 
   // MXFP4A8 TMA constraint: the group scale is loaded as one packed element
   // Array<bf16, TileK / GroupSize>. SM90 TMA supports at most a 64-bit element,
@@ -276,7 +277,12 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
   // Host-side weight and activation scale packing must therefore remain 4-wide.
   if (n == 4096 && k == 7168) {
     // group gemm 1
-    if (m <= 4) {
+    if (compact_groups && m <= 256) {
+      // Compact decode: active experts are dense but each grouped problem has
+      // very few rows. Prefer pingpong with a single-M cluster to avoid the
+      // cooperative scheduler overhead on many tiny groups.
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 1, 1, 1>));
+    } else if (m <= 4) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 2, 1, 1>));
     } else if (m <= 32) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
@@ -293,7 +299,11 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 7168 && k == 2048) {
     // group gemm 2
-    if (m <= 8) {
+    if (compact_groups && m <= 256) {
+      // GEMM2 has wider N. Keep N=32 for enough wave-level work per active
+      // expert, but use pingpong to reduce latency on tiny per-expert M.
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
+    } else if (m <= 8) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 16, 128, 1, 1, 1>));
     } else if (m <= 512) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
@@ -305,7 +315,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 512 && k == 7168) {
     // group gemm 1 for tp
-    if (m <= 4) {
+    if (compact_groups && m <= 256) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 1, 1, 1>));
+    } else if (m <= 4) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 2, 1, 1>));
     } else if (m <= 32) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 2, 1, 1>));
@@ -318,7 +330,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 7168 && k == 256) {
     // group gemm 2 for tp (k==256 => two K-tiles at TileK=128)
-    if (m <= 8) {
+    if (compact_groups && m <= 256) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
+    } else if (m <= 8) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 16, 128, 1, 1, 1>));
     } else if (m <= 32) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
@@ -329,7 +343,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 4096 && k == 4096) {
     // GPT-OSS-like MXFP4A8 GEMM1 (hidden=4096, 2*inter=4096, E=256, topk=6).
-    if (m <= 256) {
+    if (compact_groups && m <= 256) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 1, 1, 1>));
+    } else if (m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
     } else if (m <= 1024) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 2, 1, 1>));
@@ -340,7 +356,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     }
   } else if (n == 4096 && k == 2048) {
     // GPT-OSS-like MXFP4A8 GEMM2 (inter=2048, hidden=4096, E=256, topk=6).
-    if (m <= 256) {
+    if (compact_groups && m <= 256) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
+    } else if (m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
     } else if (m <= 1024) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 2, 1, 1>));
@@ -350,7 +368,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
   } else {
     if (k % 128 == 0) {
       // TileK=128 uses the legal 64-bit Array<bf16,4> TMA scale element.
-      if (m <= 32) {
+      if (compact_groups && m <= 256) {
+        INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<128, 32, 128, 1, 1, 1>));
+      } else if (m <= 32) {
         INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
       } else if (m <= 1024) {
         INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
