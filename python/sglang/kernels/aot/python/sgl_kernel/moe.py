@@ -188,6 +188,18 @@ def apply_shuffle_mul_sum(
     )
 
 
+def apply_shuffle_mul_sum_fp32_factors(
+    input,
+    output,
+    permutation,
+    factors,
+    routed_scaling_factor: float = 1.0,
+):
+    torch.ops.sgl_kernel.apply_shuffle_mul_sum_fp32_factors.default(
+        input, output, permutation, factors, routed_scaling_factor
+    )
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,
