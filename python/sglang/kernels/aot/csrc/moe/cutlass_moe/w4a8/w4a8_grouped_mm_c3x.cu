@@ -374,27 +374,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 2, 1, 1>));
           return;
         case 6:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 16, 128, 1, 1, 1>));
-          return;
-        case 7:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 1, 1, 1>));
-          return;
-        case 8:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 64, 128, 1, 1, 1>));
-          return;
-        case 9:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<64, 16, 128, 1, 1, 1>));
-          return;
-        case 10:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<64, 32, 128, 1, 1, 1>));
-          return;
-        case 11:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<64, 64, 128, 1, 1, 1>));
-          return;
-        case 12:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 1, 1, 1>));
           return;
-        case 13:
+        case 7:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 2, 1, 1>));
           return;
         default:
@@ -436,27 +418,9 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 2, 1, 1>));
           return;
         case 6:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 16, 128, 1, 1, 1>));
-          return;
-        case 7:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 32, 128, 1, 1, 1>));
-          return;
-        case 8:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_PP_MXFP4<64, 64, 128, 1, 1, 1>));
-          return;
-        case 9:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<64, 16, 128, 1, 1, 1>));
-          return;
-        case 10:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<64, 32, 128, 1, 1, 1>));
-          return;
-        case 11:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<64, 64, 128, 1, 1, 1>));
-          return;
-        case 12:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 1, 1, 1>));
           return;
-        case 13:
+        case 7:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 2, 1, 1>));
           return;
         default:
