@@ -351,7 +351,10 @@ target_compile_options(common_ops_sm90_build PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS} -use_fast_math>
 )
 if (SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-    target_compile_definitions(common_ops_sm90_build PRIVATE SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL=1)
+    target_compile_definitions(common_ops_sm90_build PRIVATE
+        SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL=1
+        CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS=1
+    )
 endif()
 target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
 # Set output name and separate build directory to avoid conflicts
