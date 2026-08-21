@@ -170,7 +170,7 @@ __global__ void compute_arg_sorts_w4a8(
     const int64_t topk) {
   int expert_id = blockIdx.x;
 
-  for (int i = threadIdx.x; i < topk_length; i += THREADS_PER_EXPERT) {
+  for (int i = threadIdx.x; i < topk_length; i += blockDim.x) {
     if (topk_ids[i] == expert_id) {
       int start = atomicAdd(&atomic_buffer[expert_id], 1);
       input_permutation[start] = i / topk;
