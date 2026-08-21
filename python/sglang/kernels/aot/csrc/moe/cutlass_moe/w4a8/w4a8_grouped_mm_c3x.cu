@@ -158,6 +158,9 @@ void dispatch_w4a8_moe_mm_sm90(
     torch::Tensor const& s_strides,
     int64_t chunk_size,
     int64_t topk) {
+#if defined(SGL_KERNEL_DISABLE_W4A8_INT4)
+  TORCH_CHECK(false, "INT4 W4A8 grouped GEMM kernels are disabled in this build");
+#else
   uint32_t const m = a_tensors.size(0) / topk;
   uint32_t const n = d_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
@@ -238,6 +241,7 @@ void dispatch_w4a8_moe_mm_sm90(
       }
     }
   }
+#endif
 }
 
 void dispatch_w4a8_mxfp4_moe_mm_sm90(
@@ -336,10 +340,10 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
     // GPT-OSS-like MXFP4A8 GEMM2 (inter=2048, hidden=4096, E=256, topk=6).
     if (m <= 256) {
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
-    } else if (m <= 2048) {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 16, 128, 1, 1, 1>));
+    } else if (m <= 1024) {
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 2, 1, 1>));
     } else {
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 32, 128, 1, 1, 1>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 64, 128, 2, 1, 1>));
     }
   } else {
     if (k % 128 == 0) {

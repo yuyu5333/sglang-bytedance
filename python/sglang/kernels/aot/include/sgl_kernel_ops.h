@@ -402,6 +402,17 @@ void get_cutlass_w4a8_moe_mm_data(
     const int64_t n,
     const int64_t k);
 
+void get_cutlass_w4a8_moe_mm_data_with_permutation(
+    const torch::Tensor& topk_ids,
+    torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation,
+    torch::Tensor& output_permutation,
+    const int64_t num_experts,
+    const int64_t n,
+    const int64_t k);
+
 void cutlass_w4a8_moe_mm(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -433,7 +444,8 @@ void cutlass_mxfp4a8_moe_mm(
     int64_t topk,
     std::optional<torch::Tensor> act_block_scales,
     std::optional<torch::Tensor> as_strides,
-    int64_t act_scale_group);
+    int64_t act_scale_group,
+    std::optional<torch::Tensor> expert_ids);
 /*
  * From csrc/speculative
  */

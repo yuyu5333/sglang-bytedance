@@ -232,6 +232,17 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("get_cutlass_w4a8_moe_mm_data", torch::kCUDA, &get_cutlass_w4a8_moe_mm_data);
 
   m.def(
+      "get_cutlass_w4a8_moe_mm_data_with_permutation(Tensor topk_ids, Tensor! expert_offsets, "
+      "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "                        Tensor! input_permutation, "
+      "                        Tensor! output_permutation, int num_experts, "
+      "                        int n, int k) -> ()");
+  m.impl(
+      "get_cutlass_w4a8_moe_mm_data_with_permutation",
+      torch::kCUDA,
+      &get_cutlass_w4a8_moe_mm_data_with_permutation);
+
+  m.def(
       "cutlass_w4a8_moe_mm(Tensor! d, Tensor a, Tensor b, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "

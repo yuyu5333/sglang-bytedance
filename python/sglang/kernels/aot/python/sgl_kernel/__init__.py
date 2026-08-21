@@ -32,6 +32,7 @@ else:
         cutlass_mxfp4a8_moe_mm,
         cutlass_w4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
+        get_cutlass_w4a8_moe_mm_data_with_permutation,
     )
     from sgl_kernel.elementwise import (
         concat_mla_absorb_q,
@@ -178,6 +179,7 @@ else:
         "gelu_tanh_and_mul",
         "gemma_fused_add_rmsnorm",
         "gemma_rmsnorm",
+        "get_cutlass_w4a8_moe_mm_data_with_permutation",
         "gptq_gemm",
         "gptq_shuffle",
         "int8_scaled_mm",

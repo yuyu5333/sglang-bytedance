@@ -184,7 +184,7 @@ def cutlass_mxfp4a8_moe(
         gateup_input_bf16, block_size=MXFP4_CHUNK_SIZE
     )
     a1_as_packed, a1_as_strides = build_grouped_act_block_scale(
-        a1_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE
+        a1_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE, capture_safe=True
     )
     if active_expert_ids is not None:
         active_idx = active_expert_ids.to(torch.long)
@@ -241,7 +241,7 @@ def cutlass_mxfp4a8_moe(
     # fp8 quant (native kernel when no clamp, Triton fallback for the clamp path).
     intermediate_q, a2_blk_scale = _silu_mul_quant(c1, n, swiglu_limit)
     a2_as_packed, a2_as_strides = build_grouped_act_block_scale(
-        a2_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE
+        a2_blk_scale, expert_offsets, block_size=MXFP4_CHUNK_SIZE, capture_safe=True
     )
     a2_as_strides_gemm = (
         a2_as_strides.index_select(0, active_expert_ids.to(torch.long))

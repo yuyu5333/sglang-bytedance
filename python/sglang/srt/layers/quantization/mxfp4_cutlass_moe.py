@@ -203,7 +203,9 @@ class Mxfp4CutlassMoEMethod:
         layer: Module,
         dispatch_output: DispatchOutput,
     ) -> CombineInput:
-        from sglang.srt.layers.moe.cutlass_mxfp4a8_moe import cutlass_mxfp4a8_moe
+        from sglang.srt.layers.moe.cutlass_mxfp4a8_fused_moe import (
+            cutlass_mxfp4a8_fused_moe,
+        )
         from sglang.srt.layers.moe.token_dispatcher.standard import (
             StandardCombineInput,
         )
@@ -211,7 +213,7 @@ class Mxfp4CutlassMoEMethod:
         x = dispatch_output.hidden_states
         topk_weights, topk_ids, _ = dispatch_output.topk_output
 
-        output = cutlass_mxfp4a8_moe(
+        output = cutlass_mxfp4a8_fused_moe(
             x,
             layer.w13_weight,
             layer.w2_weight,

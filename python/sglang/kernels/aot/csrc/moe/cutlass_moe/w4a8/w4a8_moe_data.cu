@@ -146,3 +146,72 @@ void get_cutlass_w4a8_moe_mm_data_caller(
       3,
       1);
 }
+
+__global__ void compute_expert_offsets_and_starts_w4a8_kernel(
+    const int32_t* __restrict__ problem_sizes1,
+    int32_t* __restrict__ expert_offsets,
+    int32_t* __restrict__ atomic_buffer,
+    const int64_t num_experts) {
+  int32_t tot_offset = 0;
+  expert_offsets[0] = 0;
+  for (int i = 0; i < num_experts; ++i) {
+    atomic_buffer[i] = tot_offset;
+    tot_offset += problem_sizes1[i * 3 + 1];
+    expert_offsets[i + 1] = tot_offset;
+  }
+}
+
+__global__ void compute_arg_sorts_w4a8(
+    const int32_t* __restrict__ topk_ids,
+    int32_t* input_permutation,
+    int32_t* output_permutation,
+    int32_t* atomic_buffer,
+    const int64_t topk_length,
+    const int64_t topk) {
+  int expert_id = blockIdx.x;
+
+  for (int i = threadIdx.x; i < topk_length; i += THREADS_PER_EXPERT) {
+    if (topk_ids[i] == expert_id) {
+      int start = atomicAdd(&atomic_buffer[expert_id], 1);
+      input_permutation[start] = i / topk;
+      output_permutation[i] = start;
+    }
+  }
+}
+
+void get_cutlass_w4a8_moe_mm_data_with_permutation(
+    const torch::Tensor& topk_ids,
+    torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation,
+    torch::Tensor& output_permutation,
+    const int64_t num_experts,
+    const int64_t n,
+    const int64_t k) {
+  TORCH_CHECK(topk_ids.dtype() == torch::kInt32);
+  auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
+  auto options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
+  torch::Tensor atomic_buffer = torch::empty(num_experts, options_int32);
+
+  constexpr uint64_t BLOCK_SIZE = 512;
+  compute_problem_sizes_w4a8<BLOCK_SIZE><<<num_experts, BLOCK_SIZE, 0, stream>>>(
+      static_cast<const int32_t*>(topk_ids.data_ptr()),
+      static_cast<int32_t*>(problem_sizes1.data_ptr()),
+      static_cast<int32_t*>(problem_sizes2.data_ptr()),
+      topk_ids.numel(),
+      n,
+      k);
+  compute_expert_offsets_and_starts_w4a8_kernel<<<1, 1, 0, stream>>>(
+      static_cast<const int32_t*>(problem_sizes1.data_ptr()),
+      static_cast<int32_t*>(expert_offsets.data_ptr()),
+      static_cast<int32_t*>(atomic_buffer.data_ptr()),
+      num_experts);
+  compute_arg_sorts_w4a8<<<num_experts, BLOCK_SIZE, 0, stream>>>(
+      static_cast<const int32_t*>(topk_ids.data_ptr()),
+      static_cast<int32_t*>(input_permutation.data_ptr()),
+      static_cast<int32_t*>(output_permutation.data_ptr()),
+      static_cast<int32_t*>(atomic_buffer.data_ptr()),
+      topk_ids.numel(),
+      topk_ids.size(1));
+}

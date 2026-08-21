@@ -45,6 +45,31 @@ def get_cutlass_w4a8_moe_mm_data(
     )
 
 
+def get_cutlass_w4a8_moe_mm_data_with_permutation(
+    topk_ids: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    input_permutation: torch.Tensor,
+    output_permutation: torch.Tensor,
+    num_experts: int,
+    n: int,
+    k: int,
+):
+    """Prepare w4a8/MXFP4A8 problem sizes and permutations in one CUDA path."""
+    torch.ops.sgl_kernel.get_cutlass_w4a8_moe_mm_data_with_permutation.default(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        n,
+        k,
+    )
+
+
 def cutlass_w4a8_moe_mm(
     d: torch.Tensor,
     a: torch.Tensor,
