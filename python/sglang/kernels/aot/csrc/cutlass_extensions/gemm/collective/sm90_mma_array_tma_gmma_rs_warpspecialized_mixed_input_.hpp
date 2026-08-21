@@ -1535,6 +1535,7 @@ struct CollectiveMmaArrayMixedInput<
     for (int count = 0; count < prologue_mma_count; ++count) {
       pipeline.consumer_release(smem_pipe_release);  // UNLOCK smem_pipe_release, done _computing_ on it
       ++smem_pipe_release;
+      released_stage_producer();
     }
   }
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
