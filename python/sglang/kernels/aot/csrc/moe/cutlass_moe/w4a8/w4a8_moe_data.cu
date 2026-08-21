@@ -215,3 +215,80 @@ void get_cutlass_w4a8_moe_mm_data_with_permutation(
       topk_ids.numel(),
       topk_ids.size(1));
 }
+
+__global__ void compact_cutlass_w4a8_moe_mm_data_kernel(
+    const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ problem_sizes1,
+    const int32_t* __restrict__ problem_sizes2,
+    int32_t* __restrict__ compact_expert_offsets,
+    int32_t* __restrict__ compact_problem_sizes1,
+    int32_t* __restrict__ compact_problem_sizes2,
+    int32_t* __restrict__ compact_expert_ids,
+    const int64_t num_experts) {
+  int32_t out = 0;
+  int32_t total = expert_offsets[num_experts];
+
+  for (int32_t e = 0; e < num_experts; ++e) {
+    int32_t m = problem_sizes1[e * 3 + 1];
+    if (m <= 0) {
+      continue;
+    }
+
+    compact_expert_offsets[out] = expert_offsets[e];
+    compact_problem_sizes1[out * 3] = problem_sizes1[e * 3];
+    compact_problem_sizes1[out * 3 + 1] = problem_sizes1[e * 3 + 1];
+    compact_problem_sizes1[out * 3 + 2] = problem_sizes1[e * 3 + 2];
+    compact_problem_sizes2[out * 3] = problem_sizes2[e * 3];
+    compact_problem_sizes2[out * 3 + 1] = problem_sizes2[e * 3 + 1];
+    compact_problem_sizes2[out * 3 + 2] = problem_sizes2[e * 3 + 2];
+    compact_expert_ids[out] = e;
+    ++out;
+  }
+
+  for (int32_t i = out; i < num_experts; ++i) {
+    compact_expert_offsets[i] = total;
+    compact_problem_sizes1[i * 3] = 0;
+    compact_problem_sizes1[i * 3 + 1] = 0;
+    compact_problem_sizes1[i * 3 + 2] = 0;
+    compact_problem_sizes2[i * 3] = 0;
+    compact_problem_sizes2[i * 3 + 1] = 0;
+    compact_problem_sizes2[i * 3 + 2] = 0;
+    compact_expert_ids[i] = 0;
+  }
+}
+
+void compact_cutlass_w4a8_moe_mm_data(
+    const torch::Tensor& expert_offsets,
+    const torch::Tensor& problem_sizes1,
+    const torch::Tensor& problem_sizes2,
+    torch::Tensor& compact_expert_offsets,
+    torch::Tensor& compact_problem_sizes1,
+    torch::Tensor& compact_problem_sizes2,
+    torch::Tensor& compact_expert_ids,
+    const int64_t num_experts) {
+  TORCH_CHECK(expert_offsets.dtype() == torch::kInt32, "expert_offsets must be int32");
+  TORCH_CHECK(problem_sizes1.dtype() == torch::kInt32, "problem_sizes1 must be int32");
+  TORCH_CHECK(problem_sizes2.dtype() == torch::kInt32, "problem_sizes2 must be int32");
+  TORCH_CHECK(compact_expert_offsets.dtype() == torch::kInt32, "compact_expert_offsets must be int32");
+  TORCH_CHECK(compact_problem_sizes1.dtype() == torch::kInt32, "compact_problem_sizes1 must be int32");
+  TORCH_CHECK(compact_problem_sizes2.dtype() == torch::kInt32, "compact_problem_sizes2 must be int32");
+  TORCH_CHECK(compact_expert_ids.dtype() == torch::kInt32, "compact_expert_ids must be int32");
+  TORCH_CHECK(expert_offsets.numel() >= num_experts + 1, "expert_offsets must have num_experts + 1 entries");
+  TORCH_CHECK(problem_sizes1.numel() >= num_experts * 3, "problem_sizes1 must have num_experts rows");
+  TORCH_CHECK(problem_sizes2.numel() >= num_experts * 3, "problem_sizes2 must have num_experts rows");
+  TORCH_CHECK(compact_expert_offsets.numel() >= num_experts, "compact_expert_offsets must have num_experts entries");
+  TORCH_CHECK(compact_problem_sizes1.numel() >= num_experts * 3, "compact_problem_sizes1 must have num_experts rows");
+  TORCH_CHECK(compact_problem_sizes2.numel() >= num_experts * 3, "compact_problem_sizes2 must have num_experts rows");
+  TORCH_CHECK(compact_expert_ids.numel() >= num_experts, "compact_expert_ids must have num_experts entries");
+
+  auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
+  compact_cutlass_w4a8_moe_mm_data_kernel<<<1, 1, 0, stream>>>(
+      static_cast<const int32_t*>(expert_offsets.data_ptr()),
+      static_cast<const int32_t*>(problem_sizes1.data_ptr()),
+      static_cast<const int32_t*>(problem_sizes2.data_ptr()),
+      static_cast<int32_t*>(compact_expert_offsets.data_ptr()),
+      static_cast<int32_t*>(compact_problem_sizes1.data_ptr()),
+      static_cast<int32_t*>(compact_problem_sizes2.data_ptr()),
+      static_cast<int32_t*>(compact_expert_ids.data_ptr()),
+      num_experts);
+}

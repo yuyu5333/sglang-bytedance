@@ -70,6 +70,29 @@ def get_cutlass_w4a8_moe_mm_data_with_permutation(
     )
 
 
+def compact_cutlass_w4a8_moe_mm_data(
+    expert_offsets: torch.Tensor,
+    problem_sizes1: torch.Tensor,
+    problem_sizes2: torch.Tensor,
+    compact_expert_offsets: torch.Tensor,
+    compact_problem_sizes1: torch.Tensor,
+    compact_problem_sizes2: torch.Tensor,
+    compact_expert_ids: torch.Tensor,
+    num_experts: int,
+):
+    """Compact non-empty expert GEMM problems to the front of fixed-size buffers."""
+    torch.ops.sgl_kernel.compact_cutlass_w4a8_moe_mm_data.default(
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        compact_expert_offsets,
+        compact_problem_sizes1,
+        compact_problem_sizes2,
+        compact_expert_ids,
+        num_experts,
+    )
+
+
 def cutlass_w4a8_moe_mm(
     d: torch.Tensor,
     a: torch.Tensor,

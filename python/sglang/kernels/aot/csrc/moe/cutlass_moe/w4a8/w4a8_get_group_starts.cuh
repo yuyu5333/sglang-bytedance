@@ -63,7 +63,7 @@ __global__ void int4_fp8_get_group_gemm_starts(
     // scan in this launch.
     int64_t as_tok_off = expert_offset;
     if (as_strides != nullptr) {
-      as_tok_off = as_strides[group_id * 2 + 1];
+      as_tok_off = as_strides[expert_id * 2 + 1];
     }
     as_offsets[group_id] = as_base_as_int + as_tok_off * (k / act_scale_group);
   }

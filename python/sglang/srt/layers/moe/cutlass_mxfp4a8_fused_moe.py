@@ -38,6 +38,11 @@ if _is_cuda_alike:
     )
 
     try:
+        from sgl_kernel import compact_cutlass_w4a8_moe_mm_data
+    except ImportError:
+        compact_cutlass_w4a8_moe_mm_data = None
+
+    try:
         from sgl_kernel import get_cutlass_w4a8_moe_mm_data_with_permutation
     except ImportError:
         get_cutlass_w4a8_moe_mm_data_with_permutation = None
@@ -158,6 +163,42 @@ class CutlassMxfp4A8FusedMoeRunner:
             ).contiguous()
             self._workspace[key] = tensor
         return tensor
+
+    def _compact_moe_metadata(
+        self,
+        expert_offsets: torch.Tensor,
+        problem_sizes1: torch.Tensor,
+        problem_sizes2: torch.Tensor,
+        num_experts: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        compact_expert_offsets = self._empty(
+            "compact_expert_offsets", (num_experts,), torch.int32, expert_offsets.device
+        )
+        compact_problem_sizes1 = self._empty(
+            "compact_problem_sizes1", tuple(problem_sizes1.shape), torch.int32, expert_offsets.device
+        )
+        compact_problem_sizes2 = self._empty(
+            "compact_problem_sizes2", tuple(problem_sizes2.shape), torch.int32, expert_offsets.device
+        )
+        compact_expert_ids = self._empty(
+            "compact_expert_ids", (num_experts,), torch.int32, expert_offsets.device
+        )
+        compact_cutlass_w4a8_moe_mm_data(
+            expert_offsets,
+            problem_sizes1,
+            problem_sizes2,
+            compact_expert_offsets,
+            compact_problem_sizes1,
+            compact_problem_sizes2,
+            compact_expert_ids,
+            num_experts,
+        )
+        return (
+            compact_expert_offsets,
+            compact_problem_sizes1,
+            compact_problem_sizes2,
+            compact_expert_ids,
+        )
 
     def _build_fixed_act_block_scale(
         self,
@@ -390,35 +431,31 @@ class CutlassMxfp4A8FusedMoeRunner:
             a1_blk_scale, expert_offsets, num_local_experts, "a1_as_packed"
         )
 
-        active_expert_ids = None
-
-        if active_expert_ids is not None:
-            active_idx = active_expert_ids.to(torch.long)
-            expert_offsets_gemm = expert_offsets[:-1].index_select(0, active_idx)
-            problem_sizes1_gemm = problem_sizes1.index_select(0, active_idx)
-            problem_sizes2_gemm = problem_sizes2.index_select(0, active_idx)
-            a_strides1_gemm = a_strides1.index_select(0, active_idx)
-            b_strides1_gemm = b_strides1.index_select(0, active_idx)
-            c_strides1_gemm = c_strides1.index_select(0, active_idx)
-            s_strides13_gemm = s_strides13.index_select(0, active_idx)
-            a_strides2_gemm = a_strides2.index_select(0, active_idx)
-            b_strides2_gemm = b_strides2.index_select(0, active_idx)
-            c_strides2_gemm = c_strides2.index_select(0, active_idx)
-            s_strides2_gemm = s_strides2.index_select(0, active_idx)
-            a1_as_strides_gemm = a1_as_strides.index_select(0, active_idx)
+        use_compact_groups = compact_cutlass_w4a8_moe_mm_data is not None and m <= 256
+        if use_compact_groups:
+            (
+                expert_offsets_gemm,
+                problem_sizes1_gemm,
+                problem_sizes2_gemm,
+                active_expert_ids,
+            ) = self._compact_moe_metadata(
+                expert_offsets, problem_sizes1, problem_sizes2, num_local_experts
+            )
         else:
             expert_offsets_gemm = expert_offsets[:-1]
             problem_sizes1_gemm = problem_sizes1
             problem_sizes2_gemm = problem_sizes2
-            a_strides1_gemm = a_strides1
-            b_strides1_gemm = b_strides1
-            c_strides1_gemm = c_strides1
-            s_strides13_gemm = s_strides13
-            a_strides2_gemm = a_strides2
-            b_strides2_gemm = b_strides2
-            c_strides2_gemm = c_strides2
-            s_strides2_gemm = s_strides2
-            a1_as_strides_gemm = a1_as_strides
+            active_expert_ids = None
+
+        a_strides1_gemm = a_strides1
+        b_strides1_gemm = b_strides1
+        c_strides1_gemm = c_strides1
+        s_strides13_gemm = s_strides13
+        a_strides2_gemm = a_strides2
+        b_strides2_gemm = b_strides2
+        c_strides2_gemm = c_strides2
+        s_strides2_gemm = s_strides2
+        a1_as_strides_gemm = a1_as_strides
 
         c1 = self._empty("c1", (m * topk, n * 2), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
@@ -455,11 +492,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         a2_as_packed, a2_as_strides = self._build_fixed_act_block_scale(
             a2_blk_scale, expert_offsets, num_local_experts, "a2_as_packed"
         )
-        a2_as_strides_gemm = (
-            a2_as_strides.index_select(0, active_expert_ids.to(torch.long))
-            if active_expert_ids is not None
-            else a2_as_strides
-        )
+        a2_as_strides_gemm = a2_as_strides
 
         cutlass_mxfp4a8_moe_mm(
             c2,
