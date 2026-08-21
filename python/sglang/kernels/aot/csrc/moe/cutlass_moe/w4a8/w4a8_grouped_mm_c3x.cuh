@@ -453,6 +453,35 @@ void cutlass_w4a8_group_gemm_caller(
   status = gemm.run(stream);
   if (status != cutlass::Status::kSuccess) {
     cudaError_t ce = cudaGetLastError();
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+    if constexpr (Gemm::UseSingleWarpgroupKernel) {
+      auto const grid = Gemm::GemmScaleOnly::get_grid_shape(arguments);
+      auto const block = Gemm::GemmKernelScaleOnly::get_block_shape();
+      int const max_active_blocks = Gemm::GemmScaleOnly::maximum_active_blocks();
+      TORCH_CHECK(
+          false,
+          "SWG GEMM execution failed: status=",
+          cutlassGetStatusString(status),
+          " cuda=",
+          cudaGetErrorString(ce),
+          " grid=(",
+          grid.x,
+          ",",
+          grid.y,
+          ",",
+          grid.z,
+          ") block=(",
+          block.x,
+          ",",
+          block.y,
+          ",",
+          block.z,
+          ") smem=",
+          Gemm::GemmKernelScaleOnly::SharedStorageSize,
+          " max_active_blocks=",
+          max_active_blocks);
+    }
+#endif
     TORCH_CHECK(
         false, "GEMM execution failed: status=", cutlassGetStatusString(status), " cuda=", cudaGetErrorString(ce));
   }
