@@ -132,7 +132,7 @@ struct cutlass_3x_w4a8_group_gemm {
       TileShape,
       ClusterShape,
       std::conditional_t<
-          UseSingleWarpgroup,
+          UseSingleWarpgroupKernel,
           cutlass::gemm::collective::StageCount<3>,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>>,
