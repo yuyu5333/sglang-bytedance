@@ -24,6 +24,7 @@
 #include <torch/all.h>
 
 #include <type_traits>
+#include <utility>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
@@ -37,6 +38,7 @@
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
+#include "w4a8_swg_precomputed_work_map.cuh"
 #endif
 #include "w4a8_get_group_starts.cuh"
 
@@ -141,6 +143,7 @@ struct cutlass_3x_w4a8_group_gemm {
   using ElementQuantB = QuantTypeB;
 
   // Define the final kernel and GEMM operation types
+  static constexpr int SingleWarpgroupTileM = cute::size<0>(TileShape{});
   static constexpr int SingleWarpgroupTileN = cute::size<1>(TileShape{});
   static_assert(
       !UseSingleWarpgroup ||
@@ -287,6 +290,9 @@ void cutlass_w4a8_group_gemm_caller(
 #endif
 
   Args arguments;
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  torch::Tensor swg_work_map_storage;
+#endif
   decltype(arguments.epilogue.thread) fusion_args;
   fusion_args.alpha = 0;
   fusion_args.beta = 0;
@@ -344,8 +350,21 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
-    arguments.scheduler.max_swizzle_size = 8;
+    auto swg_work_map = build_swg_precomputed_work_map<Gemm>(
+        problem_sizes_as_shapes,
+        num_experts,
+        static_cast<uint64_t>(d_tensors.size(0)),
+        static_cast<uint64_t>(d_tensors.size(1)),
+        hw_info,
+        a_tensors.device(),
+        stream);
+    swg_work_map_storage = std::move(swg_work_map.storage);
+    arguments.scheduler.max_swizzle_size = kSwgWorkMapMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
+    arguments.scheduler.precomputed_work_tiles =
+        static_cast<uint64_t const*>(swg_work_map_storage.data_ptr());
+    arguments.scheduler.precomputed_work_tiles_per_worker =
+        swg_work_map.tiles_per_worker;
   }
 #endif
 
