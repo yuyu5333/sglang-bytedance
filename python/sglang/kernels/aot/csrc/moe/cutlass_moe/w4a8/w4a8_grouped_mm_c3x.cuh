@@ -79,7 +79,8 @@ template <
     // int4a8 instantiations are byte-identical; pass cutlass::float_e2m1_t for mxfp4a8.
     typename QuantTypeB = QuantType,
     // K-wise quant group size. int4a8 uses 128; mxfp4a8 (E8M0 block) uses 32.
-    int GroupSizeK = 128>
+    int GroupSizeK = 128,
+    bool AutoStageCount = true>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
@@ -115,8 +116,11 @@ struct cutlass_3x_w4a8_group_gemm {
       ElementAccumulator,
       TileShape,
       ClusterShape,
-      cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-          sizeof(typename CollectiveEpilogue::SharedStorage))>,
+      std::conditional_t<
+          AutoStageCount,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+              sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          cutlass::gemm::collective::StageCount<3>>,
       KernelSchedule>::CollectiveOp;
 
   // Expose the weight quant type so the caller can cast device pointers correctly.
