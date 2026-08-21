@@ -331,15 +331,6 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
 
         active_expert_ids = None
-        if not get_is_capture_mode():
-            expert_counts = expert_offsets[1:] - expert_offsets[:-1]
-            active_expert_ids = (
-                torch.nonzero(expert_counts > 0, as_tuple=False)
-                .flatten()
-                .to(torch.int32)
-            )
-            if active_expert_ids.numel() == num_local_experts:
-                active_expert_ids = None
 
         if active_expert_ids is not None:
             active_idx = active_expert_ids.to(torch.long)
