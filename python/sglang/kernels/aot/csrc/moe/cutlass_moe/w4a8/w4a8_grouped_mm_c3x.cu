@@ -48,8 +48,7 @@ struct SM90W4A8Config {
       KernelSchedule,
       EpilogueSchedule,
       typename QuantTraits<W>::Element,
-      QuantTraits<W>::GroupSize,
-      W == WType::INT4>;
+      QuantTraits<W>::GroupSize>;
 };
 
 template <int M, int N, int K, int A, int B, int C>
