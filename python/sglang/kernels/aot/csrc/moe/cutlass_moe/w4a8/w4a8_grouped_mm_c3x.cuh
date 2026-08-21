@@ -51,7 +51,7 @@ namespace {
 using MmaType = cutlass::float_e4m3_t;     // FP8 e4m3 type
 using QuantType = cutlass::int4b_t;        // 4-bit integer type (default, int4a8)
 using ElementAccumulator = float;          // Accumulator type
-using ElementScale = cutlass::bfloat16_t;  // Scale type
+using DefaultElementScale = cutlass::bfloat16_t;  // Scale type
 using ElementC = cutlass::bfloat16_t;      // Output type
 using ElementD = ElementC;                 // Output type
 using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int, int, int>>;
@@ -130,16 +130,25 @@ template <
     typename QuantTypeB = QuantType,
     // K-wise quant group size. int4a8 uses 128; mxfp4a8 (E8M0 block) uses 32.
     int GroupSizeK = 128,
-    bool UseSingleWarpgroup = false>
+    bool UseSingleWarpgroup = false,
+    bool UsePreMmaE8M0 = false>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
+  static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
-  using ElementScalePacked = cutlass::Array<ElementScale, PackedScalesNum>;
+  using ElementScale =
+      std::conditional_t<UsePreMmaE8M0Scale, cutlass::float_ue8m0_t, DefaultElementScale>;
+  using ElementScalePacked = std::conditional_t<
+      UsePreMmaE8M0Scale,
+      ElementScale,
+      cutlass::Array<ElementScale, PackedScalesNum>>;
   // Alignment for the 4-bit weight operand (int4b_t / float_e2m1_t are both 4-bit).
   static constexpr int AlignmentQuantB = 128 / cutlass::sizeof_bits<QuantTypeB>::value;
+  static_assert(!UsePreMmaE8M0Scale || UseSingleWarpgroup);
   static_assert(!UseSingleWarpgroup || std::is_same_v<QuantTypeB, cutlass::float_e2m1_t>);
   static_assert(!UseSingleWarpgroup || GroupSize == 32);
+  static_assert(!UseSingleWarpgroup || UsePreMmaE8M0Scale);
   static_assert(!UseSingleWarpgroup || cute::size(ClusterShape{}) == 1);
   static_assert(!UseSingleWarpgroup || cute::size<0>(TileShape{}) == 128);
   static_assert(!UseSingleWarpgroup || cute::size<2>(TileShape{}) == 128);
@@ -167,7 +176,10 @@ struct cutlass_3x_w4a8_group_gemm {
           cutlass::gemm::collective::StageCount<3>,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>>,
-      KernelSchedule>::CollectiveOp;
+      KernelSchedule,
+      UsePreMmaE8M0Scale
+          ? cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0
+          : cutlass::gemm::collective::MixedInputScaleMode::kPostMma>::CollectiveOp;
 
   // Expose the weight quant type so the caller can cast device pointers correctly.
   using ElementQuantB = QuantTypeB;
@@ -268,7 +280,16 @@ void cutlass_w4a8_group_gemm_caller(
   // Check inputs
   TORCH_CHECK(a_tensors.dim() == 2 or a_tensors.dim() == 3, "A tensor must be 2D/3D");
   TORCH_CHECK(b_tensors.dim() == 3, "B tensor must be 3D [E, N, K/2]");
-  TORCH_CHECK(b_scales.dim() == 3, "Scale tensor must be 3D [E, K//512, N*4]");
+  if constexpr (Gemm::UsePreMmaE8M0Scale) {
+    TORCH_CHECK(b_scales.is_contiguous(), "prescale weight scales must be folded and contiguous");
+    TORCH_CHECK(
+        b_scales.numel() ==
+            b_tensors.size(0) * b_tensors.size(1) * b_tensors.size(2) * 2 /
+                Gemm::GroupSize,
+        "prescale weight scales must contain E*N*K/32 raw E8M0 elements");
+  } else {
+    TORCH_CHECK(b_scales.dim() == 3, "Scale tensor must be 3D [E, K//512, N*4]");
+  }
   TORCH_CHECK(a_scales.dim() == 1, "A Scale tensor must be 1D [1]");
   TORCH_CHECK(expert_offsets.dim() == 1, "expert_offsets must be a 1D tensor");
   TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be 2D tensor");
@@ -282,7 +303,9 @@ void cutlass_w4a8_group_gemm_caller(
     TORCH_CHECK(expert_ids->scalar_type() == torch::kInt32, "expert_ids must be int32");
   } else {
     TORCH_CHECK(b_tensors.size(0) == num_experts, "B tensor first dimension must match number of groups");
-    TORCH_CHECK(b_scales.size(0) == num_experts, "Scale tensor first dimension must match number of groups");
+    if constexpr (!Gemm::UsePreMmaE8M0Scale) {
+      TORCH_CHECK(b_scales.size(0) == num_experts, "Scale tensor first dimension must match number of groups");
+    }
   }
   TORCH_CHECK(
       b_tensors.size(2) * 2 == a_tensors.size(1) or b_tensors.size(2) * 2 == a_tensors.size(2),
@@ -310,7 +333,8 @@ void cutlass_w4a8_group_gemm_caller(
   // MXFP4A8: per-expert activation block-scale pointer array (only used when
   // act_block_scales is provided; int4a8 leaves this empty).
   torch::Tensor as_scales_ptrs;
-  bool use_act_block_scale = act_block_scales.has_value() && as_strides.has_value();
+  bool use_act_block_scale =
+      !Gemm::UsePreMmaE8M0Scale && act_block_scales.has_value() && as_strides.has_value();
   if (use_act_block_scale) {
     as_scales_ptrs = torch::empty(num_experts, options_int);
   }
@@ -326,13 +350,13 @@ void cutlass_w4a8_group_gemm_caller(
 
   Args arguments;
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-  torch::Tensor swg_work_map_storage;
+  sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;
 #endif
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr());
 
-  run_int4_fp8_get_group_gemm_starts(
+  run_int4_fp8_get_group_gemm_starts<typename Gemm::ElementScale>(
       expert_offsets,
       a_ptrs,
       b_ptrs,
@@ -358,7 +382,10 @@ void cutlass_w4a8_group_gemm_caller(
   decltype(arguments.epilogue.thread) fusion_args;
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     fusion_args.token_scale_default = ElementAccumulator(1);
-    fusion_args.token_scale_ptr_array = nullptr;
+    fusion_args.token_scale_ptr_array =
+        Gemm::UsePreMmaE8M0Scale && per_act_token
+            ? static_cast<float const* const*>(a_scales_ptrs.data_ptr())
+            : nullptr;
     arguments = Args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {num_experts, problem_sizes_as_shapes, nullptr},
@@ -409,29 +436,34 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
-    auto swg_work_map = sgl_kernel::swg_detail::build_swg_precomputed_work_map<Gemm>(
+    swg_work_map = sgl_kernel::swg_detail::build_swg_precomputed_work_map<Gemm>(
         problem_sizes_as_shapes,
         num_experts,
         static_cast<uint64_t>(d_tensors.size(0)),
         static_cast<uint64_t>(d_tensors.size(1)),
         hw_info,
-        a_tensors.device(),
-        stream);
-    swg_work_map_storage = std::move(swg_work_map.storage);
+        a_tensors.device());
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
     arguments.scheduler.precomputed_work_tiles =
-        static_cast<uint64_t const*>(swg_work_map_storage.data_ptr());
+        static_cast<uint64_t const*>(swg_work_map.storage.data_ptr());
     arguments.scheduler.precomputed_work_tiles_per_worker =
         swg_work_map.tiles_per_worker;
+    arguments.mainloop.ptr_A_prebuilt_tma_desc =
+        static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
+    arguments.mainloop.ptr_B_prebuilt_tma_descs =
+        static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
   }
 #endif
 
   // MXFP4A8: feed the activation block-scale into the mainloop's optional path.
   // These members default to nullptr, so the int4a8 path is unaffected.
-  if (use_act_block_scale) {
-    arguments.mainloop.ptr_AS = static_cast<const typename Gemm::ElementScalePacked**>(as_scales_ptrs.data_ptr());
-    arguments.mainloop.dAS = static_cast<typename Gemm::StrideS*>(as_strides->data_ptr());
+  if constexpr (!Gemm::UsePreMmaE8M0Scale) {
+    if (use_act_block_scale) {
+      arguments.mainloop.ptr_AS =
+          static_cast<const typename Gemm::ElementScalePacked**>(as_scales_ptrs.data_ptr());
+      arguments.mainloop.dAS = static_cast<typename Gemm::StrideS*>(as_strides->data_ptr());
+    }
   }
 
   // Instantiate and run GEMM
@@ -449,6 +481,17 @@ void cutlass_w4a8_group_gemm_caller(
   if (status != cutlass::Status::kSuccess) {
     TORCH_CHECK(false, "GEMM initialization failed");
   }
+
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    sgl_kernel::swg_detail::launch_swg_precomputed_work_map<Gemm>(
+        swg_work_map,
+        problem_sizes_as_shapes,
+        num_experts,
+        gemm.params().mainloop,
+        stream);
+  }
+#endif
 
   status = gemm.run(stream);
   if (status != cutlass::Status::kSuccess) {

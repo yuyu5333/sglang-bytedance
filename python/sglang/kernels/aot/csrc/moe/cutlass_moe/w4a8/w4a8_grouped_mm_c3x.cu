@@ -77,6 +77,7 @@ struct SM90_SWG_MXFP4 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
       typename QuantTraits<WType::MXFP4>::Element,
       QuantTraits<WType::MXFP4>::GroupSize,
+      true,
       true>;
 };
 #endif
