@@ -453,7 +453,13 @@ class CutlassMxfp4A8FusedMoeRunner:
             a1_blk_scale, expert_offsets, num_local_experts, "a1_as_packed"
         )
 
-        active_expert_ids = None
+        active_expert_ids = (
+            torch.nonzero(problem_sizes1[:, 0] > 0, as_tuple=False)
+            .flatten()
+            .to(torch.int32)
+            if m <= 256
+            else None
+        )
 
         if active_expert_ids is not None:
             active_idx = active_expert_ids.to(torch.long)
