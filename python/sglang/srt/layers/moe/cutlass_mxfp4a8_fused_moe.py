@@ -83,38 +83,6 @@ def _scatter_fixed_act_block_scale_kernel(
 
 
 @triton.jit
-def _shuffle_quantize_mxfp8_kernel(
-    a_ptr,
-    map_ptr,
-    out_q_ptr,
-    out_s_ptr,
-    total_m,
-    k,
-    nblk,
-    eps: tl.constexpr,
-    fp8_min: tl.constexpr,
-    fp8_max: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
-    BLOCK_GROUPS: tl.constexpr,
-):
-    row = tl.program_id(0)
-    group_start = tl.program_id(1) * BLOCK_GROUPS
-    groups = group_start + tl.arange(0, BLOCK_GROUPS)
-    cols_in_group = tl.arange(0, GROUP_SIZE)
-    cols = groups[:, None] * GROUP_SIZE + cols_in_group[None, :]
-    mask = (row < total_m) & (groups[:, None] < nblk) & (cols < k)
-
-    src_row = tl.load(map_ptr + row).to(tl.int64)
-    vals = tl.load(a_ptr + src_row * k + cols, mask=mask, other=0.0).to(tl.float32)
-    absmax = tl.maximum(tl.max(tl.abs(vals), axis=1), eps)
-    scales = absmax / fp8_max
-    q_vals = tl.clamp(vals / scales[:, None], fp8_min, fp8_max)
-
-    tl.store(out_q_ptr + row * k + cols, q_vals.to(out_q_ptr.dtype.element_ty), mask=mask)
-    tl.store(out_s_ptr + row * nblk + groups, scales, mask=(row < total_m) & (groups < nblk))
-
-
-@triton.jit
 def _apply_shuffle_mul_sum_fp32_factors_kernel(
     input_ptr,
     output_ptr,
@@ -245,34 +213,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             scale_ue8m0=False,
             fuse_silu_and_mul=fuse_silu_and_mul,
             masked_m=None,
-        )
-
-    def _shuffle_quantize_mxfp8_into(
-        self,
-        a: torch.Tensor,
-        dst2src_map: torch.Tensor,
-        out_q: torch.Tensor,
-        out_s: torch.Tensor,
-    ) -> None:
-        if out_q.numel() == 0:
-            return
-        total_m, k = out_q.shape
-        nblk = k // MXFP4_CHUNK_SIZE
-        _shuffle_quantize_mxfp8_kernel[
-            (total_m, triton.cdiv(nblk, 8))
-        ](
-            a,
-            dst2src_map,
-            out_q,
-            out_s,
-            total_m,
-            k,
-            nblk,
-            eps=_FP8_QUANT_EPS,
-            fp8_min=float(fp8_min),
-            fp8_max=float(fp8_max),
-            GROUP_SIZE=MXFP4_CHUNK_SIZE,
-            BLOCK_GROUPS=8,
         )
 
     def _apply_shuffle_mul_sum_fp32_factors(
@@ -441,14 +381,11 @@ class CutlassMxfp4A8FusedMoeRunner:
         a1_blk_scale = self._empty(
             "a1_blk_scale", (m * topk, k // MXFP4_CHUNK_SIZE), torch.float32, device
         )
-        if m <= 256:
-            self._shuffle_quantize_mxfp8_into(a, a_map, gateup_input, a1_blk_scale)
-        else:
-            gateup_input_bf16 = self._empty(
-                "gateup_input_bf16", (m * topk, k), a.dtype, device
-            )
-            torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
-            self._quantize_mxfp8_into(gateup_input_bf16, gateup_input, a1_blk_scale)
+        gateup_input_bf16 = self._empty(
+            "gateup_input_bf16", (m * topk, k), a.dtype, device
+        )
+        torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
+        self._quantize_mxfp8_into(gateup_input_bf16, gateup_input, a1_blk_scale)
         a1_as_packed, a1_as_strides = self._build_fixed_act_block_scale(
             a1_blk_scale, expert_offsets, num_local_experts, "a1_as_packed"
         )
