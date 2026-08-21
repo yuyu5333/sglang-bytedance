@@ -34,6 +34,23 @@ namespace cutlass::gemm::collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+namespace detail {
+
+template <class StageCountType>
+struct stage_count_carveout_bytes;
+
+template <int Stages>
+struct stage_count_carveout_bytes<StageCount<Stages>> {
+  static constexpr int value = 0;
+};
+
+template <int CarveoutBytes>
+struct stage_count_carveout_bytes<StageCountAutoCarveout<CarveoutBytes>> {
+  static constexpr int value = CarveoutBytes;
+};
+
+}  // namespace detail
+
 // GMMA_TMA_WS_RS
 template <
     class ElementA_,
@@ -210,7 +227,7 @@ struct CollectiveBuilderMixedInput<
                                                   ElementScale,
                                                   ElementZero,
                                                   TileShape_MNK,
-                                                  StageCountType::bytes,
+                                                  detail::stage_count_carveout_bytes<StageCountType>::value,
                                                   SmemAlignment>(StageCountType{})
                                             : detail::compute_stage_count_or_override_single_affine_transformed_input<
                                                   detail::sm90_smem_capacity_bytes,
@@ -219,14 +236,14 @@ struct CollectiveBuilderMixedInput<
                                                   ElementScale,
                                                   ElementZero,
                                                   TileShape_MNK,
-                                                  StageCountType::bytes,
+                                                  detail::stage_count_carveout_bytes<StageCountType>::value,
                                                   SmemAlignment>(StageCountType{}))
                    : detail::compute_stage_count_or_override<
                          detail::sm90_smem_capacity_bytes,
                          ElementAMma,
                          ElementBMma,
                          TileShape_MNK,
-                         StageCountType::bytes,
+                         detail::stage_count_carveout_bytes<StageCountType>::value,
                          SmemAlignment>(StageCountType{});
 
   using DispatchPolicy = cute::conditional_t<
