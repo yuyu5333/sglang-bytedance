@@ -308,7 +308,7 @@ void cutlass_w4a8_group_gemm_caller(
 
   // Instantiate and run GEMM
   typename Gemm::GemmScaleOnly gemm;
-  size_t workspace_size = Gemm::GemmScaleOnly::get_workspace_size(arguments);
+  size_t workspace_size = gemm.get_workspace_size(arguments);
   auto const workspace_options = torch::TensorOptions().dtype(torch::kUInt8).device(a_tensors.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
