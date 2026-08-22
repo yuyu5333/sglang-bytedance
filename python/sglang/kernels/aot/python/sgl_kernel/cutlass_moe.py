@@ -246,14 +246,13 @@ def cutlass_mxfp4a8_humming_moe_mm(
     swg_config: int,
     expert_ids: Optional[torch.Tensor] = None,
 ):
-    """Run an MXFP4A8 kernel on Humming-formatted inputs.
+    """Run the MXFP4A8 single-warpgroup kernel on Humming-formatted inputs.
 
     ``b`` must be a contiguous interleaved int8 weight tensor, ``b_scales`` a
     contiguous uint8 tensor containing folded E8M0 offsets, and ``a_scales`` a
     contiguous FP32 vector with one scale per activation row. ``swg_config`` is
-    explicit: 0-7 select warp-specialized precomputed-scheduler kernels and
-    100-103 retain the single-warpgroup variants. This entry does not accept
-    activation block scales and does not consult environment variables.
+    explicit and must be one of 100, 101, 102, or 103. This entry does not
+    accept activation block scales and does not consult environment variables.
     """
     torch.ops.sgl_kernel.cutlass_mxfp4a8_humming_moe_mm.default(
         d,

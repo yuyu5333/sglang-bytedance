@@ -37,11 +37,10 @@
 #endif
 #include "cutlass_extensions/epilogue/collective/default_epilogue_array_per_token_scale.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
-#include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_warpspecialized_pingpong_precomputed.hpp"
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
-#endif
 #include "w4a8_swg_precomputed_work_map.cuh"
+#endif
 #include "w4a8_get_group_starts.cuh"
 
 using namespace cute;
@@ -137,8 +136,6 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
   static constexpr int GroupSize = GroupSizeK;
-  using CtaTileShape = TileShape;
-  using CtaClusterShape = ClusterShape;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScale =
       std::conditional_t<UsePreMmaE8M0Scale, cutlass::float_ue8m0_t, DefaultElementScale>;
@@ -148,6 +145,7 @@ struct cutlass_3x_w4a8_group_gemm {
       cutlass::Array<ElementScale, PackedScalesNum>>;
   // Alignment for the 4-bit weight operand (int4b_t / float_e2m1_t are both 4-bit).
   static constexpr int AlignmentQuantB = 128 / cutlass::sizeof_bits<QuantTypeB>::value;
+  static_assert(!UsePreMmaE8M0Scale || UseSingleWarpgroup);
   static_assert(!UseSingleWarpgroup || std::is_same_v<QuantTypeB, cutlass::float_e2m1_t>);
   static_assert(!UseSingleWarpgroup || GroupSize == 32);
   static_assert(!UseSingleWarpgroup || UsePreMmaE8M0Scale);
@@ -156,7 +154,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static_assert(!UseSingleWarpgroup || cute::size<2>(TileShape{}) == 128);
 
   using CollectiveEpilogue = typename W4A8EpilogueSelector<
-      UsePreMmaE8M0Scale,
+      UseSingleWarpgroupKernel,
       TileShape,
       ClusterShape,
       EpilogueSchedule>::Type;
@@ -209,16 +207,7 @@ struct cutlass_3x_w4a8_group_gemm {
 #else
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>,
 #endif
-      std::conditional_t<
-          UsePreMmaE8M0Scale,
-          cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-              ProblemShape,
-              CollectiveMainloopScaleOnly,
-              CollectiveEpilogue>,
-          cutlass::gemm::kernel::GemmUniversal<
-              ProblemShape,
-              CollectiveMainloopScaleOnly,
-              CollectiveEpilogue>>>;
+      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>>;
 
   using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
 
@@ -332,10 +321,10 @@ void cutlass_w4a8_group_gemm_caller(
   TORCH_CHECK(b_tensors.scalar_type() == torch::kInt8, "B tensor must contain packed int4 values (stored as int8)");
   TORCH_CHECK(expert_offsets.scalar_type() == torch::kInt32, "Expert offsets must be int32 type");
   TORCH_CHECK(problem_sizes.scalar_type() == torch::kInt32, "Problem sizes must be int32 type");
-  if constexpr (Gemm::UsePreMmaE8M0Scale) {
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
     TORCH_CHECK(
         d_tensors.dim() == 2 && d_tensors.is_contiguous(),
-        "Humming pre-MMA GEMM requires contiguous 2D D");
+        "Single-warpgroup GEMM requires contiguous 2D D");
   }
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
@@ -362,7 +351,9 @@ void cutlass_w4a8_group_gemm_caller(
     hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
   }
   Args arguments;
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;
+#endif
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr());
@@ -391,7 +382,7 @@ void cutlass_w4a8_group_gemm_caller(
       expert_ids);
 
   decltype(arguments.epilogue.thread) fusion_args;
-  if constexpr (Gemm::UsePreMmaE8M0Scale) {
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
     fusion_args.token_scale_default = ElementAccumulator(1);
     fusion_args.token_scale_ptr_array =
         Gemm::UsePreMmaE8M0Scale && per_act_token
@@ -443,17 +434,15 @@ void cutlass_w4a8_group_gemm_caller(
          static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
         hw_info};
   }
-  if constexpr (Gemm::UsePreMmaE8M0Scale) {
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
-    arguments.scheduler.max_swizzle_size =
-        Gemm::UseSingleWarpgroupKernel
-        ? sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle
-        : sgl_kernel::swg_detail::kRegularWorkMapMaxSwizzle;
+    arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
     auto const swg_grid_shape =
         Gemm::GemmScaleOnly::get_grid_shape(arguments);
-    swg_work_map = sgl_kernel::swg_detail::build_precomputed_work_map<Gemm>(
+    swg_work_map = sgl_kernel::swg_detail::build_swg_precomputed_work_map<Gemm>(
         problem_sizes_as_shapes,
         num_experts,
         static_cast<uint64_t>(d_tensors.size(0)),
@@ -463,16 +452,15 @@ void cutlass_w4a8_group_gemm_caller(
         a_tensors.device());
     arguments.scheduler.precomputed_work_tiles =
         static_cast<uint64_t const*>(swg_work_map.storage.data_ptr());
-    if constexpr (Gemm::UseSingleWarpgroupKernel) {
-      arguments.scheduler.precomputed_work_tiles_per_worker =
-          swg_work_map.tiles_per_worker;
-    }
+    arguments.scheduler.precomputed_work_tiles_per_worker =
+        swg_work_map.tiles_per_worker;
     arguments.mainloop.ptr_A_prebuilt_tma_desc =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
     arguments.mainloop.prebuilt_tma_desc_a_per_group = expert_ids.has_value();
   }
+#endif
 
   // MXFP4A8: feed the activation block-scale into the mainloop's optional path.
   // These members default to nullptr, so the int4a8 path is unaffected.
@@ -500,8 +488,9 @@ void cutlass_w4a8_group_gemm_caller(
     TORCH_CHECK(false, "GEMM initialization failed");
   }
 
-  if constexpr (Gemm::UsePreMmaE8M0Scale) {
-    sgl_kernel::swg_detail::launch_precomputed_work_map<Gemm>(
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    sgl_kernel::swg_detail::launch_swg_precomputed_work_map<Gemm>(
         swg_work_map,
         problem_sizes_as_shapes,
         num_experts,
@@ -509,6 +498,7 @@ void cutlass_w4a8_group_gemm_caller(
         expert_ids.has_value(),
         stream);
   }
+#endif
 
   status = gemm.run(stream);
   if (status != cutlass::Status::kSuccess) {
