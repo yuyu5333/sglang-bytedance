@@ -11,8 +11,9 @@ namespace sgl_kernel::swg_detail {
 
 using SwgWorkTile = cutlass::gemm::kernel::detail::PrecomputedGroupWorkTile;
 
-// Match the Humming single-warpgroup scheduler: interleaving each expert's
-// token tiles adds substantial padding for large routed batches.
+// Match the Humming single-warpgroup scheduler: use a 2-way launch-grid
+// swizzle, but do not pad each expert's chunk-major work-map tiles.
+constexpr int kSwgSchedulerMaxSwizzle = 2;
 constexpr int kSwgWorkMapMaxSwizzle = 1;
 constexpr int kSwgWorkMapBuilderThreads = 128;
 

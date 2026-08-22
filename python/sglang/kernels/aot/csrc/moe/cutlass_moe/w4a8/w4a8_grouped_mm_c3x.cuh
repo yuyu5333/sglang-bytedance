@@ -438,7 +438,7 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
-    arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
+    arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgSchedulerMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
     auto const swg_grid_shape =
         Gemm::GemmScaleOnly::get_grid_shape(arguments);
