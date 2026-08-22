@@ -224,13 +224,17 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
 
     @staticmethod
-    def _humming_gemm2_config(output_size: int) -> int:
-        # Tiny per-expert batches on H20 favor the highest-residency TileN=8
-        # tactic for both Humming GEMMs.
-        for tile_n, config in ((8, 100), (16, 101), (32, 102), (40, 103)):
-            if output_size % tile_n == 0:
-                return config
-        return 100
+    def _humming_configs(num_tokens: int) -> Tuple[int, int]:
+        # H20 GPT-OSS buckets selected against per-shape FlashInfer autotune.
+        if num_tokens <= 64:
+            return 100, 100
+        if num_tokens <= 512:
+            return 101, 101
+        if num_tokens <= 1536:
+            return 204, 204
+        if num_tokens <= 3072:
+            return 205, 205
+        return 204, 204
 
     def _apply_shuffle_mul_sum_fp32_factors(
         self,
@@ -417,7 +421,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         # weight descriptor per logical group costs more than the empty groups.
         use_compact_groups = (
             compact_cutlass_w4a8_moe_mm_data is not None
-            and m <= 256
+            and 64 < m <= 256
             and m * topk < 2 * num_local_experts
         )
         if use_compact_groups:
@@ -450,6 +454,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         s_strides2_gemm = s_strides2
         c1 = self._empty("c1", (m * topk, n * 2), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
+        gemm1_config, gemm2_config = self._humming_configs(m)
 
         cutlass_mxfp4a8_humming_moe_mm(
             c1,
@@ -464,7 +469,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             c_strides1_gemm,
             s_strides13_gemm,
             topk,
-            100,
+            gemm1_config,
             active_expert_ids,
         )
 
@@ -497,7 +502,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             c_strides2_gemm,
             s_strides2_gemm,
             topk,
-            self._humming_gemm2_config(k),
+            gemm2_config,
             active_expert_ids,
         )
 
