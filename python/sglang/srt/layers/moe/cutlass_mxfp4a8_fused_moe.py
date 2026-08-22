@@ -405,14 +405,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             "gateup_input_bf16", (m * topk, k), a.dtype, device
         )
         torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
-        self._humming_quantize_fp8_per_token_into(
-            gateup_input_bf16,
-            gateup_input,
-            a1_scale_per_token,
-            w1_residual_humming,
-            expert_offsets,
-            num_local_experts,
-        )
 
         # Compact Humming groups use one prebuilt weight TMA descriptor per
         # logical group, mapped through active_expert_ids to the source expert.
@@ -456,53 +448,44 @@ class CutlassMxfp4A8FusedMoeRunner:
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
         gemm1_config, gemm2_config = self._humming_configs(m)
 
-        cutlass_mxfp4a8_humming_moe_mm(
-            c1,
-            gateup_input,
-            w1_humming,
-            a1_scale_per_token,
-            w1_scale_humming,
-            expert_offsets_gemm,
-            problem_sizes1_gemm,
-            a_strides1_gemm,
-            b_strides1_gemm,
-            c_strides1_gemm,
-            s_strides13_gemm,
-            topk,
-            gemm1_config,
-            active_expert_ids,
-        )
-
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
         )
         a2_scale_per_token = self._empty(
             "a2_scale_per_token", (m * topk,), torch.float32, device
         )
-        humming_swiglu_quant_fp8(
+        torch.ops.sgl_kernel.cutlass_mxfp4a8_humming_moe_core.default(
             c1,
+            c2,
+            gateup_input_bf16,
+            gateup_input,
+            a1_scale_per_token,
             intermediate_q,
             a2_scale_per_token,
+            w1_humming,
+            w1_scale_humming,
+            w1_residual_humming,
+            w2_humming,
+            w2_scale_humming,
             w2_residual_humming,
             expert_offsets,
-            num_local_experts,
-            swiglu_limit,
-        )
-
-        cutlass_mxfp4a8_humming_moe_mm(
-            c2,
-            intermediate_q,
-            w2_humming,
-            a2_scale_per_token,
-            w2_scale_humming,
             expert_offsets_gemm,
+            problem_sizes1_gemm,
             problem_sizes2_gemm,
+            a_strides1_gemm,
+            b_strides1_gemm,
+            c_strides1_gemm,
+            s_strides13_gemm,
             a_strides2_gemm,
             b_strides2_gemm,
             c_strides2_gemm,
             s_strides2_gemm,
             topk,
+            gemm1_config,
             gemm2_config,
+            num_local_experts,
+            float(swiglu_limit or 0.0),
+            swiglu_limit is not None,
             active_expert_ids,
         )
 

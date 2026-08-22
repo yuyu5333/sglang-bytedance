@@ -60,6 +60,24 @@ void cutlass_mxfp4a8_humming_moe_mm_sm90(
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids);
 
+void humming_per_token_quant_fp8(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    const torch::Tensor& residual,
+    const torch::Tensor& expert_offsets,
+    int64_t num_experts);
+
+void humming_swiglu_quant_fp8(
+    const at::Tensor& input,
+    at::Tensor& output_q,
+    at::Tensor& output_s,
+    const at::Tensor& residual,
+    const at::Tensor& expert_offsets,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit);
+
 void get_cutlass_w4a8_moe_mm_data_caller(
     const torch::Tensor& topk_ids,
     torch::Tensor& expert_offsets,
@@ -170,6 +188,87 @@ void cutlass_mxfp4a8_humming_moe_mm(
       s_strides,
       topk,
       swg_config,
+      expert_ids);
+}
+
+void cutlass_mxfp4a8_humming_moe_core(
+    torch::Tensor& c1,
+    torch::Tensor& c2,
+    torch::Tensor const& gateup_input_bf16,
+    torch::Tensor& gateup_input,
+    torch::Tensor& a1_scale,
+    torch::Tensor& intermediate_q,
+    torch::Tensor& a2_scale,
+    torch::Tensor const& w1,
+    torch::Tensor const& w1_scale,
+    torch::Tensor const& w1_residual,
+    torch::Tensor const& w2,
+    torch::Tensor const& w2_scale,
+    torch::Tensor const& w2_residual,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& gemm_expert_offsets,
+    torch::Tensor const& problem_sizes1,
+    torch::Tensor const& problem_sizes2,
+    torch::Tensor const& a_strides1,
+    torch::Tensor const& b_strides1,
+    torch::Tensor const& c_strides1,
+    torch::Tensor const& s_strides1,
+    torch::Tensor const& a_strides2,
+    torch::Tensor const& b_strides2,
+    torch::Tensor const& c_strides2,
+    torch::Tensor const& s_strides2,
+    int64_t topk,
+    int64_t gemm1_config,
+    int64_t gemm2_config,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit,
+    std::optional<torch::Tensor> expert_ids) {
+  humming_per_token_quant_fp8(
+      gateup_input_bf16,
+      gateup_input,
+      a1_scale,
+      w1_residual,
+      expert_offsets,
+      num_experts);
+  cutlass_mxfp4a8_humming_moe_mm(
+      c1,
+      gateup_input,
+      w1,
+      a1_scale,
+      w1_scale,
+      gemm_expert_offsets,
+      problem_sizes1,
+      a_strides1,
+      b_strides1,
+      c_strides1,
+      s_strides1,
+      topk,
+      gemm1_config,
+      expert_ids);
+  humming_swiglu_quant_fp8(
+      c1,
+      intermediate_q,
+      a2_scale,
+      w2_residual,
+      expert_offsets,
+      num_experts,
+      swiglu_limit,
+      has_swiglu_limit);
+  cutlass_mxfp4a8_humming_moe_mm(
+      c2,
+      intermediate_q,
+      w2,
+      a2_scale,
+      w2_scale,
+      gemm_expert_offsets,
+      problem_sizes2,
+      a_strides2,
+      b_strides2,
+      c_strides2,
+      s_strides2,
+      topk,
+      gemm2_config,
       expert_ids);
 }
 
