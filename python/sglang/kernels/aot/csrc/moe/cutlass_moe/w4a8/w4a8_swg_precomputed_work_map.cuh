@@ -12,9 +12,32 @@ namespace sgl_kernel::swg_detail {
 using SwgWorkTile = cutlass::gemm::kernel::detail::PrecomputedGroupWorkTile;
 
 constexpr int kSwgWorkMapMaxSwizzle = 8;
+constexpr int kSwgWorkMapBuilderThreads = 128;
 
 CUTLASS_HOST_DEVICE uint64_t swg_div_up(uint64_t value, uint64_t divisor) {
   return (value + divisor - 1) / divisor;
+}
+
+CUTLASS_HOST_DEVICE uint64_t swg_round_up(uint64_t value, uint64_t multiple) {
+  return swg_div_up(value, multiple) * multiple;
+}
+
+CUTLASS_HOST_DEVICE int swg_log_swizzle_size(
+    uint64_t problem_blocks_m,
+    uint64_t problem_blocks_n,
+    int max_swizzle_size) {
+  uint64_t const min_cta_dim =
+      problem_blocks_m < problem_blocks_n ? problem_blocks_m : problem_blocks_n;
+  if (max_swizzle_size >= 8 && min_cta_dim >= 6) {
+    return 3;
+  }
+  if (max_swizzle_size >= 4 && min_cta_dim >= 3) {
+    return 2;
+  }
+  if (max_swizzle_size >= 2 && min_cta_dim >= 2) {
+    return 1;
+  }
+  return 0;
 }
 
 template <int TileM, int TileN>
@@ -24,12 +47,20 @@ uint64_t swg_max_work_tiles(int groups, uint64_t total_tokens, uint64_t channels
   }
 
   uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));
+  uint64_t const total_token_tiles = swg_div_up(total_tokens, uint64_t(TileN));
+  int const swizzle_log =
+      swg_log_swizzle_size(channel_tiles, total_token_tiles, kSwgWorkMapMaxSwizzle);
+  uint64_t const swizzle = uint64_t(1) << swizzle_log;
+  uint64_t const padded_channel_tiles = swg_round_up(channel_tiles, swizzle);
+  uint64_t const tokens_per_padded_group = uint64_t(TileN) * swizzle;
   uint64_t const nonempty_groups =
       uint64_t(groups) < total_tokens ? uint64_t(groups) : total_tokens;
   uint64_t const extra_tokens = total_tokens - nonempty_groups;
-  // One token opens a tile row; every further tile row in that group costs TileN tokens.
-  uint64_t const max_token_tiles = nonempty_groups + extra_tokens / uint64_t(TileN);
-  return channel_tiles * max_token_tiles;
+  // Every non-empty group opens one swizzle-padded token-tile band. Each
+  // additional band needs TileN * swizzle more routed tokens in that group.
+  uint64_t const max_token_tiles =
+      swizzle * (nonempty_groups + extra_tokens / tokens_per_padded_group);
+  return padded_channel_tiles * max_token_tiles;
 }
 
 struct SwgPrecomputedWorkMap {
@@ -37,6 +68,8 @@ struct SwgPrecomputedWorkMap {
   torch::Tensor prebuilt_tma_desc_a;
   torch::Tensor prebuilt_tma_desc_b;
   uint32_t worker_count = 0;
+  uint32_t grid_x = 0;
+  uint32_t grid_y = 0;
   uint32_t tiles_per_worker = 0;
 };
 
@@ -138,93 +171,170 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
       prebuilt_tma_desc_b + group, smem_desc, 1);
 }
 
+__device__ __forceinline__ uint64_t swg_make_work_tile(
+    uint64_t global_linear_idx,
+    uint64_t local_linear_idx,
+    int group,
+    uint64_t problem_blocks_m,
+    int swizzle_log,
+    int gemm_grid_x,
+    int gemm_grid_y) {
+  uint64_t const total_grid_size = uint64_t(gemm_grid_x) * uint64_t(gemm_grid_y);
+  uint64_t const worker_id =
+      total_grid_size == 0 ? 0 : global_linear_idx % total_grid_size;
+  uint64_t const cluster_minor_offset = worker_id % uint64_t(gemm_grid_y);
+  uint64_t const cluster_id = local_linear_idx;
+
+  uint64_t const swizzle = uint64_t(1) << swizzle_log;
+  uint64_t const offset = cluster_id & (swizzle - 1);
+  uint64_t const extra = cluster_id >> swizzle_log;
+  uint64_t const cluster_idx_minor_div_swizzle = extra / problem_blocks_m;
+  uint64_t const cluster_idx_major = extra % problem_blocks_m;
+  uint64_t const cluster_idx_minor =
+      cluster_idx_minor_div_swizzle * swizzle + offset;
+
+  return SwgWorkTile::pack(
+      cluster_idx_major, cluster_idx_minor + cluster_minor_offset, uint64_t(group));
+}
+
+struct SwgGroupInfo {
+  uint64_t problem_blocks_m = 0;
+  uint64_t group_tiles = 0;
+  int swizzle_log = 0;
+};
+
 template <int TileM, int TileN, class Problem>
-__device__ __forceinline__ void swg_group_info(
-    Problem const& problem, uint64_t& channel_tiles, uint64_t& token_tiles) {
-  channel_tiles =
+__device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
+  uint64_t const channel_tiles =
       swg_div_up(uint64_t(cute::get<0>(problem)), uint64_t(TileM));
-  token_tiles = swg_div_up(uint64_t(cute::get<1>(problem)), uint64_t(TileN));
+  uint64_t const token_tiles =
+      swg_div_up(uint64_t(cute::get<1>(problem)), uint64_t(TileN));
+  int const swizzle_log =
+      swg_log_swizzle_size(channel_tiles, token_tiles, kSwgWorkMapMaxSwizzle);
+  uint64_t const swizzle = uint64_t(1) << swizzle_log;
+  uint64_t const problem_blocks_m = swg_round_up(channel_tiles, swizzle);
+  uint64_t const problem_blocks_n = swg_round_up(token_tiles, swizzle);
+
+  if (problem_blocks_m > uint64_t(SwgWorkTile::ChannelMask + 1) ||
+      problem_blocks_n > uint64_t(SwgWorkTile::TokenMask + 1)) {
+    asm volatile("trap;");
+  }
+  return {problem_blocks_m, problem_blocks_m * problem_blocks_n, swizzle_log};
 }
 
 template <int TileM, int TileN, class Problem, class MainloopParams>
 __global__ void build_swg_precomputed_work_map_kernel(
     Problem const* problem_shapes,
     int groups,
-    uint32_t worker_count,
+    int gemm_grid_x,
+    int gemm_grid_y,
     uint32_t work_tiles_per_worker,
     uint64_t* work_tiles,
     MainloopParams mainloop_params,
     cute::TmaDescriptor* prebuilt_tma_desc_a,
     cute::TmaDescriptor* prebuilt_tma_desc_b) {
+  int const tid = threadIdx.x;
+  uint64_t const worker_count = uint64_t(gemm_grid_x) * uint64_t(gemm_grid_y);
+
+  if (groups <= 0) {
+    if (blockIdx.x == 0) {
+      for (uint64_t worker = uint64_t(tid); worker < worker_count;
+           worker += uint64_t(blockDim.x)) {
+        work_tiles[worker * uint64_t(work_tiles_per_worker)] = SwgWorkTile::Invalid;
+      }
+    }
+    return;
+  }
+
+  int const group = int(blockIdx.x);
+  if (group >= groups) {
+    return;
+  }
+
   extern __shared__ __align__(64) unsigned char shared_storage[];
   auto* smem_descs = reinterpret_cast<cute::TmaDescriptor*>(shared_storage);
-  __shared__ uint64_t total_tiles;
-  __shared__ uint64_t tiles_per_worker;
-  __shared__ uint64_t group_start;
-  __shared__ uint64_t group_channel_tiles;
-  __shared__ uint64_t group_token_tiles;
+  auto* prefix_partials = reinterpret_cast<unsigned long long*>(
+      shared_storage + kSwgPrebuiltTmaDescriptorScratchBytes);
+  auto* total_partials = prefix_partials + blockDim.x;
+  auto* group_info_storage = total_partials + blockDim.x;
 
-  if (threadIdx.x == 0) {
-    total_tiles = 0;
-    for (int group = 0; group < groups; ++group) {
-      uint64_t channel_tiles = 0;
-      uint64_t token_tiles = 0;
-      swg_group_info<TileM, TileN>(
-          problem_shapes[group], channel_tiles, token_tiles);
-      total_tiles += channel_tiles * token_tiles;
-    }
-    tiles_per_worker =
-        total_tiles == 0 ? 1 : swg_div_up(total_tiles, uint64_t(worker_count));
-    group_start = 0;
+  if (tid == 0) {
+    SwgGroupInfo const info =
+        swg_group_info<TileM, TileN>(problem_shapes[group]);
+    group_info_storage[0] =
+        static_cast<unsigned long long>(info.problem_blocks_m);
+    group_info_storage[1] = static_cast<unsigned long long>(info.group_tiles);
+    group_info_storage[2] = static_cast<unsigned long long>(info.swizzle_log);
   }
+
+  swg_build_prebuilt_tma_descriptors(
+      mainloop_params,
+      problem_shapes[group],
+      group,
+      smem_descs,
+      prebuilt_tma_desc_a,
+      prebuilt_tma_desc_b);
+
+  uint64_t prefix_sum = 0;
+  uint64_t total_sum = 0;
+  for (int scan_group = tid; scan_group < groups; scan_group += blockDim.x) {
+    SwgGroupInfo const info =
+        swg_group_info<TileM, TileN>(problem_shapes[scan_group]);
+    total_sum += info.group_tiles;
+    if (scan_group < group) {
+      prefix_sum += info.group_tiles;
+    }
+  }
+  prefix_partials[tid] = static_cast<unsigned long long>(prefix_sum);
+  total_partials[tid] = static_cast<unsigned long long>(total_sum);
   __syncthreads();
 
-  for (int group = 0; group < groups; ++group) {
-    if (threadIdx.x == 0) {
-      swg_group_info<TileM, TileN>(
-          problem_shapes[group], group_channel_tiles, group_token_tiles);
-    }
-    __syncthreads();
-
-    swg_build_prebuilt_tma_descriptors(
-        mainloop_params,
-        problem_shapes[group],
-        group,
-        smem_descs,
-        prebuilt_tma_desc_a,
-        prebuilt_tma_desc_b);
-    __syncthreads();
-
-    uint64_t const group_tiles = group_channel_tiles * group_token_tiles;
-    for (uint64_t local_tile = uint64_t(threadIdx.x); local_tile < group_tiles;
-         local_tile += uint64_t(blockDim.x)) {
-      uint64_t const global_tile = group_start + local_tile;
-      uint64_t const worker = global_tile / tiles_per_worker;
-      uint64_t const worker_tile = global_tile % tiles_per_worker;
-      uint64_t const channel_tile = local_tile % group_channel_tiles;
-      uint64_t const token_tile = local_tile / group_channel_tiles;
-      work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile] =
-          SwgWorkTile::pack(channel_tile, token_tile, uint64_t(group));
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-      group_start += group_tiles;
+  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      prefix_partials[tid] += prefix_partials[tid + offset];
+      total_partials[tid] += total_partials[tid + offset];
     }
     __syncthreads();
   }
 
-  for (uint64_t worker = uint64_t(threadIdx.x); worker < uint64_t(worker_count);
-       worker += uint64_t(blockDim.x)) {
-    uint64_t const worker_start = worker * tiles_per_worker;
-    uint64_t const worker_tile_count =
-        worker_start < total_tiles
-            ? ((total_tiles - worker_start) < tiles_per_worker
-                   ? total_tiles - worker_start
-                   : tiles_per_worker)
-            : 0;
-    work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile_count] =
-        SwgWorkTile::Invalid;
+  uint64_t const group_start = static_cast<uint64_t>(prefix_partials[0]);
+  uint64_t const total_tiles = static_cast<uint64_t>(total_partials[0]);
+  uint64_t const problem_blocks_m =
+      static_cast<uint64_t>(group_info_storage[0]);
+  uint64_t const group_tiles = static_cast<uint64_t>(group_info_storage[1]);
+  int const swizzle_log = static_cast<int>(group_info_storage[2]);
+  uint64_t const tiles_per_worker =
+      total_tiles == 0 ? 1 : swg_div_up(total_tiles, worker_count);
+
+  for (uint64_t local_tile = uint64_t(tid); local_tile < group_tiles;
+       local_tile += uint64_t(blockDim.x)) {
+    uint64_t const global_tile = group_start + local_tile;
+    uint64_t const worker = global_tile / tiles_per_worker;
+    uint64_t const worker_tile = global_tile % tiles_per_worker;
+    work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile] =
+        swg_make_work_tile(
+            global_tile,
+            local_tile,
+            group,
+            problem_blocks_m,
+            swizzle_log,
+            gemm_grid_x,
+            gemm_grid_y);
+  }
+
+  if (group == groups - 1) {
+    for (uint64_t worker = uint64_t(tid); worker < worker_count;
+         worker += uint64_t(blockDim.x)) {
+      uint64_t const worker_start = worker * tiles_per_worker;
+      uint64_t const worker_tile_count =
+          worker_start < total_tiles
+              ? ((total_tiles - worker_start) < tiles_per_worker
+                     ? total_tiles - worker_start
+                     : tiles_per_worker)
+              : 0;
+      work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile_count] =
+          SwgWorkTile::Invalid;
+    }
   }
 }
 
@@ -258,18 +368,27 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
       worker_count_u64 <= uint64_t(UINT32_MAX),
       "SWG precomputed work map worker count exceeds uint32");
   TORCH_CHECK(
+      grid_shape.z == 1,
+      "SWG precomputed grouped scheduler requires a 2D launch grid");
+  TORCH_CHECK(
       groups <= int(SwgWorkTile::ExpertMask + 1),
       "SWG precomputed work map expert index exceeds packed limit");
 
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
+  uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));
+  uint64_t const total_token_tiles = swg_div_up(total_tokens, uint64_t(TileN));
+  uint64_t const max_swizzle =
+      uint64_t(1)
+      << swg_log_swizzle_size(
+             channel_tiles, total_token_tiles, kSwgWorkMapMaxSwizzle);
   uint64_t const max_tiles =
       swg_max_work_tiles<TileM, TileN>(groups, total_tokens, channels);
   TORCH_CHECK(
-      swg_div_up(channels, uint64_t(TileM)) <= SwgWorkTile::ChannelMask + 1,
+      swg_round_up(channel_tiles, max_swizzle) <= SwgWorkTile::ChannelMask + 1,
       "SWG precomputed work map channel index exceeds packed limit");
   TORCH_CHECK(
-      swg_div_up(total_tokens, uint64_t(TileN)) <= SwgWorkTile::TokenMask + 1,
+      swg_round_up(total_token_tiles, max_swizzle) <= SwgWorkTile::TokenMask + 1,
       "SWG precomputed work map token index exceeds packed limit");
 
   uint64_t const work_tiles_per_worker_u64 =
@@ -291,6 +410,8 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   result.prebuilt_tma_desc_b = torch::empty(
       int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
   result.worker_count = static_cast<uint32_t>(worker_count_u64);
+  result.grid_x = grid_shape.x;
+  result.grid_y = grid_shape.y;
   result.tiles_per_worker = static_cast<uint32_t>(work_tiles_per_worker_u64);
   return result;
 }
@@ -304,14 +425,17 @@ void launch_swg_precomputed_work_map(
     cudaStream_t stream) {
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
-  // A single CTA owns the map build; its threads write a one-to-one partition of
-  // global_tile, publish one sentinel per worker, and prebuild the grouped A/B
-  // TMA descriptors required by the prescale collective.
+  size_t const scheduler_smem =
+      kSwgPrebuiltTmaDescriptorScratchBytes +
+      size_t(kSwgWorkMapBuilderThreads * 2 + 3) *
+          sizeof(unsigned long long);
+  dim3 const scheduler_grid(groups > 0 ? groups : 1);
   build_swg_precomputed_work_map_kernel<TileM, TileN>
-      <<<1, 128, kSwgPrebuiltTmaDescriptorScratchBytes, stream>>>(
+      <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(
           problem_shapes,
           groups,
-          work_map.worker_count,
+          static_cast<int>(work_map.grid_x),
+          static_cast<int>(work_map.grid_y),
           work_map.tiles_per_worker,
           static_cast<uint64_t*>(work_map.storage.data_ptr()),
           mainloop_params,
