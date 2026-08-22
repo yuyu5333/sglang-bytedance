@@ -12,6 +12,7 @@ namespace sgl_kernel::swg_detail {
 using SwgWorkTile = cutlass::gemm::kernel::detail::PrecomputedGroupWorkTile;
 
 constexpr int kSwgWorkMapMaxSwizzle = 8;
+constexpr int kRegularWorkMapMaxSwizzle = 2;
 constexpr int kSwgWorkMapBuilderThreads = 128;
 
 CUTLASS_HOST_DEVICE uint64_t swg_div_up(uint64_t value, uint64_t divisor) {
@@ -71,6 +72,7 @@ struct SwgPrecomputedWorkMap {
   uint32_t grid_x = 0;
   uint32_t grid_y = 0;
   uint32_t tiles_per_worker = 0;
+  int swizzle_log = 0;
 };
 
 constexpr int kSwgPrebuiltTmaDescriptorCount = 2;
@@ -444,6 +446,281 @@ void launch_swg_precomputed_work_map(
   TORCH_CHECK(
       cudaPeekAtLastError() == cudaSuccess,
       "Failed to launch SWG precomputed work-map kernel");
+}
+
+template <int TileM, int TileN, int ClusterM, int ClusterN>
+uint64_t regular_max_work_tiles(int groups, uint64_t total_tokens, uint64_t channels) {
+  if (groups <= 0 || total_tokens == 0 || channels == 0) {
+    return 0;
+  }
+  int const swizzle_log =
+      swg_log_swizzle_size(total_tokens, 1, kRegularWorkMapMaxSwizzle);
+  uint64_t const swizzle = uint64_t(1) << swizzle_log;
+  uint64_t const channel_multiple = swizzle * uint64_t(ClusterM);
+  uint64_t const token_tile_group = swizzle * uint64_t(ClusterN);
+  uint64_t const tokens_per_padded_group = uint64_t(TileN) * token_tile_group;
+  uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));
+  uint64_t const padded_channel_tiles =
+      swg_round_up(channel_tiles, channel_multiple);
+  uint64_t const nonempty_groups =
+      uint64_t(groups) < total_tokens ? uint64_t(groups) : total_tokens;
+  uint64_t const extra_tokens = total_tokens - nonempty_groups;
+  uint64_t const max_token_tiles =
+      token_tile_group *
+      (nonempty_groups + extra_tokens / tokens_per_padded_group);
+  return padded_channel_tiles * max_token_tiles;
+}
+
+template <int ClusterM, int ClusterN>
+CUTLASS_DEVICE uint64_t regular_make_work_tile(
+    uint64_t global_linear_idx,
+    uint64_t local_linear_idx,
+    int group,
+    uint64_t problem_blocks_m,
+    int swizzle_log,
+    int gemm_grid_x,
+    int gemm_grid_y) {
+  uint64_t const total_grid_size =
+      uint64_t(gemm_grid_x) * uint64_t(gemm_grid_y);
+  uint64_t const worker_id =
+      total_grid_size == 0 ? 0 : global_linear_idx % total_grid_size;
+  uint64_t const cluster_minor_offset = worker_id % uint64_t(gemm_grid_y);
+  uint64_t const blocks_per_grid_dim =
+      local_linear_idx / uint64_t(ClusterN);
+  uint64_t const cluster_id = blocks_per_grid_dim / uint64_t(ClusterM);
+  uint64_t const cluster_major_offset =
+      blocks_per_grid_dim % uint64_t(ClusterM);
+  uint64_t const swizzle = uint64_t(1) << swizzle_log;
+  uint64_t const offset = cluster_id & (swizzle - 1);
+  uint64_t const extra = cluster_id >> swizzle_log;
+  uint64_t const clusters_m = problem_blocks_m / uint64_t(ClusterM);
+  uint64_t const cluster_n_div_swizzle = extra / clusters_m;
+  uint64_t const cluster_m = extra % clusters_m;
+  uint64_t const cluster_n = cluster_n_div_swizzle * swizzle + offset;
+  return SwgWorkTile::pack(
+      cluster_m * uint64_t(ClusterM) + cluster_major_offset,
+      cluster_n * uint64_t(ClusterN) + cluster_minor_offset,
+      uint64_t(group));
+}
+
+template <int TileM, int TileN, int ClusterM, int ClusterN, class Problem>
+__device__ __forceinline__ SwgGroupInfo regular_group_info(
+    Problem const& problem,
+    int swizzle_log) {
+  uint64_t const channel_tiles =
+      swg_div_up(uint64_t(cute::get<0>(problem)), uint64_t(TileM));
+  uint64_t const token_tiles =
+      swg_div_up(uint64_t(cute::get<1>(problem)), uint64_t(TileN));
+  uint64_t const swizzle = uint64_t(1) << swizzle_log;
+  uint64_t const problem_blocks_m =
+      swg_round_up(channel_tiles, swizzle * uint64_t(ClusterM));
+  uint64_t const problem_blocks_n =
+      swg_round_up(token_tiles, swizzle * uint64_t(ClusterN));
+  if (problem_blocks_m > uint64_t(SwgWorkTile::ChannelMask + 1) ||
+      problem_blocks_n > uint64_t(SwgWorkTile::TokenMask + 1)) {
+    asm volatile("trap;");
+  }
+  return {problem_blocks_m, problem_blocks_m * problem_blocks_n, swizzle_log};
+}
+
+template <
+    int TileM,
+    int TileN,
+    int ClusterM,
+    int ClusterN,
+    class Problem,
+    class MainloopParams>
+__global__ void build_regular_precomputed_work_map_kernel(
+    Problem const* problem_shapes,
+    int groups,
+    int swizzle_log,
+    int gemm_grid_x,
+    int gemm_grid_y,
+    uint64_t* work_tiles,
+    MainloopParams mainloop_params,
+    bool weight_desc_per_group,
+    cute::TmaDescriptor* prebuilt_tma_desc_a,
+    cute::TmaDescriptor* prebuilt_tma_desc_b) {
+  int const tid = threadIdx.x;
+  uint64_t const worker_count =
+      uint64_t(gemm_grid_x) * uint64_t(gemm_grid_y);
+  if (groups <= 0) {
+    for (uint64_t worker = uint64_t(tid); worker < worker_count;
+         worker += uint64_t(blockDim.x)) {
+      work_tiles[worker] = SwgWorkTile::Invalid;
+    }
+    return;
+  }
+  int const group = int(blockIdx.x);
+  if (group >= groups) {
+    return;
+  }
+
+  extern __shared__ __align__(64) unsigned char shared_storage[];
+  auto* smem_descs = reinterpret_cast<cute::TmaDescriptor*>(shared_storage);
+  auto* prefix_partials = reinterpret_cast<unsigned long long*>(
+      shared_storage + kSwgPrebuiltTmaDescriptorScratchBytes);
+  auto* group_info_storage = prefix_partials + blockDim.x;
+  if (tid == 0) {
+    auto const info =
+        regular_group_info<TileM, TileN, ClusterM, ClusterN>(
+            problem_shapes[group], swizzle_log);
+    group_info_storage[0] = info.problem_blocks_m;
+    group_info_storage[1] = info.group_tiles;
+  }
+  swg_build_prebuilt_tma_descriptors(
+      mainloop_params,
+      problem_shapes[group],
+      group,
+      weight_desc_per_group,
+      smem_descs,
+      prebuilt_tma_desc_a,
+      prebuilt_tma_desc_b);
+
+  uint64_t prefix_sum = 0;
+  for (int prefix_group = tid; prefix_group < group;
+       prefix_group += blockDim.x) {
+    prefix_sum +=
+        regular_group_info<TileM, TileN, ClusterM, ClusterN>(
+            problem_shapes[prefix_group], swizzle_log)
+            .group_tiles;
+  }
+  prefix_partials[tid] = prefix_sum;
+  __syncthreads();
+  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      prefix_partials[tid] += prefix_partials[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  uint64_t const group_start = prefix_partials[0];
+  uint64_t const problem_blocks_m = group_info_storage[0];
+  uint64_t const group_tiles = group_info_storage[1];
+  for (uint64_t local_tile = uint64_t(tid); local_tile < group_tiles;
+       local_tile += uint64_t(blockDim.x)) {
+    uint64_t const global_tile = group_start + local_tile;
+    work_tiles[global_tile] =
+        regular_make_work_tile<ClusterM, ClusterN>(
+            global_tile,
+            local_tile,
+            group,
+            problem_blocks_m,
+            swizzle_log,
+            gemm_grid_x,
+            gemm_grid_y);
+  }
+  if (group == groups - 1) {
+    uint64_t const sentinel_start = group_start + group_tiles;
+    for (uint64_t worker = uint64_t(tid); worker < worker_count;
+         worker += uint64_t(blockDim.x)) {
+      work_tiles[sentinel_start + worker] = SwgWorkTile::Invalid;
+    }
+  }
+}
+
+template <class Gemm, class Problem>
+SwgPrecomputedWorkMap build_precomputed_work_map(
+    Problem const* problem_shapes,
+    int groups,
+    uint64_t total_tokens,
+    uint64_t channels,
+    dim3 const& grid_shape,
+    bool weight_desc_per_group,
+    torch::Device device) {
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    return build_swg_precomputed_work_map<Gemm>(
+        problem_shapes,
+        groups,
+        total_tokens,
+        channels,
+        grid_shape,
+        weight_desc_per_group,
+        device);
+  } else {
+    constexpr int TileM = cute::size<0>(typename Gemm::CtaTileShape{});
+    constexpr int TileN = cute::size<1>(typename Gemm::CtaTileShape{});
+    constexpr int ClusterM = cute::size<0>(typename Gemm::CtaClusterShape{});
+    constexpr int ClusterN = cute::size<1>(typename Gemm::CtaClusterShape{});
+    uint64_t const worker_count =
+        uint64_t(grid_shape.x) * uint64_t(grid_shape.y) * uint64_t(grid_shape.z);
+    uint64_t const max_tiles =
+        regular_max_work_tiles<TileM, TileN, ClusterM, ClusterN>(
+            groups, total_tokens, channels);
+    TORCH_CHECK(worker_count > 0 && grid_shape.z == 1,
+                "Precomputed grouped scheduler requires a nonempty 2D grid");
+    TORCH_CHECK(groups <= int(SwgWorkTile::ExpertMask + 1),
+                "Precomputed work-map expert index exceeds packed limit");
+    TORCH_CHECK(max_tiles + worker_count <= uint64_t(INT64_MAX) / sizeof(uint64_t),
+                "Precomputed work-map capacity exceeds tensor size");
+    auto options = torch::TensorOptions().dtype(torch::kUInt8).device(device);
+    SwgPrecomputedWorkMap result;
+    result.storage =
+        torch::empty(int64_t((max_tiles + worker_count) * sizeof(uint64_t)), options);
+    result.prebuilt_tma_desc_a = torch::empty(
+        int64_t((weight_desc_per_group && groups > 0 ? groups : 1) *
+                sizeof(cute::TmaDescriptor)),
+        options);
+    result.prebuilt_tma_desc_b = torch::empty(
+        int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)),
+        options);
+    result.worker_count = static_cast<uint32_t>(worker_count);
+    result.grid_x = grid_shape.x;
+    result.grid_y = grid_shape.y;
+    result.swizzle_log =
+        swg_log_swizzle_size(max_tiles, 1, kRegularWorkMapMaxSwizzle);
+    return result;
+  }
+}
+
+template <class Gemm, class Problem, class MainloopParams>
+void launch_precomputed_work_map(
+    SwgPrecomputedWorkMap const& work_map,
+    Problem const* problem_shapes,
+    int groups,
+    MainloopParams const& mainloop_params,
+    bool weight_desc_per_group,
+    cudaStream_t stream) {
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    launch_swg_precomputed_work_map<Gemm>(
+        work_map,
+        problem_shapes,
+        groups,
+        mainloop_params,
+        weight_desc_per_group,
+        stream);
+  } else {
+    constexpr int TileM = cute::size<0>(typename Gemm::CtaTileShape{});
+    constexpr int TileN = cute::size<1>(typename Gemm::CtaTileShape{});
+    constexpr int ClusterM = cute::size<0>(typename Gemm::CtaClusterShape{});
+    constexpr int ClusterN = cute::size<1>(typename Gemm::CtaClusterShape{});
+    size_t const scheduler_smem =
+        kSwgPrebuiltTmaDescriptorScratchBytes +
+        size_t(kSwgWorkMapBuilderThreads + 2) * sizeof(unsigned long long);
+    build_regular_precomputed_work_map_kernel<
+        TileM,
+        TileN,
+        ClusterM,
+        ClusterN>
+        <<<dim3(groups > 0 ? groups : 1),
+           kSwgWorkMapBuilderThreads,
+           scheduler_smem,
+           stream>>>(
+            problem_shapes,
+            groups,
+            work_map.swizzle_log,
+            int(work_map.grid_x),
+            int(work_map.grid_y),
+            static_cast<uint64_t*>(work_map.storage.data_ptr()),
+            mainloop_params,
+            weight_desc_per_group,
+            static_cast<cute::TmaDescriptor*>(
+                work_map.prebuilt_tma_desc_a.data_ptr()),
+            static_cast<cute::TmaDescriptor*>(
+                work_map.prebuilt_tma_desc_b.data_ptr()));
+    TORCH_CHECK(cudaPeekAtLastError() == cudaSuccess,
+                "Failed to launch precomputed work-map kernel");
+  }
 }
 
 }  // namespace sgl_kernel::swg_detail

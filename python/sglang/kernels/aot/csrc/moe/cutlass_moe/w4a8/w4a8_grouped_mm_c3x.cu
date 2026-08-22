@@ -31,7 +31,16 @@ struct QuantTraits<WType::MXFP4> {
   static constexpr int GroupSize = 32;
 };
 
-template <int M, int N, int K, int A, int B, int C, Sched S, WType W = WType::INT4>
+template <
+    int M,
+    int N,
+    int K,
+    int A,
+    int B,
+    int C,
+    Sched S,
+    WType W = WType::INT4,
+    bool UsePreMmaE8M0 = false>
 struct SM90W4A8Config {
   using KernelSchedule = std::conditional_t<
       S == Sched::PP,
@@ -51,7 +60,9 @@ struct SM90W4A8Config {
       KernelSchedule,
       EpilogueSchedule,
       typename QuantTraits<W>::Element,
-      QuantTraits<W>::GroupSize>;
+      QuantTraits<W>::GroupSize,
+      false,
+      UsePreMmaE8M0>;
 };
 
 template <int M, int N, int K, int A, int B, int C>
@@ -66,6 +77,10 @@ using SM90_PP_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::PP, WType::MXFP4>;
 
 template <int M, int N, int K, int A, int B, int C>
 using SM90_CO_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::CO, WType::MXFP4>;
+
+template <int M, int N, int K, int A, int B, int C>
+using SM90_HUMMING_MXFP4 =
+    SM90W4A8Config<M, N, K, A, B, C, Sched::PP, WType::MXFP4, true>;
 
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 template <int N>
@@ -522,7 +537,6 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
     int64_t topk,
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids) {
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   constexpr int64_t chunk_size = QuantTraits<WType::MXFP4>::GroupSize;
   std::optional<torch::Tensor> act_block_scales = std::nullopt;
   std::optional<torch::Tensor> as_strides = std::nullopt;
@@ -541,6 +555,31 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
   TORCH_CHECK(topk > 0, "topk must be positive");
 
   switch (swg_config) {
+    case 0:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 16, 128, 1, 1, 1>));
+      return;
+    case 1:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 16, 128, 2, 1, 1>));
+      return;
+    case 2:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 32, 128, 1, 1, 1>));
+      return;
+    case 3:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 32, 128, 2, 1, 1>));
+      return;
+    case 4:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 64, 128, 1, 1, 1>));
+      return;
+    case 5:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 64, 128, 2, 1, 1>));
+      return;
+    case 6:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 128, 128, 1, 1, 1>));
+      return;
+    case 7:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_HUMMING_MXFP4<128, 128, 128, 2, 1, 1>));
+      return;
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
     case 100:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
       return;
@@ -553,16 +592,14 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
     case 103:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
       return;
+#endif
     default:
       TORCH_CHECK(
           false,
-          "Unsupported Humming SWG config=",
+          "Unsupported Humming config=",
           swg_config,
-          "; expected one of 100, 101, 102, 103");
+          "; expected one of 0-7, 100-103");
   }
-#else
-  TORCH_CHECK(false, "Humming SWG kernels are disabled in this build");
-#endif
 }
 
 }  // namespace

@@ -142,7 +142,7 @@ class PersistentTileSchedulerSm90GroupPrecomputed {
 
       this->blocks_across_problem_ = problem_blocks.x * problem_blocks.y * problem_blocks.z;
       this->pre_processed_problem_shapes = true;
-      CUTLASS_UNUSED(max_swizzle_size);
+      this->max_swizzle_size_ = max_swizzle_size;
       this->raster_order_ = ParamsBase::get_rasterization_order(problem_blocks_m, problem_blocks_n,
                                                                 raster_order_option);
 
