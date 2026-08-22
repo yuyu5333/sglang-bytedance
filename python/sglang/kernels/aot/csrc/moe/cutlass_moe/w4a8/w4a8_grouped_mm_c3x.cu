@@ -507,6 +507,64 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
   }
 }
 
+void dispatch_mxfp4a8_humming_moe_mm_sm90(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t topk,
+    int64_t swg_config,
+    std::optional<torch::Tensor> expert_ids) {
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  constexpr int64_t chunk_size = QuantTraits<WType::MXFP4>::GroupSize;
+  std::optional<torch::Tensor> act_block_scales = std::nullopt;
+  std::optional<torch::Tensor> as_strides = std::nullopt;
+  constexpr int64_t act_scale_group = 0;
+
+  TORCH_CHECK(b_tensors.scalar_type() == torch::kInt8, "Humming interleaved weight must be int8");
+  TORCH_CHECK(b_tensors.is_contiguous(), "Humming interleaved weight must be contiguous");
+  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8, "Humming folded offset must be uint8");
+  TORCH_CHECK(b_scales.is_contiguous(), "Humming folded offset must be contiguous");
+  TORCH_CHECK(a_scales.scalar_type() == torch::kFloat32, "Humming per-row scale must be float32");
+  TORCH_CHECK(a_scales.dim() == 1, "Humming per-row scale must be 1D");
+  TORCH_CHECK(a_scales.is_contiguous(), "Humming per-row scale must be contiguous");
+  TORCH_CHECK(
+      a_scales.numel() == a_tensors.numel() / a_tensors.size(-1),
+      "Humming per-row scale must contain one value per activation row");
+  TORCH_CHECK(topk > 0, "topk must be positive");
+
+  switch (swg_config) {
+    case 100:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
+      return;
+    case 101:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
+      return;
+    case 102:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
+      return;
+    case 103:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
+      return;
+    default:
+      TORCH_CHECK(
+          false,
+          "Unsupported Humming SWG config=",
+          swg_config,
+          "; expected one of 100, 101, 102, 103");
+  }
+#else
+  TORCH_CHECK(false, "Humming SWG kernels are disabled in this build");
+#endif
+}
+
 }  // namespace
 
 void cutlass_w4a8_moe_mm_sm90(
@@ -578,5 +636,37 @@ void cutlass_mxfp4a8_moe_mm_sm90(
       act_block_scales,
       as_strides,
       act_scale_group,
+      expert_ids);
+}
+
+void cutlass_mxfp4a8_humming_moe_mm_sm90(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t topk,
+    int64_t swg_config,
+    std::optional<torch::Tensor> expert_ids) {
+  dispatch_mxfp4a8_humming_moe_mm_sm90(
+      d_tensors,
+      a_tensors,
+      b_tensors,
+      a_scales,
+      b_scales,
+      expert_offsets,
+      problem_sizes,
+      a_strides,
+      b_strides,
+      d_strides,
+      s_strides,
+      topk,
+      swg_config,
       expert_ids);
 }

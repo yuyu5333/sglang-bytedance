@@ -266,6 +266,14 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "               int act_scale_group=0, Tensor? expert_ids=None) -> ()");
   m.impl("cutlass_mxfp4a8_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_moe_mm);
 
+  m.def(
+      "cutlass_mxfp4a8_humming_moe_mm(Tensor! d, Tensor a, Tensor b, "
+      "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
+      "               Tensor problem_sizes, Tensor a_strides, "
+      "               Tensor b_strides, Tensor d_strides, Tensor s_strides,"
+      "               int topk, int swg_config, Tensor? expert_ids=None) -> ()");
+  m.impl("cutlass_mxfp4a8_humming_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_humming_moe_mm);
+
   /*
    * From csrc/speculative
    */

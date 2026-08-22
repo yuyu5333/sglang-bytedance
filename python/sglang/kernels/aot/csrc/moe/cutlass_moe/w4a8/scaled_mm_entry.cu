@@ -44,6 +44,22 @@ void cutlass_mxfp4a8_moe_mm_sm90(
     int64_t act_scale_group,
     std::optional<torch::Tensor> expert_ids);
 
+void cutlass_mxfp4a8_humming_moe_mm_sm90(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t topk,
+    int64_t swg_config,
+    std::optional<torch::Tensor> expert_ids);
+
 void get_cutlass_w4a8_moe_mm_data_caller(
     const torch::Tensor& topk_ids,
     torch::Tensor& expert_offsets,
@@ -123,6 +139,38 @@ void cutlass_mxfp4a8_moe_mm(
       act_scale_group,
       expert_ids);
   return;
+}
+
+void cutlass_mxfp4a8_humming_moe_mm(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t topk,
+    int64_t swg_config,
+    std::optional<torch::Tensor> expert_ids) {
+  cutlass_mxfp4a8_humming_moe_mm_sm90(
+      d_tensors,
+      a_tensors,
+      b_tensors,
+      a_scales,
+      b_scales,
+      expert_offsets,
+      problem_sizes,
+      a_strides,
+      b_strides,
+      d_strides,
+      s_strides,
+      topk,
+      swg_config,
+      expert_ids);
 }
 
 void get_cutlass_w4a8_moe_mm_data(

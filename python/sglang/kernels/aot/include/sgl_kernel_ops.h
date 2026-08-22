@@ -457,6 +457,22 @@ void cutlass_mxfp4a8_moe_mm(
     std::optional<torch::Tensor> as_strides,
     int64_t act_scale_group,
     std::optional<torch::Tensor> expert_ids);
+
+void cutlass_mxfp4a8_humming_moe_mm(
+    torch::Tensor& d_tensors,
+    torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors,
+    torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales,
+    torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes,
+    torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides,
+    torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides,
+    int64_t topk,
+    int64_t swg_config,
+    std::optional<torch::Tensor> expert_ids);
 /*
  * From csrc/speculative
  */

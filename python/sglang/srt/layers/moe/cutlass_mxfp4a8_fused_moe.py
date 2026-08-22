@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """CUTLASS MXFP4A8 fused MoE runner.
 
-This runner keeps the existing SM90 MXFP4A8 grouped GEMM kernel unchanged, but
-moves the routing metadata preparation and input/output permutation onto the AOT
-CUDA helper path used by the CUTLASS FP8 MoE runner:
+For EP=1 this runner uses the explicit Humming SM90 grouped GEMM entry with
+load-time-interleaved weights, folded E8M0 offsets, and per-token FP8 activation
+scales. EP keeps the complete legacy MXFP4A8 protocol.
 
   * ``prepare_moe_input`` builds expert offsets, GEMM problem sizes, and both
     permutations in one CUDA path.
   * ``shuffle_rows`` performs the gate/up input reorder.
+  * A CUDA/Triton path folds each expert's Humming residual into its routed
+    rows' activation scales without a host synchronization.
   * ``apply_shuffle_mul_sum`` performs the final top-k reorder, router-weight
     multiply, and reduction.
-
-The activation block-scale layout remains the graph-safe fixed-stride layout.
-Do not switch this file to the compact layout unless the multi-expert numerical
-issue is fixed and re-verified.
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.model_executor.runner_utils.capture_mode import get_is_capture_mode
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import is_cuda_alike
 
@@ -32,9 +29,12 @@ _is_cuda_alike = is_cuda_alike()
 
 if _is_cuda_alike:
     from sgl_kernel import (
+        cutlass_mxfp4a8_humming_moe_mm,
         cutlass_mxfp4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
         prepare_moe_input,
+        sgl_per_token_quant_fp8,
+        silu_and_mul,
     )
 
     try:
@@ -46,46 +46,6 @@ if _is_cuda_alike:
         from sgl_kernel import get_cutlass_w4a8_moe_mm_data_with_permutation
     except ImportError:
         get_cutlass_w4a8_moe_mm_data_with_permutation = None
-
-    from sglang.kernels.ops.quantization.fp8_kernel import (
-        _run_per_token_group_quant_8bit_kernel,
-        fp8_max,
-        fp8_min,
-    )
-
-
-MXFP4_CHUNK_SIZE = 32
-MXFP4_PACKED_SCALES = 4
-_FP8_QUANT_EPS = 1e-10
-
-
-@triton.jit
-def _scatter_fixed_act_block_scale_kernel(
-    scale_ptr,
-    packed_ptr,
-    expert_offsets_ptr,
-    total_m,
-    nblk,
-    m_stride,
-    num_experts: tl.constexpr,
-    A: tl.constexpr,
-    BLKN: tl.constexpr,
-):
-    row = tl.program_id(0)
-    blk = tl.program_id(1) * BLKN + tl.arange(0, BLKN)
-    mask = blk < nblk
-
-    eid = tl.full((), 0, tl.int64)
-    for e in tl.range(0, num_experts):
-        next_off = tl.load(expert_offsets_ptr + e + 1).to(tl.int64)
-        eid = tl.where(row >= next_off, e + 1, eid)
-    local_row = row - tl.load(expert_offsets_ptr + eid).to(tl.int64)
-
-    val = tl.load(scale_ptr + row * nblk + blk, mask=mask, other=0.0)
-    expert_base = eid * m_stride * nblk
-    dst = expert_base + (blk // A) * (m_stride * A) + local_row * A + (blk % A)
-    tl.store(packed_ptr + dst, val.to(packed_ptr.dtype.element_ty), mask=mask)
-
 
 @triton.jit
 def _apply_shuffle_mul_sum_fp32_factors_kernel(
@@ -117,6 +77,27 @@ def _apply_shuffle_mul_sum_fp32_factors_kernel(
     tl.store(output_ptr + token * row_stride + offs, acc, mask=mask)
 
 
+@triton.jit
+def _mul_per_token_scale_by_expert_kernel(
+    scale_ptr,
+    residual_ptr,
+    expert_offsets_ptr,
+    total_m,
+    num_experts: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = rows < total_m
+    expert = tl.zeros((BLOCK,), tl.int32)
+    for e in tl.range(0, num_experts):
+        next_offset = tl.load(expert_offsets_ptr + e + 1)
+        expert = tl.where(rows >= next_offset, e + 1, expert)
+    expert = tl.minimum(expert, num_experts - 1)
+    scale = tl.load(scale_ptr + rows, mask=mask)
+    residual = tl.load(residual_ptr + expert, mask=mask)
+    tl.store(scale_ptr + rows, scale * residual, mask=mask)
+
+
 class CutlassMxfp4A8FusedMoeRunner:
     """Stateful MXFP4A8 MoE runner with reusable per-layer workspaces."""
 
@@ -139,30 +120,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             tensor = torch.empty((numel,), dtype=dtype, device=device)
             self._workspace[key] = tensor
         return tensor[:numel].view(shape)
-
-    def _fixed_act_scale_strides(
-        self,
-        num_experts: int,
-        m_stride: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        key = ("as_strides", (num_experts, m_stride), torch.int64, device.index or 0)
-        tensor = self._workspace.get(key)
-        if tensor is None or tensor.device != device:
-            expert_prefix = torch.arange(
-                num_experts, dtype=torch.int64, device=device
-            ) * m_stride
-            tensor = torch.stack(
-                [
-                    torch.full(
-                        (num_experts,), m_stride, dtype=torch.int64, device=device
-                    ),
-                    expert_prefix,
-                ],
-                dim=1,
-            ).contiguous()
-            self._workspace[key] = tensor
-        return tensor
 
     def _compact_moe_metadata(
         self,
@@ -202,61 +159,43 @@ class CutlassMxfp4A8FusedMoeRunner:
             compact_expert_ids,
         )
 
-    def _build_fixed_act_block_scale(
-        self,
-        scale: torch.Tensor,
-        expert_offsets: torch.Tensor,
-        num_experts: int,
-        name: str,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        total_m, nblk = scale.shape
-        assert nblk % MXFP4_PACKED_SCALES == 0
-        m_stride = max(2, (total_m + 1) & ~1)
-        packed = self._empty(
-            name,
-            (num_experts * m_stride * nblk,),
-            torch.bfloat16,
-            scale.device,
-        )
-        strides = self._fixed_act_scale_strides(num_experts, m_stride, scale.device)
-        if total_m > 0:
-            _scatter_fixed_act_block_scale_kernel[
-                (total_m, triton.cdiv(nblk, triton.next_power_of_2(nblk)))
-            ](
-                scale,
-                packed,
-                expert_offsets,
-                total_m,
-                nblk,
-                m_stride,
-                num_experts,
-                A=MXFP4_PACKED_SCALES,
-                BLKN=triton.next_power_of_2(nblk),
-            )
-        return packed, strides
-
-    def _quantize_mxfp8_into(
+    def _quantize_fp8_per_token_into(
         self,
         x: torch.Tensor,
         out_q: torch.Tensor,
         out_s: torch.Tensor,
-        *,
-        fuse_silu_and_mul: bool = False,
     ) -> None:
         if x.numel() == 0:
             return
-        _run_per_token_group_quant_8bit_kernel(
-            x,
-            out_q,
-            out_s,
-            MXFP4_CHUNK_SIZE,
-            _FP8_QUANT_EPS,
-            fp8_min,
-            fp8_max,
-            scale_ue8m0=False,
-            fuse_silu_and_mul=fuse_silu_and_mul,
-            masked_m=None,
+        sgl_per_token_quant_fp8(x, out_q, out_s.view(-1, 1))
+
+    def _mul_per_token_scale_by_expert(
+        self,
+        scale: torch.Tensor,
+        residual: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        num_experts: int,
+    ) -> None:
+        if scale.numel() == 0:
+            return
+        block = 256
+        _mul_per_token_scale_by_expert_kernel[(triton.cdiv(scale.numel(), block),)](
+            scale,
+            residual,
+            expert_offsets,
+            scale.numel(),
+            num_experts,
+            BLOCK=block,
         )
+
+    @staticmethod
+    def _humming_gemm2_config(output_size: int) -> int:
+        # Prefer the N=16 single-warpgroup tactic whenever the output shape
+        # permits it, then fall back to the other explicitly compiled shapes.
+        for tile_n, config in ((16, 101), (40, 103), (32, 102), (8, 100)):
+            if output_size % tile_n == 0:
+                return config
+        return 100
 
     def _apply_shuffle_mul_sum_fp32_factors(
         self,
@@ -285,20 +224,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             BLOCK=block,
         )
 
-    def _silu_mul_quant_into(
-        self,
-        c1: torch.Tensor,
-        out_q: torch.Tensor,
-        out_s: torch.Tensor,
-        n: int,
-        swiglu_limit: Optional[float],
-    ) -> None:
-        if swiglu_limit is not None:
-            lim = float(swiglu_limit)
-            c1[:, :n].clamp_(max=lim)
-            c1[:, n:].clamp_(min=-lim, max=lim)
-        self._quantize_mxfp8_into(c1, out_q, out_s, fuse_silu_and_mul=True)
-
     def __call__(
         self,
         a: torch.Tensor,
@@ -306,6 +231,12 @@ class CutlassMxfp4A8FusedMoeRunner:
         w2_q: torch.Tensor,
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
+        w1_humming: torch.Tensor,
+        w2_humming: torch.Tensor,
+        w1_scale_humming: torch.Tensor,
+        w2_scale_humming: torch.Tensor,
+        w1_residual_humming: torch.Tensor,
+        w2_residual_humming: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         a_strides1: torch.Tensor,
@@ -376,6 +307,13 @@ class CutlassMxfp4A8FusedMoeRunner:
                 swiglu_limit,
             )
 
+        assert w1_humming.dtype == torch.int8
+        assert w2_humming.dtype == torch.int8
+        assert w1_scale_humming.dtype == torch.uint8
+        assert w2_scale_humming.dtype == torch.uint8
+        assert w1_residual_humming.shape == (num_local_experts,)
+        assert w2_residual_humming.shape == (num_local_experts,)
+
         topk_ids_i32 = topk_ids.contiguous()
         if topk_ids_i32.dtype != torch.int32:
             topk_ids_i32 = topk_ids_i32.to(torch.int32)
@@ -421,16 +359,21 @@ class CutlassMxfp4A8FusedMoeRunner:
         gateup_input = self._empty(
             "gateup_input_fp8", (m * topk, k), torch.float8_e4m3fn, device
         )
-        a1_blk_scale = self._empty(
-            "a1_blk_scale", (m * topk, k // MXFP4_CHUNK_SIZE), torch.float32, device
+        a1_scale_per_token = self._empty(
+            "a1_scale_per_token", (m * topk,), torch.float32, device
         )
         gateup_input_bf16 = self._empty(
             "gateup_input_bf16", (m * topk, k), a.dtype, device
         )
         torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
-        self._quantize_mxfp8_into(gateup_input_bf16, gateup_input, a1_blk_scale)
-        a1_as_packed, a1_as_strides = self._build_fixed_act_block_scale(
-            a1_blk_scale, expert_offsets, num_local_experts, "a1_as_packed"
+        self._quantize_fp8_per_token_into(
+            gateup_input_bf16, gateup_input, a1_scale_per_token
+        )
+        self._mul_per_token_scale_by_expert(
+            a1_scale_per_token,
+            w1_residual_humming,
+            expert_offsets,
+            num_local_experts,
         )
 
         use_compact_groups = compact_cutlass_w4a8_moe_mm_data is not None and m <= 256
@@ -462,62 +405,64 @@ class CutlassMxfp4A8FusedMoeRunner:
         b_strides2_gemm = b_strides2
         c_strides2_gemm = c_strides2
         s_strides2_gemm = s_strides2
-        a1_as_strides_gemm = a1_as_strides
-
         c1 = self._empty("c1", (m * topk, n * 2), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
-        ones_scale = self._empty("ones_scale", (1,), torch.float32, device)
-        ones_scale.fill_(1.0)
 
-        cutlass_mxfp4a8_moe_mm(
+        cutlass_mxfp4a8_humming_moe_mm(
             c1,
             gateup_input,
-            w1_q,
-            ones_scale,
-            w1_scale,
+            w1_humming,
+            a1_scale_per_token,
+            w1_scale_humming,
             expert_offsets_gemm,
             problem_sizes1_gemm,
             a_strides1_gemm,
             b_strides1_gemm,
             c_strides1_gemm,
             s_strides13_gemm,
-            MXFP4_CHUNK_SIZE,
             topk,
-            a1_as_packed,
-            a1_as_strides_gemm,
-            MXFP4_CHUNK_SIZE,
+            101,
             active_expert_ids,
         )
 
+        intermediate_bf16 = self._empty(
+            "intermediate_bf16", (m * topk, n), torch.bfloat16, device
+        )
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
         )
-        a2_blk_scale = self._empty(
-            "a2_blk_scale", (m * topk, n // MXFP4_CHUNK_SIZE), torch.float32, device
+        a2_scale_per_token = self._empty(
+            "a2_scale_per_token", (m * topk,), torch.float32, device
         )
-        self._silu_mul_quant_into(c1, intermediate_q, a2_blk_scale, n, swiglu_limit)
-        a2_as_packed, a2_as_strides = self._build_fixed_act_block_scale(
-            a2_blk_scale, expert_offsets, num_local_experts, "a2_as_packed"
+        if swiglu_limit is not None:
+            lim = float(swiglu_limit)
+            c1[:, :n].clamp_(max=lim)
+            c1[:, n:].clamp_(min=-lim, max=lim)
+        silu_and_mul(c1, intermediate_bf16)
+        self._quantize_fp8_per_token_into(
+            intermediate_bf16, intermediate_q, a2_scale_per_token
         )
-        a2_as_strides_gemm = a2_as_strides
+        self._mul_per_token_scale_by_expert(
+            a2_scale_per_token,
+            w2_residual_humming,
+            expert_offsets,
+            num_local_experts,
+        )
 
-        cutlass_mxfp4a8_moe_mm(
+        cutlass_mxfp4a8_humming_moe_mm(
             c2,
             intermediate_q,
-            w2_q,
-            ones_scale,
-            w2_scale,
+            w2_humming,
+            a2_scale_per_token,
+            w2_scale_humming,
             expert_offsets_gemm,
             problem_sizes2_gemm,
             a_strides2_gemm,
             b_strides2_gemm,
             c_strides2_gemm,
             s_strides2_gemm,
-            MXFP4_CHUNK_SIZE,
             topk,
-            a2_as_packed,
-            a2_as_strides_gemm,
-            MXFP4_CHUNK_SIZE,
+            self._humming_gemm2_config(k),
             active_expert_ids,
         )
 

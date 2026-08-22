@@ -30,6 +30,7 @@ else:
     )
     from sgl_kernel.cutlass_moe import (
         compact_cutlass_w4a8_moe_mm_data,
+        cutlass_mxfp4a8_humming_moe_mm,
         cutlass_mxfp4a8_moe_mm,
         cutlass_w4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
