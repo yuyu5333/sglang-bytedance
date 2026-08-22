@@ -242,6 +242,21 @@ __global__ void build_swg_precomputed_work_map_kernel(
     uint32_t work_tiles_per_worker,
     uint64_t* work_tiles,
     MainloopParams mainloop_params,
+    int32_t const* expert_offsets,
+    int32_t const* expert_ids,
+    uint64_t* activation_ptrs,
+    uint64_t* weight_ptrs,
+    uint64_t* output_ptrs,
+    uint64_t* activation_scale_ptrs,
+    uint64_t* weight_scale_ptrs,
+    uint8_t* activation_base,
+    uint8_t* weight_base,
+    uint8_t* output_base,
+    uint8_t* activation_scale_base,
+    uint8_t* weight_scale_base,
+    uint64_t output_element_bytes,
+    uint64_t output_channels,
+    uint64_t reduction_channels,
     bool weight_desc_per_group,
     cute::TmaDescriptor* prebuilt_tma_desc_a,
     cute::TmaDescriptor* prebuilt_tma_desc_b) {
@@ -271,6 +286,19 @@ __global__ void build_swg_precomputed_work_map_kernel(
   auto* group_info_storage = total_partials + blockDim.x;
 
   if (tid == 0) {
+    int const expert = expert_ids != nullptr ? expert_ids[group] : group;
+    uint64_t const token_offset = static_cast<uint64_t>(expert_offsets[group]);
+    activation_ptrs[group] =
+        reinterpret_cast<uint64_t>(activation_base + token_offset * reduction_channels);
+    weight_ptrs[group] = reinterpret_cast<uint64_t>(
+        weight_base + uint64_t(expert) * output_channels * reduction_channels / 2);
+    output_ptrs[group] = reinterpret_cast<uint64_t>(
+        output_base + token_offset * output_channels * output_element_bytes);
+    activation_scale_ptrs[group] = reinterpret_cast<uint64_t>(
+        activation_scale_base + token_offset * sizeof(float));
+    weight_scale_ptrs[group] = reinterpret_cast<uint64_t>(
+        weight_scale_base + uint64_t(expert) * output_channels * reduction_channels / 32);
+
     SwgGroupInfo const info =
         swg_group_info<TileM, TileN>(problem_shapes[group]);
     group_info_storage[0] =
@@ -279,6 +307,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
     group_info_storage[2] = static_cast<unsigned long long>(info.swizzle_log);
   }
 
+  __syncthreads();
   swg_build_prebuilt_tma_descriptors(
       mainloop_params,
       problem_shapes[group],
@@ -444,6 +473,18 @@ void launch_swg_precomputed_work_map(
     Problem const* problem_shapes,
     int groups,
     MainloopParams const& mainloop_params,
+    torch::Tensor const& expert_offsets,
+    std::optional<torch::Tensor> const& expert_ids,
+    torch::Tensor const& activation_ptrs,
+    torch::Tensor const& weight_ptrs,
+    torch::Tensor const& output_ptrs,
+    torch::Tensor const& activation_scale_ptrs,
+    torch::Tensor const& weight_scale_ptrs,
+    torch::Tensor const& activation,
+    torch::Tensor const& weight,
+    torch::Tensor const& output,
+    torch::Tensor const& activation_scale,
+    torch::Tensor const& weight_scale,
     bool weight_desc_per_group,
     cudaStream_t stream) {
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
@@ -462,6 +503,23 @@ void launch_swg_precomputed_work_map(
           work_map.tiles_per_worker,
           static_cast<uint64_t*>(work_map.storage.data_ptr()),
           mainloop_params,
+          static_cast<int32_t const*>(expert_offsets.data_ptr()),
+          expert_ids.has_value()
+              ? static_cast<int32_t const*>(expert_ids->data_ptr())
+              : nullptr,
+          static_cast<uint64_t*>(activation_ptrs.data_ptr()),
+          static_cast<uint64_t*>(weight_ptrs.data_ptr()),
+          static_cast<uint64_t*>(output_ptrs.data_ptr()),
+          static_cast<uint64_t*>(activation_scale_ptrs.data_ptr()),
+          static_cast<uint64_t*>(weight_scale_ptrs.data_ptr()),
+          static_cast<uint8_t*>(activation.data_ptr()),
+          static_cast<uint8_t*>(weight.data_ptr()),
+          static_cast<uint8_t*>(output.data_ptr()),
+          static_cast<uint8_t*>(activation_scale.data_ptr()),
+          static_cast<uint8_t*>(weight_scale.data_ptr()),
+          static_cast<uint64_t>(output.element_size()),
+          static_cast<uint64_t>(output.size(1)),
+          static_cast<uint64_t>(activation.size(1)),
           weight_desc_per_group,
           static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_a.data_ptr()),
           static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_b.data_ptr()));

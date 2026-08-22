@@ -347,6 +347,12 @@ set(INCLUDES
 # Build SM90 library with fast math optimization (same namespace, different directory)
 Python_add_library(common_ops_sm90_build MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
 
+set_property(
+    SOURCE csrc/moe/cutlass_moe/w4a8/w4a8_grouped_mm_c3x.cu
+    APPEND PROPERTY COMPILE_OPTIONS
+        -static-global-template-stub=false
+        -UCUTE_USE_PACKED_TUPLE
+)
 target_compile_options(common_ops_sm90_build PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS} -use_fast_math>
 )

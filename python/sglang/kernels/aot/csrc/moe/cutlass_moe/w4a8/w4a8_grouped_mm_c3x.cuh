@@ -379,7 +379,6 @@ void cutlass_w4a8_group_gemm_caller(
         d_tensors.dim() == 2 && d_tensors.is_contiguous(),
         "Single-warpgroup GEMM requires contiguous 2D D");
   }
-
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
   auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
 
@@ -411,28 +410,30 @@ void cutlass_w4a8_group_gemm_caller(
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr());
 
-  run_int4_fp8_get_group_gemm_starts<typename Gemm::ElementScale>(
-      expert_offsets,
-      a_ptrs,
-      b_ptrs,
-      out_ptrs,
-      a_scales_ptrs,
-      b_scales_ptrs,
-      a_tensors,
-      b_tensors,
-      d_tensors,
-      a_scales,
-      b_scales,
-      use_act_block_scale ? std::optional<torch::Tensor>(as_scales_ptrs) : std::nullopt,
-      use_act_block_scale ? act_block_scales : std::nullopt,
-      use_act_block_scale ? act_scale_group : 0,
-      // Weight-scale group size for this instantiation (int4a8=128, mxfp4a8=32),
-      // so the per-expert weight-scale pointer advances by n*k/GroupSize.
-      static_cast<int64_t>(Gemm::GroupSize),
-      // MXFP4A8: per-expert act-scale stride tensor [E,2] so get_group_starts can
-      // advance the act-scale pointer by the PADDED (16B-aligned) cumsum.
-      use_act_block_scale ? as_strides : std::nullopt,
-      expert_ids);
+  if constexpr (!Gemm::UseSingleWarpgroupKernel) {
+    run_int4_fp8_get_group_gemm_starts<typename Gemm::ElementScale>(
+        expert_offsets,
+        a_ptrs,
+        b_ptrs,
+        out_ptrs,
+        a_scales_ptrs,
+        b_scales_ptrs,
+        a_tensors,
+        b_tensors,
+        d_tensors,
+        a_scales,
+        b_scales,
+        use_act_block_scale ? std::optional<torch::Tensor>(as_scales_ptrs) : std::nullopt,
+        use_act_block_scale ? act_block_scales : std::nullopt,
+        use_act_block_scale ? act_scale_group : 0,
+        // Weight-scale group size for this instantiation (int4a8=128, mxfp4a8=32),
+        // so the per-expert weight-scale pointer advances by n*k/GroupSize.
+        static_cast<int64_t>(Gemm::GroupSize),
+        // MXFP4A8: per-expert act-scale stride tensor [E,2] so get_group_starts can
+        // advance the act-scale pointer by the PADDED (16B-aligned) cumsum.
+        use_act_block_scale ? as_strides : std::nullopt,
+        expert_ids);
+  }
 
   decltype(arguments.epilogue.thread) fusion_args;
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
@@ -504,7 +505,7 @@ void cutlass_w4a8_group_gemm_caller(
         static_cast<uint64_t>(d_tensors.size(0)),
         static_cast<uint64_t>(d_tensors.size(1)),
         swg_grid_shape,
-        expert_ids.has_value(),
+        false,
         a_tensors.device());
     arguments.scheduler.precomputed_work_tiles =
         static_cast<uint64_t const*>(swg_work_map.storage.data_ptr());
@@ -516,7 +517,6 @@ void cutlass_w4a8_group_gemm_caller(
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
-    arguments.mainloop.prebuilt_tma_desc_a_per_group = expert_ids.has_value();
   }
 #endif
 
@@ -553,7 +553,19 @@ void cutlass_w4a8_group_gemm_caller(
         problem_sizes_as_shapes,
         num_experts,
         gemm.params().mainloop,
-        expert_ids.has_value(),
+        expert_offsets,
+        expert_ids,
+        a_ptrs,
+        b_ptrs,
+        out_ptrs,
+        a_scales_ptrs,
+        b_scales_ptrs,
+        a_tensors,
+        b_tensors,
+        d_tensors,
+        a_scales,
+        b_scales,
+        false,
         stream);
   }
 #endif

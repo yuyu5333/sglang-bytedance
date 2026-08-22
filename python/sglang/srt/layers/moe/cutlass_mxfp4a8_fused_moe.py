@@ -414,11 +414,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         # Compact only when routing is sparse enough to remove at least half of
         # the expert groups. At high coverage, scanning and publishing one
         # weight descriptor per logical group costs more than the empty groups.
-        use_compact_groups = (
-            compact_cutlass_w4a8_moe_mm_data is not None
-            and 64 < m <= 256
-            and m * topk < 2 * num_local_experts
-        )
+        use_compact_groups = False
         if use_compact_groups:
             max_compact_groups = max(1, min(num_local_experts, topk_ids.numel()))
             (

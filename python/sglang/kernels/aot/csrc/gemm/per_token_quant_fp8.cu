@@ -44,6 +44,7 @@ __global__ void per_token_quant_fp8_kernel(
     float* __restrict__ output_s,
     const float* __restrict__ residual,
     const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ permutation,
     const int64_t hidden_dim,
     const int64_t num_tokens,
     const int64_t num_experts) {
@@ -53,7 +54,8 @@ __global__ void per_token_quant_fp8_kernel(
   if (token_id >= num_tokens) return;
 
   // Global tensors for this token
-  const T* token_input = input + token_id * hidden_dim;
+  const int64_t source_token_id = permutation == nullptr ? token_id : permutation[token_id];
+  const T* token_input = input + source_token_id * hidden_dim;
   DST_DTYPE* token_output = output_q + token_id * hidden_dim;
   float* token_scale = output_s + token_id;
 
@@ -161,6 +163,7 @@ __global__ void per_token_quant_fp8_small_batch_kernel(
     float* __restrict__ output_s,
     const float* __restrict__ residual,
     const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ permutation,
     const int64_t hidden_dim,
     const int64_t num_tokens,
     const int64_t num_experts) {
@@ -170,7 +173,8 @@ __global__ void per_token_quant_fp8_small_batch_kernel(
   const int tid = threadIdx.x;
   const int block_dim = blockDim.x;
 
-  const T* token_input = input + token_idx * hidden_dim;
+  const int64_t source_token_idx = permutation == nullptr ? token_idx : permutation[token_idx];
+  const T* token_input = input + source_token_idx * hidden_dim;
   DST_DTYPE* token_output = output_q + token_idx * hidden_dim;
 
   float max_value = 0.0f;
@@ -249,6 +253,7 @@ static inline void launch_per_token_quant_fp8_warp_kernel(
     torch::Tensor output_s,
     const float* residual,
     const int32_t* expert_offsets,
+    const int32_t* permutation,
     const int64_t hidden_dim,
     const int64_t num_tokens,
     const int64_t num_experts) {
@@ -268,6 +273,7 @@ static inline void launch_per_token_quant_fp8_warp_kernel(
             static_cast<float*>(output_s.data_ptr()),
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -285,6 +291,7 @@ static inline void launch_per_token_quant_fp8_warp_kernel(
             static_cast<float*>(output_s.data_ptr()),
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -302,6 +309,7 @@ static inline void launch_per_token_quant_fp8_warp_kernel(
             static_cast<float*>(output_s.data_ptr()),
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -315,9 +323,10 @@ void per_token_quant_fp8_impl(
     torch::Tensor& output_s,
     const float* residual,
     const int32_t* expert_offsets,
+    const int32_t* permutation,
     int64_t num_experts) {
   const auto input_sizes = input.sizes();
-  const int64_t num_tokens = input_sizes[0];
+  const int64_t num_tokens = permutation == nullptr ? input_sizes[0] : output_q.size(0);
   const int64_t hidden_dim = input_sizes[1];
   TORCH_CHECK(hidden_dim % 4 == 0, "Hidden dimension must be divisible by 4, but got ", hidden_dim);
   if (num_tokens == 0) return;
@@ -364,6 +373,7 @@ void per_token_quant_fp8_impl(
             output_s,
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -384,6 +394,7 @@ void per_token_quant_fp8_impl(
             output_s,
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -402,6 +413,7 @@ void per_token_quant_fp8_impl(
             static_cast<float*>(output_s.data_ptr()),
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -413,6 +425,7 @@ void per_token_quant_fp8_impl(
             static_cast<float*>(output_s.data_ptr()),
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -424,6 +437,7 @@ void per_token_quant_fp8_impl(
             static_cast<float*>(output_s.data_ptr()),
             residual,
             expert_offsets,
+            permutation,
             hidden_dim,
             num_tokens,
             num_experts);
@@ -439,7 +453,7 @@ void sgl_per_token_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch:
   CHECK_INPUT(output_s);
   TORCH_CHECK(input.dim() == 2, "input must have shape [M, K]");
   per_token_quant_fp8_impl</*APPLY_EXPERT_RESIDUAL=*/false>(
-      input, output_q, output_s, nullptr, nullptr, 0);
+      input, output_q, output_s, nullptr, nullptr, nullptr, 0);
 }
 
 #ifndef USE_ROCM
@@ -479,6 +493,53 @@ void humming_per_token_quant_fp8(
       output_s,
       static_cast<const float*>(residual.data_ptr()),
       static_cast<const int32_t*>(expert_offsets.data_ptr()),
+      nullptr,
+      num_experts);
+}
+
+void humming_per_token_quant_fp8_shuffled(
+    const torch::Tensor& input,
+    const torch::Tensor& permutation,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    const torch::Tensor& residual,
+    const torch::Tensor& expert_offsets,
+    int64_t num_experts) {
+  CHECK_INPUT(input);
+  CHECK_INPUT(permutation);
+  CHECK_INPUT(output_q);
+  CHECK_INPUT(output_s);
+  CHECK_INPUT(residual);
+  CHECK_INPUT(expert_offsets);
+  TORCH_CHECK(input.dim() == 2, "input must have shape [M, K]");
+  TORCH_CHECK(permutation.dim() == 1 && permutation.scalar_type() == at::kInt, "permutation must be int32 [N]");
+  TORCH_CHECK(
+      output_q.dim() == 2 && output_q.size(0) == permutation.numel() && output_q.size(1) == input.size(1),
+      "output_q must have shape [N, K]");
+  TORCH_CHECK(output_q.scalar_type() == at::kFloat8_e4m3fn, "output_q must be float8_e4m3fn");
+  TORCH_CHECK(
+      output_s.numel() == permutation.numel() && output_s.scalar_type() == at::kFloat,
+      "output_s must be float32 with N elements");
+  TORCH_CHECK(
+      residual.numel() == num_experts && residual.scalar_type() == at::kFloat,
+      "residual must be float32 [E]");
+  TORCH_CHECK(
+      expert_offsets.numel() == num_experts + 1 && expert_offsets.scalar_type() == at::kInt,
+      "expert_offsets must be int32 [E + 1]");
+  TORCH_CHECK(num_experts >= 1 && num_experts <= 256, "num_experts must be in [1, 256]");
+  TORCH_CHECK(
+      input.device() == permutation.device() && input.device() == output_q.device() &&
+          input.device() == output_s.device() && input.device() == residual.device() &&
+          input.device() == expert_offsets.device(),
+      "all tensors must be on the same device");
+
+  per_token_quant_fp8_impl</*APPLY_EXPERT_RESIDUAL=*/true>(
+      input,
+      output_q,
+      output_s,
+      static_cast<const float*>(residual.data_ptr()),
+      static_cast<const int32_t*>(expert_offsets.data_ptr()),
+      static_cast<const int32_t*>(permutation.data_ptr()),
       num_experts);
 }
 #endif
