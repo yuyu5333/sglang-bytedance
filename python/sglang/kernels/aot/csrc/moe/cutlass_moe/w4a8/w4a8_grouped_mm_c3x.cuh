@@ -558,7 +558,7 @@ void cutlass_w4a8_group_gemm_caller(
   }
 #endif
 
-  status = gemm.run(stream);
+  status = gemm.run(stream, nullptr, true);
   if (status != cutlass::Status::kSuccess) {
     cudaError_t ce = cudaGetLastError();
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)

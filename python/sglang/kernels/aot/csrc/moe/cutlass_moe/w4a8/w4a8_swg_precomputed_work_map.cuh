@@ -363,6 +363,10 @@ __global__ void build_swg_precomputed_work_map_kernel(
       }
     }
   }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
 }
 
 template <class Gemm, class Problem>
