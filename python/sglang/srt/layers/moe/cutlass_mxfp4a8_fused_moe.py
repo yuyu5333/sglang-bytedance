@@ -190,9 +190,9 @@ class CutlassMxfp4A8FusedMoeRunner:
 
     @staticmethod
     def _humming_gemm2_config(output_size: int) -> int:
-        # Prefer the N=16 single-warpgroup tactic whenever the output shape
-        # permits it, then fall back to the other explicitly compiled shapes.
-        for tile_n, config in ((16, 101), (40, 103), (32, 102), (8, 100)):
+        # GEMM2 (K=intermediate size) favors the N=32 tactic for the common
+        # hidden sizes on H20; prefer it over the N=16 GEMM1 winner.
+        for tile_n, config in ((32, 102), (16, 101), (40, 103), (8, 100)):
             if output_size % tile_n == 0:
                 return config
         return 100
