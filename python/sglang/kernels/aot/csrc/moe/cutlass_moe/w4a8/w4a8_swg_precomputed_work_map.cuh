@@ -97,10 +97,11 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     MainloopParams const& mainloop_params,
     Problem const& problem,
     int group,
+    bool weight_desc_per_group,
     cute::TmaDescriptor* smem_descs,
     cute::TmaDescriptor* prebuilt_tma_desc_a,
     cute::TmaDescriptor* prebuilt_tma_desc_b) {
-  if (group == 0) {
+  if (weight_desc_per_group || group == 0) {
     cute::TmaDescriptor& smem_desc = smem_descs[0];
     if (threadIdx.x == 0) {
       constexpr int MaxTensorRank = 5;
@@ -115,15 +116,21 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
       auto stride_k = cute::get<1>(d_a);
       int64_t const term_m = static_cast<int64_t>(M) * static_cast<int64_t>(stride_m);
       int64_t const term_k = static_cast<int64_t>(K) * static_cast<int64_t>(stride_k);
-      int64_t const stride_l = term_m > term_k ? term_m : term_k;
+      int64_t const stride_l =
+          weight_desc_per_group ? int64_t(0) : (term_m > term_k ? term_m : term_k);
       auto tensor_a = cute::make_tensor(
           ptr_a,
           cute::make_layout(
-              cute::make_shape(M, K, static_cast<uint32_t>(mainloop_params.num_groups)),
+              cute::make_shape(
+                  M,
+                  K,
+                  weight_desc_per_group ? uint32_t(1)
+                                        : static_cast<uint32_t>(mainloop_params.num_groups)),
               cute::make_stride(stride_m, stride_k, stride_l)));
 
       smem_desc = *mainloop_params.tma_load_a.get_tma_descriptor();
-      cute::tma_descriptor_replace_addr_in_shared_mem(smem_desc, mainloop_params.ptr_A[0]);
+      cute::tma_descriptor_replace_addr_in_shared_mem(
+          smem_desc, mainloop_params.ptr_A[weight_desc_per_group ? group : 0]);
       cute::detail::fill_tma_gmem_shape_stride(
           mainloop_params.tma_load_a, tensor_a, shape_a, stride_a);
       using ElementA = std::remove_cv_t<std::remove_pointer_t<PtrA>>;
@@ -132,7 +139,8 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
       }
       cute::tma_descriptor_replace_dims_strides_in_shared_mem(smem_desc, shape_a, stride_a);
     }
-    swg_publish_prebuilt_tma_descriptor(prebuilt_tma_desc_a, smem_desc, 0);
+    swg_publish_prebuilt_tma_descriptor(
+        prebuilt_tma_desc_a + (weight_desc_per_group ? group : 0), smem_desc, 0);
   }
 
   if (cute::get<1>(problem) == 0) {
@@ -231,6 +239,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
     uint32_t work_tiles_per_worker,
     uint64_t* work_tiles,
     MainloopParams mainloop_params,
+    bool weight_desc_per_group,
     cute::TmaDescriptor* prebuilt_tma_desc_a,
     cute::TmaDescriptor* prebuilt_tma_desc_b) {
   int const tid = threadIdx.x;
@@ -271,6 +280,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
       mainloop_params,
       problem_shapes[group],
       group,
+      weight_desc_per_group,
       smem_descs,
       prebuilt_tma_desc_a,
       prebuilt_tma_desc_b);
@@ -345,6 +355,7 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
     uint64_t total_tokens,
     uint64_t channels,
     dim3 const& grid_shape,
+    bool weight_desc_per_group,
     torch::Device device) {
   uint64_t const worker_count_u64 =
       uint64_t(grid_shape.x) * uint64_t(grid_shape.y) * uint64_t(grid_shape.z);
@@ -390,8 +401,10 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   SwgPrecomputedWorkMap result;
   result.storage =
       torch::empty(int64_t(capacity * sizeof(uint64_t)), options);
-  result.prebuilt_tma_desc_a =
-      torch::empty(int64_t(sizeof(cute::TmaDescriptor)), options);
+  result.prebuilt_tma_desc_a = torch::empty(
+      int64_t((weight_desc_per_group && groups > 0 ? groups : 1) *
+              sizeof(cute::TmaDescriptor)),
+      options);
   result.prebuilt_tma_desc_b = torch::empty(
       int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
   result.worker_count = static_cast<uint32_t>(worker_count_u64);
@@ -407,6 +420,7 @@ void launch_swg_precomputed_work_map(
     Problem const* problem_shapes,
     int groups,
     MainloopParams const& mainloop_params,
+    bool weight_desc_per_group,
     cudaStream_t stream) {
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
@@ -424,6 +438,7 @@ void launch_swg_precomputed_work_map(
           work_map.tiles_per_worker,
           static_cast<uint64_t*>(work_map.storage.data_ptr()),
           mainloop_params,
+          weight_desc_per_group,
           static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_a.data_ptr()),
           static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_b.data_ptr()));
   TORCH_CHECK(

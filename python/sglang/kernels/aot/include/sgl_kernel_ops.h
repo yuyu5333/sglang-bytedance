@@ -142,6 +142,17 @@ void musa_fused_add_rms_norm(
 void gemma_rmsnorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, double eps, bool enable_pdl);
 void gemma_fused_add_rmsnorm(at::Tensor& input, at::Tensor& residual, at::Tensor& weight, double eps, bool enable_pdl);
 void silu_and_mul(at::Tensor& out, at::Tensor& input);
+#ifndef USE_ROCM
+void humming_swiglu_quant_fp8(
+    const at::Tensor& input,
+    at::Tensor& output_q,
+    at::Tensor& output_s,
+    const at::Tensor& residual,
+    const at::Tensor& expert_offsets,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit);
+#endif
 void gelu_tanh_and_mul(at::Tensor& out, at::Tensor& input);
 void gelu_and_mul(at::Tensor& out, at::Tensor& input);
 

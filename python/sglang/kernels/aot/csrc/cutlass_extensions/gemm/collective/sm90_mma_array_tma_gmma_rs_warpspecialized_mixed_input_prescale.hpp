@@ -340,6 +340,7 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
   }
 
   int current_group_idx_ = 0;
+  cute::TmaDescriptor const* current_tma_desc_a_ = nullptr;
   cute::TmaDescriptor const* current_tma_desc_b_ = nullptr;
 
  public:
@@ -424,6 +425,9 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
     cute::TmaDescriptor const* ptr_A_prebuilt_tma_desc = nullptr;
     cute::TmaDescriptor const* ptr_B_prebuilt_tma_descs = nullptr;
     cute::TmaDescriptor const* ptr_ActivationScale_prebuilt_tma_descs = nullptr;
+    // Compact SWG builds one weight descriptor per logical group because the
+    // active experts are not necessarily contiguous in the physical weight.
+    bool prebuilt_tma_desc_a_per_group = false;
   };
 
   // Device side kernel params
@@ -493,6 +497,7 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
     InternalSwappedStrideA dA;
     InternalSwappedStrideB dB;
     int num_groups;
+    bool prebuilt_tma_desc_a_per_group;
   };
 
   //
@@ -618,7 +623,8 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
               reload_factor,
               dA,
               dB,
-              num_groups_val};
+              num_groups_val,
+              args.prebuilt_tma_desc_a_per_group};
     };
 
     // Prescale keeps the historical scale_k field in Params so the argument
@@ -778,7 +784,8 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
 
     // Partition the inputs based on the current block coordinates.
     auto [m_coord, n_coord, k_coord, l_coord] = blk_coord;
-    auto a_l_coord = current_group_idx_;
+    auto a_l_coord =
+        mainloop_params.prebuilt_tma_desc_a_per_group ? 0 : current_group_idx_;
     auto b_l_coord = cute::Int<0>{};
     Tensor gA = gA_mkl(_, _, m_coord, _, a_l_coord);  // (BLK_M,BLK_K,k)
     Tensor gB = gB_nkl(_, _, n_coord, _, b_l_coord);  // (BLK_N,BLK_K,k)
@@ -829,8 +836,7 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
       int write_stage = smem_pipe_write.index();
       if (cute::elect_one_sync()) {
         // TMA for A and B
-        copy(mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier,
-                                             mcast_mask_a),
+        copy(mainloop_params.tma_load_a.with(current_tma_desc_a_, *tma_barrier, mcast_mask_a),
              tAgA(_, _, _, *k_tile_iter), tAsA(_, _, _, write_stage));
         copy(mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b),
              tBgB(_, _, _, *k_tile_iter), tBsB(_, _, _, write_stage));
@@ -1289,7 +1295,7 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
   // The entire warp must call this function collectively (that is, the instructions are aligned)
   template <class... TMs>
   CUTLASS_DEVICE void tensormaps_fence_acquire(cute::tuple<TMs...> const& input_tensormaps) {
-    cute::tma_descriptor_fence_acquire(get<0>(input_tensormaps));
+    cute::tma_descriptor_fence_acquire(current_tma_desc_a_);
     cute::tma_descriptor_fence_acquire(current_tma_desc_b_);
   }
 
@@ -1298,6 +1304,9 @@ struct CollectiveMmaArrayMixedInput<MainloopSm90ArrayTmaGmmaWarpSpecializedMixed
       InputTensors const& input_tensors, [[maybe_unused]] Params const& mainloop_params,
       [[maybe_unused]] ProblemShape_MNKL problem_shape_mnkl, [[maybe_unused]] int32_t next_batch) {
     current_group_idx_ = next_batch;
+    current_tma_desc_a_ =
+        mainloop_params.ptr_A_prebuilt_tma_desc +
+        (mainloop_params.prebuilt_tma_desc_a_per_group ? next_batch : 0);
     current_tma_desc_b_ = mainloop_params.ptr_B_prebuilt_tma_descs + next_batch;
     return input_tensors;
   }

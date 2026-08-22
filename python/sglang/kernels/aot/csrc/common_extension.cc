@@ -76,6 +76,13 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
   m.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+#ifndef USE_ROCM
+  m.def(
+      "humming_swiglu_quant_fp8(Tensor input, Tensor! output_q, Tensor! output_s, Tensor residual, "
+      "Tensor expert_offsets, int num_experts, float swiglu_limit, bool has_swiglu_limit) -> ()");
+  m.impl("humming_swiglu_quant_fp8", torch::kCUDA, &humming_swiglu_quant_fp8);
+#endif
+
   m.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   m.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
 

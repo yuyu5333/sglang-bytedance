@@ -302,6 +302,10 @@ void cutlass_w4a8_group_gemm_caller(
     TORCH_CHECK(expert_ids->dim() == 1, "expert_ids must be a 1D tensor");
     TORCH_CHECK(expert_ids->size(0) == num_experts, "expert_ids must match problem_sizes rows");
     TORCH_CHECK(expert_ids->scalar_type() == torch::kInt32, "expert_ids must be int32");
+    TORCH_CHECK(expert_ids->is_contiguous(), "expert_ids must be contiguous");
+    TORCH_CHECK(
+        expert_ids->device() == b_tensors.device(),
+        "expert_ids must be on the weight device");
   } else {
     TORCH_CHECK(b_tensors.size(0) == num_experts, "B tensor first dimension must match number of groups");
     if constexpr (!Gemm::UsePreMmaE8M0Scale) {
@@ -439,6 +443,7 @@ void cutlass_w4a8_group_gemm_caller(
         static_cast<uint64_t>(d_tensors.size(0)),
         static_cast<uint64_t>(d_tensors.size(1)),
         swg_grid_shape,
+        expert_ids.has_value(),
         a_tensors.device());
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
@@ -450,6 +455,7 @@ void cutlass_w4a8_group_gemm_caller(
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
+    arguments.mainloop.prebuilt_tma_desc_a_per_group = expert_ids.has_value();
   }
 #endif
 
@@ -486,6 +492,7 @@ void cutlass_w4a8_group_gemm_caller(
         problem_sizes_as_shapes,
         num_experts,
         gemm.params().mainloop,
+        expert_ids.has_value(),
         stream);
   }
 #endif

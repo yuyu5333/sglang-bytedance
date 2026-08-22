@@ -32,9 +32,9 @@ if _is_cuda_alike:
         cutlass_mxfp4a8_humming_moe_mm,
         cutlass_mxfp4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
+        humming_swiglu_quant_fp8,
         prepare_moe_input,
         sgl_per_token_quant_fp8,
-        silu_and_mul,
     )
 
     try:
@@ -376,11 +376,9 @@ class CutlassMxfp4A8FusedMoeRunner:
             num_local_experts,
         )
 
-        # The Humming SWG collective uses a shared weight TMA descriptor whose
-        # group dimension follows physical expert order. Compact metadata plus
-        # an expert-id indirection therefore reads the wrong weight after the
-        # first skipped expert. Keep all groups, including zero-M groups.
-        use_compact_groups = False
+        # Compact Humming groups use one prebuilt weight TMA descriptor per
+        # logical group, mapped through active_expert_ids to the source expert.
+        use_compact_groups = compact_cutlass_w4a8_moe_mm_data is not None and m <= 256
         if use_compact_groups:
             max_compact_groups = max(1, min(num_local_experts, topk_ids.numel()))
             (
@@ -429,28 +427,20 @@ class CutlassMxfp4A8FusedMoeRunner:
             active_expert_ids,
         )
 
-        intermediate_bf16 = self._empty(
-            "intermediate_bf16", (m * topk, n), torch.bfloat16, device
-        )
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
         )
         a2_scale_per_token = self._empty(
             "a2_scale_per_token", (m * topk,), torch.float32, device
         )
-        if swiglu_limit is not None:
-            lim = float(swiglu_limit)
-            c1[:, :n].clamp_(max=lim)
-            c1[:, n:].clamp_(min=-lim, max=lim)
-        silu_and_mul(c1, intermediate_bf16)
-        self._quantize_fp8_per_token_into(
-            intermediate_bf16, intermediate_q, a2_scale_per_token
-        )
-        self._mul_per_token_scale_by_expert(
+        humming_swiglu_quant_fp8(
+            c1,
+            intermediate_q,
             a2_scale_per_token,
             w2_residual_humming,
             expert_offsets,
             num_local_experts,
+            swiglu_limit,
         )
 
         cutlass_mxfp4a8_humming_moe_mm(

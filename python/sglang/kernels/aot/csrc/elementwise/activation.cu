@@ -20,6 +20,7 @@
 
 #ifndef USE_ROCM
 
+#include <cuda_fp8.h>
 #include <flashinfer/activation.cuh>
 
 #include "utils.h"
@@ -103,6 +104,130 @@ void silu_and_mul(at::Tensor& out, at::Tensor& input) {
     return true;
   });
 }
+
+#ifndef USE_ROCM
+template <typename T>
+__global__ void humming_swiglu_quant_fp8_kernel(
+    const T* __restrict__ input,
+    __nv_fp8_e4m3* __restrict__ output_q,
+    float* __restrict__ output_s,
+    const float* __restrict__ residual,
+    const int32_t* __restrict__ expert_offsets,
+    const int64_t hidden_dim,
+    const int64_t num_tokens,
+    const int64_t num_experts,
+    const float swiglu_limit,
+    const bool has_swiglu_limit) {
+  const int64_t token = blockIdx.x;
+  if (token >= num_tokens) return;
+
+  const T* gate = input + token * hidden_dim * 2;
+  const T* up = gate + hidden_dim;
+  float max_value = 0.0f;
+
+  // Match silu_and_mul's two BF16/FP16 roundings: one after SiLU and one
+  // after multiplication. The rounded product is what the legacy quantizer
+  // observes.
+  for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+    T gate_value = gate[i];
+    T up_value = up[i];
+    if (has_swiglu_limit) {
+      gate_value = static_cast<T>(fminf(static_cast<float>(gate_value), swiglu_limit));
+      up_value =
+          static_cast<T>(fmaxf(fminf(static_cast<float>(up_value), swiglu_limit), -swiglu_limit));
+    }
+    const T value = silu(gate_value) * up_value;
+    max_value = fmaxf(max_value, fabsf(static_cast<float>(value)));
+  }
+
+  max_value = blockReduceMax(max_value);
+
+  __shared__ float scale;
+  __shared__ float scale_inv;
+  if (threadIdx.x == 0) {
+    scale = max_value / FP8_E4M3_MAX;
+    scale_inv = scale == 0.0f ? 0.0f : 1.0f / scale;
+
+    // upper_bound(expert_offsets, token) - 1. This handles empty experts and
+    // both the E=1 and E=256 production configurations without a host read.
+    int lo = 0;
+    int hi = static_cast<int>(num_experts);
+    while (lo + 1 < hi) {
+      const int mid = (lo + hi) / 2;
+      if (token >= expert_offsets[mid]) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    output_s[token] = scale * residual[lo];
+  }
+  __syncthreads();
+
+  for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+    T gate_value = gate[i];
+    T up_value = up[i];
+    if (has_swiglu_limit) {
+      gate_value = static_cast<T>(fminf(static_cast<float>(gate_value), swiglu_limit));
+      up_value =
+          static_cast<T>(fmaxf(fminf(static_cast<float>(up_value), swiglu_limit), -swiglu_limit));
+    }
+    const T value = silu(gate_value) * up_value;
+    float quant_value = static_cast<float>(value) * scale_inv;
+    quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+    output_q[token * hidden_dim + i] = static_cast<__nv_fp8_e4m3>(quant_value);
+  }
+}
+
+void humming_swiglu_quant_fp8(
+    const at::Tensor& input,
+    at::Tensor& output_q,
+    at::Tensor& output_s,
+    const at::Tensor& residual,
+    const at::Tensor& expert_offsets,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit) {
+  CHECK_INPUT(input);
+  CHECK_INPUT(output_q);
+  CHECK_INPUT(output_s);
+  CHECK_INPUT(residual);
+  CHECK_INPUT(expert_offsets);
+  TORCH_CHECK(input.dim() == 2 && input.size(1) % 2 == 0, "input must have shape [M, 2N]");
+  const int64_t num_tokens = input.size(0);
+  const int64_t hidden_dim = input.size(1) / 2;
+  TORCH_CHECK(
+      output_q.sizes() == at::IntArrayRef({num_tokens, hidden_dim}), "output_q must have shape [M, N]");
+  TORCH_CHECK(output_q.scalar_type() == at::kFloat8_e4m3fn, "output_q must be float8_e4m3fn");
+  TORCH_CHECK(
+      output_s.numel() == num_tokens && output_s.scalar_type() == at::kFloat, "output_s must be float32 [M]");
+  TORCH_CHECK(
+      residual.numel() == num_experts && residual.scalar_type() == at::kFloat, "residual must be float32 [E]");
+  TORCH_CHECK(
+      expert_offsets.numel() == num_experts + 1 && expert_offsets.scalar_type() == at::kInt,
+      "expert_offsets must be int32 [E + 1]");
+  TORCH_CHECK(num_experts >= 1 && num_experts <= 256, "num_experts must be in [1, 256]");
+
+  if (num_tokens == 0) return;
+  constexpr int kThreads = 256;
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
+    humming_swiglu_quant_fp8_kernel<c_type><<<num_tokens, kThreads, 0, stream>>>(
+        static_cast<const c_type*>(input.data_ptr()),
+        static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
+        static_cast<float*>(output_s.data_ptr()),
+        static_cast<const float*>(residual.data_ptr()),
+        static_cast<const int32_t*>(expert_offsets.data_ptr()),
+        hidden_dim,
+        num_tokens,
+        num_experts,
+        static_cast<float>(swiglu_limit),
+        has_swiglu_limit);
+    return true;
+  });
+}
+#endif
 
 void gelu_tanh_and_mul(at::Tensor& out, at::Tensor& input) {
   int d = input.size(-1) / 2;

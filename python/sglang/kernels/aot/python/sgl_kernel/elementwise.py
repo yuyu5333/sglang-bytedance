@@ -270,6 +270,28 @@ def silu_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
     return out
 
 
+def humming_swiglu_quant_fp8(
+    input: torch.Tensor,
+    output_q: torch.Tensor,
+    output_s: torch.Tensor,
+    residual: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    num_experts: int,
+    swiglu_limit: Optional[float] = None,
+) -> None:
+    """Humming-only fused SwiGLU, per-token E4M3 quantization and scale residual."""
+    torch.ops.sgl_kernel.humming_swiglu_quant_fp8.default(
+        input,
+        output_q,
+        output_s,
+        residual,
+        expert_offsets,
+        num_experts,
+        0.0 if swiglu_limit is None else float(swiglu_limit),
+        swiglu_limit is not None,
+    )
+
+
 def gelu_tanh_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
     if input.shape[-1] * input.dtype.itemsize % 16 != 0:
         raise ValueError("The pointers must be multiple of 16 bytes.")
