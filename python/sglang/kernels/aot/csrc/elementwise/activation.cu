@@ -140,9 +140,8 @@ __global__ void humming_swiglu_quant_fp8_kernel(
   const T* up = gate + hidden_dim;
   float max_value = 0.0f;
   constexpr int64_t kVecSize = 16 / sizeof(T);
-  static_assert(kVecSize == 8, "humming_swiglu_quant_fp8 expects 2-byte input types");
 
-  // CUDA allocations are sufficiently aligned, and hidden_dim % 8 == 0 keeps
+  // CUDA allocations are sufficiently aligned, and a full 16-byte vector keeps
   // both gate and up 16-byte aligned for every token. Otherwise, leave the
   // complete row to the scalar path, which also serves as the general tail.
   const int64_t vectorized_dim = hidden_dim % kVecSize == 0 ? hidden_dim : 0;
