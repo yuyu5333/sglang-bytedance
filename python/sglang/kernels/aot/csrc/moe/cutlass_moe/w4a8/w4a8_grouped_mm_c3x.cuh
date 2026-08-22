@@ -37,6 +37,8 @@
 #include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #endif
 #include "cutlass_extensions/epilogue/collective/default_epilogue_array_per_token_scale.hpp"
+#include "cutlass_extensions/epilogue/collective/sm90_epilogue_array_tma_warpspecialized_mixed_input.hpp"
+#include "cutlass_extensions/epilogue/fusion/sm90_ptr_array_per_token_scale_callbacks_tma_warpspecialized.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
@@ -45,101 +47,6 @@
 #include "w4a8_get_group_starts.cuh"
 
 using namespace cute;
-
-namespace cutlass::epilogue::fusion {
-
-// Pointer-array row scaling used by the regular Humming epilogue. This is the
-// minimal callback from FlashInfer's local mixed-input grouped GEMM path.
-template <
-    class ElementOutput_,
-    class ElementCompute_,
-    class ElementScalar_ = ElementCompute_,
-    int AlignmentScalar_ = 128 / cute::sizeof_bits_v<ElementScalar_>,
-    FloatRoundStyle RoundStyle_ = FloatRoundStyle::round_to_nearest>
-struct SglPtrArrayPerTokenScaledAcc
-    : ScaledAcc<ElementOutput_, ElementCompute_, ElementScalar_, RoundStyle_> {
-  static constexpr int AlignmentScalar = AlignmentScalar_;
-};
-
-template <
-    class CtaTileShapeMNK,
-    class ElementOutput,
-    class ElementCompute,
-    class ElementScalar = ElementCompute,
-    int AlignmentScalar = 128 / sizeof_bits_v<ElementScalar>,
-    FloatRoundStyle RoundStyle = FloatRoundStyle::round_to_nearest>
-using Sm90SglPtrArrayPerTokenScaledAcc =
-    Sm90EVT<
-        Sm90Compute<multiplies, ElementOutput, ElementCompute, RoundStyle>,
-        Sm90RowBroadcast<
-            0,
-            CtaTileShapeMNK,
-            ElementScalar*,
-            ElementCompute,
-            Stride<_0, _1, _0>,
-            AlignmentScalar>,
-        Sm90AccFetch>;
-
-template <
-    int StagesC,
-    int StagesD,
-    int FragmentSize,
-    bool ReuseSmemC,
-    bool DelayTmaStore,
-    int NumEpilogueWarpGroups,
-    class ElementOutput,
-    class ElementCompute,
-    class ElementScalar,
-    int AlignmentScalar,
-    FloatRoundStyle RoundStyle,
-    class CtaTileShapeMNK,
-    class EpilogueTile>
-struct FusionCallbacks<
-    epilogue::Sm90PtrArrayTmaWarpSpecialized<
-        StagesC,
-        StagesD,
-        FragmentSize,
-        ReuseSmemC,
-        DelayTmaStore,
-        NumEpilogueWarpGroups>,
-    SglPtrArrayPerTokenScaledAcc<
-        ElementOutput,
-        ElementCompute,
-        ElementScalar,
-        AlignmentScalar,
-        RoundStyle>,
-    CtaTileShapeMNK,
-    EpilogueTile>
-    : Sm90SglPtrArrayPerTokenScaledAcc<
-          CtaTileShapeMNK,
-          typename cutlass::detail::get_unpacked_element_type<ElementOutput>::type,
-          ElementCompute,
-          ElementScalar,
-          AlignmentScalar,
-          RoundStyle> {
-  using Impl = Sm90SglPtrArrayPerTokenScaledAcc<
-      CtaTileShapeMNK,
-      typename cutlass::detail::get_unpacked_element_type<ElementOutput>::type,
-      ElementCompute,
-      ElementScalar,
-      AlignmentScalar,
-      RoundStyle>;
-
-  struct Arguments {
-    ElementScalar token_scale_default = ElementScalar(1);
-    ElementScalar const* const* token_scale_ptr_array = nullptr;
-    using StrideTokenScale = Stride<_0, _1, _0>;
-    StrideTokenScale dTokenScale = {_0{}, _1{}, _0{}};
-
-    operator typename Impl::Arguments() const {
-      return {{token_scale_ptr_array, token_scale_default, dTokenScale}, {}, {}};
-    }
-  };
-
-  using Impl::Impl;
-};
-
-}  // namespace cutlass::epilogue::fusion
 
 namespace sgl_kernel::w4a8_detail {
 
@@ -206,11 +113,12 @@ struct W4A8EpilogueSelector<false, false, TileShape, ClusterShape, EpilogueSched
 
 template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
 struct W4A8EpilogueSelector<false, true, TileShape, ClusterShape, EpilogueSchedule> {
-  using FusionOperation = cutlass::epilogue::fusion::SglPtrArrayPerTokenScaledAcc<
+  using FusionOperation = cutlass::epilogue::fusion::PtrArrayPerTokenScaledAcc<
       ElementD,
       ElementAccumulator,
       ElementAccumulator>;
-  using Type = typename cutlass::epilogue::collective::CollectiveBuilder<
+  using Type = typename tensorrt_llm::cutlass_extensions::epilogue::collective::
+      MixedInputSm90TmaEpilogueBuilder<
           ArchTag,
           OperatorClass,
           TileShape,
