@@ -28,6 +28,7 @@
 
 #include "cutlass/cutlass.h"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
@@ -44,6 +45,101 @@
 #include "w4a8_get_group_starts.cuh"
 
 using namespace cute;
+
+namespace cutlass::epilogue::fusion {
+
+// Pointer-array row scaling used by the regular Humming epilogue. This is the
+// minimal callback from FlashInfer's local mixed-input grouped GEMM path.
+template <
+    class ElementOutput_,
+    class ElementCompute_,
+    class ElementScalar_ = ElementCompute_,
+    int AlignmentScalar_ = 128 / cute::sizeof_bits_v<ElementScalar_>,
+    FloatRoundStyle RoundStyle_ = FloatRoundStyle::round_to_nearest>
+struct SglPtrArrayPerTokenScaledAcc
+    : ScaledAcc<ElementOutput_, ElementCompute_, ElementScalar_, RoundStyle_> {
+  static constexpr int AlignmentScalar = AlignmentScalar_;
+};
+
+template <
+    class CtaTileShapeMNK,
+    class ElementOutput,
+    class ElementCompute,
+    class ElementScalar = ElementCompute,
+    int AlignmentScalar = 128 / sizeof_bits_v<ElementScalar>,
+    FloatRoundStyle RoundStyle = FloatRoundStyle::round_to_nearest>
+using Sm90SglPtrArrayPerTokenScaledAcc =
+    Sm90EVT<
+        Sm90Compute<multiplies, ElementOutput, ElementCompute, RoundStyle>,
+        Sm90RowBroadcast<
+            0,
+            CtaTileShapeMNK,
+            ElementScalar*,
+            ElementCompute,
+            Stride<_0, _1, _0>,
+            AlignmentScalar>,
+        Sm90AccFetch>;
+
+template <
+    int StagesC,
+    int StagesD,
+    int FragmentSize,
+    bool ReuseSmemC,
+    bool DelayTmaStore,
+    int NumEpilogueWarpGroups,
+    class ElementOutput,
+    class ElementCompute,
+    class ElementScalar,
+    int AlignmentScalar,
+    FloatRoundStyle RoundStyle,
+    class CtaTileShapeMNK,
+    class EpilogueTile>
+struct FusionCallbacks<
+    epilogue::Sm90PtrArrayTmaWarpSpecialized<
+        StagesC,
+        StagesD,
+        FragmentSize,
+        ReuseSmemC,
+        DelayTmaStore,
+        NumEpilogueWarpGroups>,
+    SglPtrArrayPerTokenScaledAcc<
+        ElementOutput,
+        ElementCompute,
+        ElementScalar,
+        AlignmentScalar,
+        RoundStyle>,
+    CtaTileShapeMNK,
+    EpilogueTile>
+    : Sm90SglPtrArrayPerTokenScaledAcc<
+          CtaTileShapeMNK,
+          typename cutlass::detail::get_unpacked_element_type<ElementOutput>::type,
+          ElementCompute,
+          ElementScalar,
+          AlignmentScalar,
+          RoundStyle> {
+  using Impl = Sm90SglPtrArrayPerTokenScaledAcc<
+      CtaTileShapeMNK,
+      typename cutlass::detail::get_unpacked_element_type<ElementOutput>::type,
+      ElementCompute,
+      ElementScalar,
+      AlignmentScalar,
+      RoundStyle>;
+
+  struct Arguments {
+    ElementScalar token_scale_default = ElementScalar(1);
+    ElementScalar const* const* token_scale_ptr_array = nullptr;
+    using StrideTokenScale = Stride<_0, _1, _0>;
+    StrideTokenScale dTokenScale = {_0{}, _1{}, _0{}};
+
+    operator typename Impl::Arguments() const {
+      return {{token_scale_ptr_array, token_scale_default, dTokenScale}, {}, {}};
+    }
+  };
+
+  using Impl::Impl;
+};
+
+}  // namespace cutlass::epilogue::fusion
 
 namespace sgl_kernel::w4a8_detail {
 
@@ -83,13 +179,14 @@ static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
 template <
     bool UseSingleWarpgroup,
+    bool UsePreMmaE8M0,
     typename TileShape,
     typename ClusterShape,
     typename EpilogueSchedule>
 struct W4A8EpilogueSelector;
 
 template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
-struct W4A8EpilogueSelector<false, TileShape, ClusterShape, EpilogueSchedule> {
+struct W4A8EpilogueSelector<false, false, TileShape, ClusterShape, EpilogueSchedule> {
   using Type = typename cutlass::epilogue::collective::CollectiveBuilder<
       ArchTag,
       OperatorClass,
@@ -108,7 +205,31 @@ struct W4A8EpilogueSelector<false, TileShape, ClusterShape, EpilogueSchedule> {
 };
 
 template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
-struct W4A8EpilogueSelector<true, TileShape, ClusterShape, EpilogueSchedule> {
+struct W4A8EpilogueSelector<false, true, TileShape, ClusterShape, EpilogueSchedule> {
+  using FusionOperation = cutlass::epilogue::fusion::SglPtrArrayPerTokenScaledAcc<
+      ElementD,
+      ElementAccumulator,
+      ElementAccumulator>;
+  using Type = typename cutlass::epilogue::collective::CollectiveBuilder<
+          ArchTag,
+          OperatorClass,
+          TileShape,
+          ClusterShape,
+          cutlass::epilogue::collective::EpilogueTileAuto,
+          ElementAccumulator,
+          ElementAccumulator,
+          ElementC,
+          LayoutC_Transpose*,
+          AlignmentC,
+          ElementD,
+          LayoutD_Transpose*,
+          AlignmentD,
+          EpilogueSchedule,
+          FusionOperation>::CollectiveOp;
+};
+
+template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
+struct W4A8EpilogueSelector<true, true, TileShape, ClusterShape, EpilogueSchedule> {
   using Epilogue = cutlass::epilogue::collective::SmemEpilogueArrayPerTokenScale<
       TileShape,
       ElementC,
@@ -145,16 +266,22 @@ struct cutlass_3x_w4a8_group_gemm {
       cutlass::Array<ElementScale, PackedScalesNum>>;
   // Alignment for the 4-bit weight operand (int4b_t / float_e2m1_t are both 4-bit).
   static constexpr int AlignmentQuantB = 128 / cutlass::sizeof_bits<QuantTypeB>::value;
-  static_assert(!UsePreMmaE8M0Scale || UseSingleWarpgroup);
   static_assert(!UseSingleWarpgroup || std::is_same_v<QuantTypeB, cutlass::float_e2m1_t>);
   static_assert(!UseSingleWarpgroup || GroupSize == 32);
   static_assert(!UseSingleWarpgroup || UsePreMmaE8M0Scale);
+  static_assert(!UsePreMmaE8M0Scale || std::is_same_v<QuantTypeB, cutlass::float_e2m1_t>);
+  static_assert(!UsePreMmaE8M0Scale || GroupSize == 32);
+  static_assert(
+      !UsePreMmaE8M0Scale ||
+      std::is_same_v<KernelSchedule, cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong>);
   static_assert(!UseSingleWarpgroup || cute::size(ClusterShape{}) == 1);
-  static_assert(!UseSingleWarpgroup || cute::size<0>(TileShape{}) == 128);
-  static_assert(!UseSingleWarpgroup || cute::size<2>(TileShape{}) == 128);
+  static_assert(!UsePreMmaE8M0Scale || cute::size(ClusterShape{}) == 1);
+  static_assert(!UsePreMmaE8M0Scale || cute::size<0>(TileShape{}) == 128);
+  static_assert(!UsePreMmaE8M0Scale || cute::size<2>(TileShape{}) == 128);
 
   using CollectiveEpilogue = typename W4A8EpilogueSelector<
       UseSingleWarpgroupKernel,
+      UsePreMmaE8M0Scale,
       TileShape,
       ClusterShape,
       EpilogueSchedule>::Type;
@@ -194,9 +321,14 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr int SingleWarpgroupCtasPerSm =
       SingleWarpgroupTileN <= 16 ? 5 : (SingleWarpgroupTileN == 32 ? 4 : 3);
 
+#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+  using PrecomputedTileScheduler =
+      cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90GroupPrecomputed<
+          ProblemShape,
+          8,
+          true>;
   using GemmKernelScaleOnly = std::conditional_t<
       UseSingleWarpgroupKernel,
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
       cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
           ProblemShape,
           CollectiveMainloopScaleOnly,
@@ -204,10 +336,24 @@ struct cutlass_3x_w4a8_group_gemm {
           SingleWarpgroupCtasPerSm,
           3,
           cutlass::gemm::kernel::SingleWarpgroupPipelineMode::RollingRefill>,
+      std::conditional_t<
+          UsePreMmaE8M0Scale,
+          cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+              ProblemShape,
+              CollectiveMainloopScaleOnly,
+              CollectiveEpilogue,
+              PrecomputedTileScheduler>,
+          cutlass::gemm::kernel::GemmUniversal<
+              ProblemShape,
+              CollectiveMainloopScaleOnly,
+              CollectiveEpilogue>>>;
 #else
-      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>,
+  using GemmKernelScaleOnly =
+      cutlass::gemm::kernel::GemmUniversal<
+          ProblemShape,
+          CollectiveMainloopScaleOnly,
+          CollectiveEpilogue>;
 #endif
-      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopScaleOnly, CollectiveEpilogue>>;
 
   using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
 
@@ -382,12 +528,23 @@ void cutlass_w4a8_group_gemm_caller(
       expert_ids);
 
   decltype(arguments.epilogue.thread) fusion_args;
-  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+  if constexpr (Gemm::UsePreMmaE8M0Scale) {
     fusion_args.token_scale_default = ElementAccumulator(1);
     fusion_args.token_scale_ptr_array =
-        Gemm::UsePreMmaE8M0Scale && per_act_token
+        per_act_token
             ? static_cast<float const* const*>(a_scales_ptrs.data_ptr())
             : nullptr;
+  } else {
+    fusion_args.alpha = 0;
+    fusion_args.beta = 0;
+    fusion_args.alpha_ptr = a_scales.data_ptr<float>();
+    fusion_args.beta_ptr = nullptr;
+    fusion_args.alpha_ptr_array = nullptr;
+    fusion_args.beta_ptr_array = nullptr;
+    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
+    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
+  }
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
     arguments = Args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {num_experts, problem_sizes_as_shapes, nullptr},
@@ -409,14 +566,6 @@ void cutlass_w4a8_group_gemm_caller(
          ElementAccumulator(0)},
         hw_info};
   } else {
-    fusion_args.alpha = 0;
-    fusion_args.beta = 0;
-    fusion_args.alpha_ptr = a_scales.data_ptr<float>();
-    fusion_args.beta_ptr = nullptr;
-    fusion_args.alpha_ptr_array = nullptr;
-    fusion_args.beta_ptr_array = nullptr;
-    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
-    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
     arguments = Args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {num_experts, problem_sizes_as_shapes, nullptr},
@@ -435,7 +584,7 @@ void cutlass_w4a8_group_gemm_caller(
         hw_info};
   }
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+  if constexpr (Gemm::UsePreMmaE8M0Scale) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgSchedulerMaxSwizzle;
@@ -489,7 +638,7 @@ void cutlass_w4a8_group_gemm_caller(
   }
 
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+  if constexpr (Gemm::UsePreMmaE8M0Scale) {
     sgl_kernel::swg_detail::launch_swg_precomputed_work_map<Gemm>(
         swg_work_map,
         problem_sizes_as_shapes,
@@ -504,7 +653,7 @@ void cutlass_w4a8_group_gemm_caller(
   if (status != cutlass::Status::kSuccess) {
     cudaError_t ce = cudaGetLastError();
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-    if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    if constexpr (Gemm::UsePreMmaE8M0Scale) {
       auto const grid = Gemm::GemmScaleOnly::get_grid_shape(arguments);
       auto const block = Gemm::GemmKernelScaleOnly::get_block_shape();
       int const max_active_blocks = Gemm::GemmScaleOnly::maximum_active_blocks();
