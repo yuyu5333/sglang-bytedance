@@ -343,12 +343,6 @@ void cutlass_w4a8_group_gemm_caller(
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = a_tensors.device().index();
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-  if constexpr (Gemm::UseSingleWarpgroupKernel) {
-    hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
-  }
-#endif
-
   Args arguments;
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;
