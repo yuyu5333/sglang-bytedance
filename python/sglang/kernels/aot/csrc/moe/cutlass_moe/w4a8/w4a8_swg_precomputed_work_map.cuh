@@ -233,7 +233,7 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
   return {problem_blocks_m, problem_blocks_m * problem_blocks_n, swizzle_log};
 }
 
-template <int TileM, int TileN, class Problem, class MainloopParams>
+template <int TileM, int TileN, bool ChunkMajorWorkMap, class Problem, class MainloopParams>
 __global__ void build_swg_precomputed_work_map_kernel(
     Problem const* problem_shapes,
     int groups,
@@ -322,31 +322,45 @@ __global__ void build_swg_precomputed_work_map_kernel(
   for (uint64_t local_tile = uint64_t(tid); local_tile < group_tiles;
        local_tile += uint64_t(blockDim.x)) {
     uint64_t const global_tile = group_start + local_tile;
-    uint64_t const worker = global_tile / tiles_per_worker;
-    uint64_t const worker_tile = global_tile % tiles_per_worker;
-    work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile] =
-        swg_make_work_tile(
-            global_tile,
-            local_tile,
-            group,
-            problem_blocks_m,
-            swizzle_log,
-            gemm_grid_x,
-            gemm_grid_y);
+    uint64_t const packed_tile = swg_make_work_tile(
+        global_tile,
+        local_tile,
+        group,
+        problem_blocks_m,
+        swizzle_log,
+        gemm_grid_x,
+        gemm_grid_y);
+    if constexpr (ChunkMajorWorkMap) {
+      uint64_t const worker = global_tile / tiles_per_worker;
+      uint64_t const worker_tile = global_tile % tiles_per_worker;
+      work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile] =
+          packed_tile;
+    } else {
+      work_tiles[global_tile] = packed_tile;
+    }
   }
 
   if (group == groups - 1) {
     for (uint64_t worker = uint64_t(tid); worker < worker_count;
          worker += uint64_t(blockDim.x)) {
-      uint64_t const worker_start = worker * tiles_per_worker;
-      uint64_t const worker_tile_count =
-          worker_start < total_tiles
-              ? ((total_tiles - worker_start) < tiles_per_worker
-                     ? total_tiles - worker_start
-                     : tiles_per_worker)
-              : 0;
-      work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile_count] =
-          SwgWorkTile::Invalid;
+      if constexpr (ChunkMajorWorkMap) {
+        uint64_t const worker_start = worker * tiles_per_worker;
+        uint64_t const worker_tile_count =
+            worker_start < total_tiles
+                ? ((total_tiles - worker_start) < tiles_per_worker
+                       ? total_tiles - worker_start
+                       : tiles_per_worker)
+                : 0;
+        work_tiles[worker * uint64_t(work_tiles_per_worker) + worker_tile_count] =
+            SwgWorkTile::Invalid;
+      } else {
+        uint64_t invalid_tile = worker;
+        if (invalid_tile < total_tiles) {
+          invalid_tile +=
+              swg_div_up(total_tiles - invalid_tile, worker_count) * worker_count;
+        }
+        work_tiles[invalid_tile] = SwgWorkTile::Invalid;
+      }
     }
   }
 }
@@ -392,7 +406,10 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
 
   uint64_t const work_tiles_per_worker_u64 =
       swg_div_up(max_tiles, worker_count_u64) + 1;
-  uint64_t const capacity = worker_count_u64 * work_tiles_per_worker_u64;
+  uint64_t const capacity =
+      Gemm::UseChunkMajorWorkMap
+          ? worker_count_u64 * work_tiles_per_worker_u64
+          : max_tiles + worker_count_u64;
   TORCH_CHECK(
       work_tiles_per_worker_u64 <= uint64_t(UINT32_MAX),
       "SWG precomputed work map worker chunk exceeds uint32");
@@ -432,7 +449,7 @@ void launch_swg_precomputed_work_map(
       size_t(kSwgWorkMapBuilderThreads * 2 + 3) *
           sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
-  build_swg_precomputed_work_map_kernel<TileM, TileN>
+  build_swg_precomputed_work_map_kernel<TileM, TileN, Gemm::UseChunkMajorWorkMap>
       <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(
           problem_shapes,
           groups,

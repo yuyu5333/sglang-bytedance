@@ -160,10 +160,12 @@ template <
     // K-wise quant group size. int4a8 uses 128; mxfp4a8 (E8M0 block) uses 32.
     int GroupSizeK = 128,
     bool UseSingleWarpgroup = false,
-    bool UsePreMmaE8M0 = false>
+    bool UsePreMmaE8M0 = false,
+    bool ChunkMajorWorkMap = true>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
+  static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScale =
@@ -232,7 +234,7 @@ struct cutlass_3x_w4a8_group_gemm {
       cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90GroupPrecomputed<
           ProblemShape,
           8,
-          true>;
+          UseChunkMajorWorkMap>;
   using GemmKernelScaleOnly = std::conditional_t<
       UseSingleWarpgroupKernel,
       cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
@@ -507,8 +509,10 @@ void cutlass_w4a8_group_gemm_caller(
         a_tensors.device());
     arguments.scheduler.precomputed_work_tiles =
         static_cast<uint64_t const*>(swg_work_map.storage.data_ptr());
-    arguments.scheduler.precomputed_work_tiles_per_worker =
-        swg_work_map.tiles_per_worker;
+    if constexpr (Gemm::UseChunkMajorWorkMap) {
+      arguments.scheduler.precomputed_work_tiles_per_worker =
+          swg_work_map.tiles_per_worker;
+    }
     arguments.mainloop.ptr_A_prebuilt_tma_desc =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
