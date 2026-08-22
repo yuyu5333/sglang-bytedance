@@ -170,7 +170,13 @@ class Mxfp4CutlassMoEMethod:
         The checkpoint's native ``[gate; up]`` order already matches the kernel,
         so no de-interleave is needed.
         """
-        if getattr(layer, "_cutlass_mxfp4_weights_processed", False):
+        source_versions = (
+            layer.w13_weight._version,
+            layer.w2_weight._version,
+            layer.w13_weight_scale_inv._version,
+            layer.w2_weight_scale_inv._version,
+        )
+        if getattr(layer, "_cutlass_mxfp4_source_versions", None) == source_versions:
             return
 
         from flashinfer.fused_moe import (
@@ -245,7 +251,12 @@ class Mxfp4CutlassMoEMethod:
         layer.w2_weight_scale = Parameter(w2_scale, requires_grad=False)
 
         layer._dsv4_mxfp4_backend = "cutlass"
-        layer._cutlass_mxfp4_weights_processed = True
+        layer._cutlass_mxfp4_source_versions = (
+            layer.w13_weight._version,
+            layer.w2_weight._version,
+            layer.w13_weight_scale_inv._version,
+            layer.w2_weight_scale_inv._version,
+        )
 
     def apply(
         self,
