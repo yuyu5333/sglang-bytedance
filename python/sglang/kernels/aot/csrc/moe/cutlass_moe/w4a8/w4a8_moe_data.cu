@@ -197,17 +197,20 @@ __global__ void compute_tiny_moe_data_w4a8(
   __shared__ int32_t routed_experts[384];
   __shared__ int32_t write_offsets[MAX_EXPERTS];
 
-  for (int index = threadIdx.x; index < topk_length; index += BLOCK_SIZE) {
-    routed_experts[index] = topk_ids[index];
+  if (threadIdx.x < MAX_EXPERTS) {
+    write_offsets[threadIdx.x] = 0;
   }
   __syncthreads();
 
-  int32_t count = 0;
-  if (threadIdx.x < num_experts) {
-    for (int index = 0; index < topk_length; ++index) {
-      count += routed_experts[index] == int32_t(threadIdx.x);
-    }
+  for (int index = threadIdx.x; index < topk_length; index += BLOCK_SIZE) {
+    int const expert = topk_ids[index];
+    routed_experts[index] = expert;
+    atomicAdd(write_offsets + expert, 1);
   }
+  __syncthreads();
+
+  int32_t const count =
+      threadIdx.x < num_experts ? write_offsets[threadIdx.x] : 0;
   int32_t offset = 0;
   BlockScan(scan_storage).ExclusiveSum(count, offset);
 
