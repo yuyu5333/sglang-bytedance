@@ -195,6 +195,7 @@ __global__ void compute_tiny_moe_data_w4a8(
   using BlockScan = cub::BlockScan<int32_t, BLOCK_SIZE>;
   __shared__ typename BlockScan::TempStorage scan_storage;
   __shared__ int32_t routed_experts[384];
+  __shared__ int32_t write_offsets[MAX_EXPERTS];
 
   for (int index = threadIdx.x; index < topk_length; index += BLOCK_SIZE) {
     routed_experts[index] = topk_ids[index];
@@ -219,6 +220,7 @@ __global__ void compute_tiny_moe_data_w4a8(
     problem_sizes2[expert * 3] = k;
     problem_sizes2[expert * 3 + 1] = count;
     problem_sizes2[expert * 3 + 2] = n;
+    write_offsets[expert] = offset;
     if (expert + 1 == num_experts) {
       expert_offsets[num_experts] = offset + count;
     }
@@ -227,11 +229,7 @@ __global__ void compute_tiny_moe_data_w4a8(
 
   for (int index = threadIdx.x; index < topk_length; index += BLOCK_SIZE) {
     int const expert = routed_experts[index];
-    int local_rank = 0;
-    for (int prior = 0; prior < index; ++prior) {
-      local_rank += routed_experts[prior] == expert;
-    }
-    int const position = expert_offsets[expert] + local_rank;
+    int const position = atomicAdd(write_offsets + expert, 1);
     input_permutation[position] = index / topk;
     output_permutation[index] = position;
   }
