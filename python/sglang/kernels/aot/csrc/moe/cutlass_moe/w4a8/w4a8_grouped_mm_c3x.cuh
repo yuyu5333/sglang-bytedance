@@ -347,6 +347,9 @@ void cutlass_w4a8_group_gemm_caller(
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = a_tensors.device().index();
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
+  }
   Args arguments;
 #if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;
@@ -435,6 +438,8 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
+    arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
+    arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
     auto const swg_grid_shape =
         Gemm::GemmScaleOnly::get_grid_shape(arguments);
     swg_work_map = sgl_kernel::swg_detail::build_swg_precomputed_work_map<Gemm>(
@@ -445,8 +450,6 @@ void cutlass_w4a8_group_gemm_caller(
         swg_grid_shape,
         expert_ids.has_value(),
         a_tensors.device());
-    arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
-    arguments.scheduler.raster_order = RasterOrderOptions::AlongM;
     arguments.scheduler.precomputed_work_tiles =
         static_cast<uint64_t const*>(swg_work_map.storage.data_ptr());
     arguments.scheduler.precomputed_work_tiles_per_worker =
