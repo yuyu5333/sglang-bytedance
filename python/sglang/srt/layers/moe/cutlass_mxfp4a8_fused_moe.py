@@ -403,12 +403,6 @@ class CutlassMxfp4A8FusedMoeRunner:
         a1_scale_per_token = self._empty(
             "a1_scale_per_token", (m * topk,), torch.float32, device
         )
-        gateup_input_bf16 = self._empty(
-            "gateup_input_bf16", (m * topk, k), a.dtype, device
-        )
-        if not prepare_inputs_in_core:
-            torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
-
         # Compact Humming groups use one prebuilt weight TMA descriptor per
         # logical group, mapped through active_expert_ids to the source expert.
         # Compact only when routing is sparse enough to remove at least half of
@@ -460,7 +454,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             topk_ids_i32,
             a_map,
             c_map,
-            gateup_input_bf16,
+            a,
             gateup_input,
             a1_scale_per_token,
             intermediate_q,

@@ -271,8 +271,9 @@ void cutlass_mxfp4a8_humming_moe_core(
         expert_offsets,
         num_experts);
   } else {
-    humming_per_token_quant_fp8(
-        gateup_input_bf16,
+    humming_per_token_quant_fp8_shuffled(
+        input,
+        a_map,
         gateup_input,
         a1_scale,
         w1_residual,
