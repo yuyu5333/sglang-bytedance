@@ -290,16 +290,18 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
 
   m.def(
       "cutlass_mxfp4a8_humming_moe_core("
-      "Tensor! c1, Tensor! c2, Tensor gateup_input_bf16, Tensor! gateup_input, "
+      "Tensor! c1, Tensor! c2, Tensor input, Tensor topk_ids, "
+      "Tensor! a_map, Tensor! c_map, Tensor! gateup_input_bf16, Tensor! gateup_input, "
       "Tensor! a1_scale, Tensor! intermediate_q, Tensor! a2_scale, "
       "Tensor w1, Tensor w1_scale, Tensor w1_residual, "
       "Tensor w2, Tensor w2_scale, Tensor w2_residual, "
-      "Tensor expert_offsets, Tensor gemm_expert_offsets, "
-      "Tensor problem_sizes1, Tensor problem_sizes2, "
+      "Tensor! expert_offsets, Tensor gemm_expert_offsets, "
+      "Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "Tensor a_strides1, Tensor b_strides1, Tensor c_strides1, Tensor s_strides1, "
       "Tensor a_strides2, Tensor b_strides2, Tensor c_strides2, Tensor s_strides2, "
       "int topk, int gemm1_config, int gemm2_config, int num_experts, "
-      "float swiglu_limit, bool has_swiglu_limit, Tensor? expert_ids=None) -> ()");
+      "int intermediate_size, int hidden_size, float swiglu_limit, "
+      "bool has_swiglu_limit, bool prepare_inputs, Tensor? expert_ids=None) -> ()");
   m.impl(
       "cutlass_mxfp4a8_humming_moe_core",
       torch::kCUDA,

@@ -359,41 +359,43 @@ class CutlassMxfp4A8FusedMoeRunner:
 
         a_map = self._empty("a_map", (topk_ids.numel(),), torch.int32, device)
         c_map = self._empty("c_map", (topk_ids.numel(),), torch.int32, device)
-        if get_cutlass_w4a8_moe_mm_data_with_permutation is None:
-            prepare_moe_input(
-                topk_ids_i32,
-                expert_offsets,
-                problem_sizes1,
-                problem_sizes2,
-                a_map,
-                c_map,
-                num_local_experts,
-                n,
-                k,
-            )
-            get_cutlass_w4a8_moe_mm_data(
-                topk_ids_i32,
-                expert_offsets,
-                problem_sizes1,
-                problem_sizes2,
-                a_map,
-                c_map,
-                num_local_experts,
-                n,
-                k,
-            )
-        else:
-            get_cutlass_w4a8_moe_mm_data_with_permutation(
-                topk_ids_i32,
-                expert_offsets,
-                problem_sizes1,
-                problem_sizes2,
-                a_map,
-                c_map,
-                num_local_experts,
-                n,
-                k,
-            )
+        prepare_inputs_in_core = m <= 64
+        if not prepare_inputs_in_core:
+            if get_cutlass_w4a8_moe_mm_data_with_permutation is None:
+                prepare_moe_input(
+                    topk_ids_i32,
+                    expert_offsets,
+                    problem_sizes1,
+                    problem_sizes2,
+                    a_map,
+                    c_map,
+                    num_local_experts,
+                    n,
+                    k,
+                )
+                get_cutlass_w4a8_moe_mm_data(
+                    topk_ids_i32,
+                    expert_offsets,
+                    problem_sizes1,
+                    problem_sizes2,
+                    a_map,
+                    c_map,
+                    num_local_experts,
+                    n,
+                    k,
+                )
+            else:
+                get_cutlass_w4a8_moe_mm_data_with_permutation(
+                    topk_ids_i32,
+                    expert_offsets,
+                    problem_sizes1,
+                    problem_sizes2,
+                    a_map,
+                    c_map,
+                    num_local_experts,
+                    n,
+                    k,
+                )
 
         gateup_input = self._empty(
             "gateup_input_fp8", (m * topk, k), torch.float8_e4m3fn, device
@@ -404,7 +406,8 @@ class CutlassMxfp4A8FusedMoeRunner:
         gateup_input_bf16 = self._empty(
             "gateup_input_bf16", (m * topk, k), a.dtype, device
         )
-        torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
+        if not prepare_inputs_in_core:
+            torch.ops.sgl_kernel.shuffle_rows.default(a, a_map, gateup_input_bf16)
 
         # Compact Humming groups use one prebuilt weight TMA descriptor per
         # logical group, mapped through active_expert_ids to the source expert.
@@ -457,6 +460,10 @@ class CutlassMxfp4A8FusedMoeRunner:
         torch.ops.sgl_kernel.cutlass_mxfp4a8_humming_moe_core.default(
             c1,
             c2,
+            a,
+            topk_ids_i32,
+            a_map,
+            c_map,
             gateup_input_bf16,
             gateup_input,
             a1_scale_per_token,
@@ -484,8 +491,11 @@ class CutlassMxfp4A8FusedMoeRunner:
             gemm1_config,
             gemm2_config,
             num_local_experts,
+            n,
+            k,
             float(swiglu_limit or 0.0),
             swiglu_limit is not None,
+            prepare_inputs_in_core,
             active_expert_ids,
         )
 

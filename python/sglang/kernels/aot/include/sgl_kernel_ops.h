@@ -497,7 +497,11 @@ void cutlass_mxfp4a8_humming_moe_mm(
 void cutlass_mxfp4a8_humming_moe_core(
     torch::Tensor& c1,
     torch::Tensor& c2,
-    torch::Tensor const& gateup_input_bf16,
+    torch::Tensor const& input,
+    torch::Tensor const& topk_ids,
+    torch::Tensor& a_map,
+    torch::Tensor& c_map,
+    torch::Tensor& gateup_input_bf16,
     torch::Tensor& gateup_input,
     torch::Tensor& a1_scale,
     torch::Tensor& intermediate_q,
@@ -508,10 +512,10 @@ void cutlass_mxfp4a8_humming_moe_core(
     torch::Tensor const& w2,
     torch::Tensor const& w2_scale,
     torch::Tensor const& w2_residual,
-    torch::Tensor const& expert_offsets,
+    torch::Tensor& expert_offsets,
     torch::Tensor const& gemm_expert_offsets,
-    torch::Tensor const& problem_sizes1,
-    torch::Tensor const& problem_sizes2,
+    torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2,
     torch::Tensor const& a_strides1,
     torch::Tensor const& b_strides1,
     torch::Tensor const& c_strides1,
@@ -524,8 +528,11 @@ void cutlass_mxfp4a8_humming_moe_core(
     int64_t gemm1_config,
     int64_t gemm2_config,
     int64_t num_experts,
+    int64_t intermediate_size,
+    int64_t hidden_size,
     double swiglu_limit,
     bool has_swiglu_limit,
+    bool prepare_inputs,
     std::optional<torch::Tensor> expert_ids);
 /*
  * From csrc/speculative
