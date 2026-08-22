@@ -29,19 +29,11 @@
  *
  **************************************************************************************************/
 
-/*! \file
-  \brief Pointer-array row-scale fusion callbacks for the sm90 TMA warp-specialized epilogue.
-*/
-
 #pragma once
 
 #include "cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp"
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
 namespace cutlass::epilogue::fusion {
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class ElementOutput_, class ElementCompute_, class ElementScalar_ = ElementCompute_,
           int AlignmentScalar_ = 128 / cute::sizeof_bits_v<ElementScalar_>,
@@ -93,8 +85,4 @@ struct FusionCallbacks<
   using Impl::Impl;
 };
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
 }  // namespace cutlass::epilogue::fusion
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
