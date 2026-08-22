@@ -431,12 +431,14 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
+    auto const swg_grid_shape =
+        Gemm::GemmScaleOnly::get_grid_shape(arguments);
     swg_work_map = sgl_kernel::swg_detail::build_swg_precomputed_work_map<Gemm>(
         problem_sizes_as_shapes,
         num_experts,
         static_cast<uint64_t>(d_tensors.size(0)),
         static_cast<uint64_t>(d_tensors.size(1)),
-        hw_info,
+        swg_grid_shape,
         a_tensors.device());
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgWorkMapMaxSwizzle;
     arguments.scheduler.raster_order = RasterOrderOptions::AlongM;

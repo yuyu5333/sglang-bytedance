@@ -344,23 +344,8 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
     int groups,
     uint64_t total_tokens,
     uint64_t channels,
-    cutlass::KernelHardwareInfo const& hw_info,
+    dim3 const& grid_shape,
     torch::Device device) {
-  using Scheduler = typename Gemm::GemmKernelScaleOnly::TileScheduler;
-  using SchedulerParams = typename Scheduler::Params;
-  using RasterOrderOptions = typename SchedulerParams::RasterOrderOptions;
-
-  cutlass::gemm::GemmCoord const cluster_shape(1, 1, 1);
-  dim3 const problem_blocks =
-      SchedulerParams::get_tiled_cta_shape_mnl(
-          cluster_shape, static_cast<uint32_t>(hw_info.sm_count), 1);
-  dim3 const grid_shape = SchedulerParams::get_grid_shape(
-      problem_blocks,
-      cluster_shape,
-      hw_info,
-      kSwgWorkMapMaxSwizzle,
-      RasterOrderOptions::AlongM,
-      true);
   uint64_t const worker_count_u64 =
       uint64_t(grid_shape.x) * uint64_t(grid_shape.y) * uint64_t(grid_shape.z);
   TORCH_CHECK(worker_count_u64 > 0, "SWG precomputed work map requires workers");
