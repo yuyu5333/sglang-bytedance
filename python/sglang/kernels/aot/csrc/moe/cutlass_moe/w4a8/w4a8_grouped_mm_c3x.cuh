@@ -185,7 +185,6 @@ struct cutlass_3x_w4a8_group_gemm {
       !UsePreMmaE8M0Scale ||
       std::is_same_v<KernelSchedule, cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong>);
   static_assert(!UseSingleWarpgroup || cute::size(ClusterShape{}) == 1);
-  static_assert(!UsePreMmaE8M0Scale || cute::size(ClusterShape{}) == 1);
 
   using CollectiveEpilogue = typename W4A8EpilogueSelector<
       UseSingleWarpgroupKernel,

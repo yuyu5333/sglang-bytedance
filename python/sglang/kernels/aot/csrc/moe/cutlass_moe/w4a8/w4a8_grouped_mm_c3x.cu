@@ -86,10 +86,17 @@ struct SM90_SWG_MXFP4 {
 // General two-consumer-warpgroup Humming tactic. It keeps the pre-MMA E8M0
 // mainloop and the existing chunk-major precomputed work map, while using the
 // regular ping-pong kernel for larger token tiles.
-template <int M, int N, int K, bool ChunkMajorWorkMap = true>
+template <
+    int M,
+    int N,
+    int K,
+    int ClusterM = 1,
+    int ClusterN = 1,
+    bool ChunkMajorWorkMap = true>
 struct SM90_PRECOMPUTED_MXFP4 {
   using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;
-  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
+  using ClusterShape =
+      cute::Shape<cute::Int<ClusterM>, cute::Int<ClusterN>, cute::Int<1>>;
   using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
       TileShape,
       ClusterShape,
@@ -585,14 +592,17 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 32, 512>));
       return;
     case 204:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 32, 512, false>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>));
+      return;
+    case 205:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 64, 512, 2, 1, false>));
       return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported Humming config=",
           swg_config,
-          "; expected one of 100, 101, 102, 103, 200, 201, 202, 203, 204");
+          "; expected one of 100, 101, 102, 103, 200, 201, 202, 203, 204, 205");
   }
 #else
   TORCH_CHECK(false, "Humming kernels are disabled in this build");
