@@ -138,8 +138,6 @@ __global__ void humming_swiglu_quant_fp8_kernel(
 
   const T* gate = input + token * hidden_dim * 2;
   const T* up = gate + hidden_dim;
-  extern __shared__ __align__(16) unsigned char shared_storage[];
-  T* values = reinterpret_cast<T*>(shared_storage);
   float max_value = 0.0f;
   constexpr int64_t kVecSize = 16 / sizeof(T);
 
@@ -162,13 +160,11 @@ __global__ void humming_swiglu_quant_fp8_kernel(
     for (int j = 0; j < kVecSize; ++j) {
       const T value =
           humming_swiglu_value(gate_values[j], up_values[j], swiglu_limit, has_swiglu_limit);
-      values[vec * kVecSize + j] = value;
       max_value = fmaxf(max_value, fabsf(static_cast<float>(value)));
     }
   }
   for (int64_t i = vectorized_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
     const T value = humming_swiglu_value(gate[i], up[i], swiglu_limit, has_swiglu_limit);
-    values[i] = value;
     max_value = fmaxf(max_value, fabsf(static_cast<float>(value)));
   }
 
@@ -197,17 +193,22 @@ __global__ void humming_swiglu_quant_fp8_kernel(
   __syncthreads();
 
   for (int64_t vec = threadIdx.x; vec < vectorized_dim / kVecSize; vec += blockDim.x) {
+    const uint4 gate_pack = gate_vec[vec];
+    const uint4 up_pack = up_vec[vec];
+    const T* gate_values = reinterpret_cast<const T*>(&gate_pack);
+    const T* up_values = reinterpret_cast<const T*>(&up_pack);
 #pragma unroll
     for (int j = 0; j < kVecSize; ++j) {
       const int64_t i = vec * kVecSize + j;
-      const T value = values[i];
+      const T value =
+          humming_swiglu_value(gate_values[j], up_values[j], swiglu_limit, has_swiglu_limit);
       float quant_value = static_cast<float>(value) * scale_inv;
       quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
       output_q[token * hidden_dim + i] = static_cast<__nv_fp8_e4m3>(quant_value);
     }
   }
   for (int64_t i = vectorized_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
-    const T value = values[i];
+    const T value = humming_swiglu_value(gate[i], up[i], swiglu_limit, has_swiglu_limit);
     float quant_value = static_cast<float>(value) * scale_inv;
     quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
     output_q[token * hidden_dim + i] = static_cast<__nv_fp8_e4m3>(quant_value);
@@ -248,8 +249,7 @@ void humming_swiglu_quant_fp8(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
-    humming_swiglu_quant_fp8_kernel<c_type>
-        <<<num_tokens, kThreads, hidden_dim * sizeof(c_type), stream>>>(
+    humming_swiglu_quant_fp8_kernel<c_type><<<num_tokens, kThreads, 0, stream>>>(
         static_cast<const c_type*>(input.data_ptr()),
         static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
         static_cast<float*>(output_s.data_ptr()),
