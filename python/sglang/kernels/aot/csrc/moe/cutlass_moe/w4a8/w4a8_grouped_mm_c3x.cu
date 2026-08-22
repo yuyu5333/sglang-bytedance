@@ -597,12 +597,15 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
     case 205:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 64, 512, 2, 1, false>));
       return;
+    case 206:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 16, 512>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported Humming config=",
           swg_config,
-          "; expected one of 100, 101, 102, 103, 200, 201, 202, 203, 204, 205");
+          "; expected one of 100, 101, 102, 103, 200, 201, 202, 203, 204, 205, 206");
   }
 #else
   TORCH_CHECK(false, "Humming kernels are disabled in this build");
