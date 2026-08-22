@@ -122,7 +122,7 @@ endif()
 if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     set(DEFAULT_SGL_KERNEL_ENABLE_FA3 ON)
 endif()
-option(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL "Enable experimental MXFP4A8 single-warpgroup kernels" OFF)
+option(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL "Enable MXFP4A8 Humming single-warpgroup kernels" ON)
 
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
