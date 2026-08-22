@@ -190,9 +190,9 @@ class CutlassMxfp4A8FusedMoeRunner:
 
     @staticmethod
     def _humming_gemm2_config(output_size: int) -> int:
-        # GEMM2 (K=intermediate size) favors the N=32 tactic for the common
-        # hidden sizes on H20; prefer it over the N=16 GEMM1 winner.
-        for tile_n, config in ((32, 102), (16, 101), (40, 103), (8, 100)):
+        # Tiny per-expert batches on H20 favor the highest-residency TileN=8
+        # tactic for both Humming GEMMs.
+        for tile_n, config in ((8, 100), (16, 101), (32, 102), (40, 103)):
             if output_size % tile_n == 0:
                 return config
         return 100
@@ -378,7 +378,14 @@ class CutlassMxfp4A8FusedMoeRunner:
 
         # Compact Humming groups use one prebuilt weight TMA descriptor per
         # logical group, mapped through active_expert_ids to the source expert.
-        use_compact_groups = compact_cutlass_w4a8_moe_mm_data is not None and m <= 256
+        # Compact only when routing is sparse enough to remove at least half of
+        # the expert groups. At high coverage, scanning and publishing one
+        # weight descriptor per logical group costs more than the empty groups.
+        use_compact_groups = (
+            compact_cutlass_w4a8_moe_mm_data is not None
+            and m <= 256
+            and m * topk < 2 * num_local_experts
+        )
         if use_compact_groups:
             max_compact_groups = max(1, min(num_local_experts, topk_ids.numel()))
             (
@@ -423,7 +430,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             c_strides1_gemm,
             s_strides13_gemm,
             topk,
-            101,
+            100,
             active_expert_ids,
         )
 
