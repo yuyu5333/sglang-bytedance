@@ -376,7 +376,11 @@ class CutlassMxfp4A8FusedMoeRunner:
             num_local_experts,
         )
 
-        use_compact_groups = compact_cutlass_w4a8_moe_mm_data is not None and m <= 256
+        # The Humming SWG collective uses a shared weight TMA descriptor whose
+        # group dimension follows physical expert order. Compact metadata plus
+        # an expert-id indirection therefore reads the wrong weight after the
+        # first skipped expert. Keep all groups, including zero-M groups.
+        use_compact_groups = False
         if use_compact_groups:
             max_compact_groups = max(1, min(num_local_experts, topk_ids.numel()))
             (
