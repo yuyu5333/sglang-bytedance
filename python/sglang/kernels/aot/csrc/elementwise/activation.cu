@@ -125,9 +125,9 @@ __global__ void humming_swiglu_quant_fp8_kernel(
   const T* up = gate + hidden_dim;
   float max_value = 0.0f;
 
-  // Match silu_and_mul's two BF16/FP16 roundings: one after SiLU and one
-  // after multiplication. The rounded product is what the legacy quantizer
-  // observes.
+  // Match flashinfer::activation::act_and_mul_kernel: convert the inputs to
+  // FP32, evaluate SiLU and the multiply in FP32, then round the product once
+  // to BF16/FP16. The rounded product is what the legacy quantizer observes.
   for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
     T gate_value = gate[i];
     T up_value = up[i];
@@ -136,7 +136,8 @@ __global__ void humming_swiglu_quant_fp8_kernel(
       up_value =
           static_cast<T>(fmaxf(fminf(static_cast<float>(up_value), swiglu_limit), -swiglu_limit));
     }
-    const T value = silu(gate_value) * up_value;
+    const T value = static_cast<T>(
+        silu(static_cast<float>(gate_value)) * static_cast<float>(up_value));
     max_value = fmaxf(max_value, fabsf(static_cast<float>(value)));
   }
 
@@ -172,7 +173,8 @@ __global__ void humming_swiglu_quant_fp8_kernel(
       up_value =
           static_cast<T>(fmaxf(fminf(static_cast<float>(up_value), swiglu_limit), -swiglu_limit));
     }
-    const T value = silu(gate_value) * up_value;
+    const T value = static_cast<T>(
+        silu(static_cast<float>(gate_value)) * static_cast<float>(up_value));
     float quant_value = static_cast<float>(value) * scale_inv;
     quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
     output_q[token * hidden_dim + i] = static_cast<__nv_fp8_e4m3>(quant_value);
