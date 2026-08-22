@@ -8,19 +8,45 @@
 static constexpr int kWarpSize = 32;
 static constexpr int DEFAULT_SHARED_MEM_THRESHOLD_KB = 48;  // Default shared memory quota in KB
 
+__device__ __forceinline__ int find_expert_for_token(
+    int64_t token, const int32_t* __restrict__ expert_offsets, int64_t num_experts) {
+  // upper_bound(expert_offsets, token) - 1. Repeated offsets from empty
+  // experts are handled by moving to the rightmost matching interval.
+  int lo = 0;
+  int hi = static_cast<int>(num_experts);
+  while (lo + 1 < hi) {
+    const int mid = (lo + hi) / 2;
+    if (token >= expert_offsets[mid]) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Warp‑local with configurable shared memory
 //    • One warp handles one token.
 //    • Eight tokens per 256‑thread CTA.
 //    • Shared memory usage is configurable via template parameter.
 // ---------------------------------------------------------------------------
-template <typename T, typename DST_DTYPE, int kTokensPerCTA = 8, int kVecSize = 16, bool USE_SMEM = true>
+template <
+    typename T,
+    typename DST_DTYPE,
+    int kTokensPerCTA = 8,
+    int kVecSize = 16,
+    bool USE_SMEM = true,
+    bool APPLY_EXPERT_RESIDUAL = false>
 __global__ void per_token_quant_fp8_kernel(
     const T* __restrict__ input,
     DST_DTYPE* __restrict__ output_q,
     float* __restrict__ output_s,
+    const float* __restrict__ residual,
+    const int32_t* __restrict__ expert_offsets,
     const int64_t hidden_dim,
-    const int64_t num_tokens) {
+    const int64_t num_tokens,
+    const int64_t num_experts) {
   const int warp_id = threadIdx.x / kWarpSize;        // 0‑7  (8 warps)
   const int lane_id = threadIdx.x & (kWarpSize - 1);  // 0‑31
   const int token_id = blockIdx.x * kTokensPerCTA + warp_id;
@@ -75,7 +101,12 @@ __global__ void per_token_quant_fp8_kernel(
   const float scale = warp_max / FP8_E4M3_MAX;
   // Broadcast scale
   if (lane_id == 0) {
-    token_scale[0] = scale;
+    if constexpr (APPLY_EXPERT_RESIDUAL) {
+      const int expert = find_expert_for_token(token_id, expert_offsets, num_experts);
+      token_scale[0] = scale * residual[expert];
+    } else {
+      token_scale[0] = scale;
+    }
   }
   const float scale_inv = (scale == 0.f) ? 0.f : 1.0f / scale;
 
@@ -123,13 +154,16 @@ __global__ void per_token_quant_fp8_kernel(
 // ---------------------------------------------------------------------------
 // 2.  Baseline kernel (1 token / CTA, CUB block reduce)
 // ---------------------------------------------------------------------------
-template <typename T, typename DST_DTYPE, int kVecSize = 16>
+template <typename T, typename DST_DTYPE, int kVecSize = 16, bool APPLY_EXPERT_RESIDUAL = false>
 __global__ void per_token_quant_fp8_small_batch_kernel(
     const T* __restrict__ input,
     DST_DTYPE* __restrict__ output_q,
     float* __restrict__ output_s,
+    const float* __restrict__ residual,
+    const int32_t* __restrict__ expert_offsets,
     const int64_t hidden_dim,
-    const int64_t num_tokens) {
+    const int64_t num_tokens,
+    const int64_t num_experts) {
   const int token_idx = blockIdx.x;
   if (token_idx >= num_tokens) return;
 
@@ -162,7 +196,12 @@ __global__ void per_token_quant_fp8_small_batch_kernel(
   __shared__ float scale;
   if (tid == 0) {
     scale = max_value / FP8_E4M3_MAX;
-    output_s[token_idx] = scale;
+    if constexpr (APPLY_EXPERT_RESIDUAL) {
+      const int expert = find_expert_for_token(token_idx, expert_offsets, num_experts);
+      output_s[token_idx] = scale * residual[expert];
+    } else {
+      output_s[token_idx] = scale;
+    }
   }
   __syncthreads();
 
@@ -197,7 +236,7 @@ __global__ void per_token_quant_fp8_small_batch_kernel(
   }
 }
 
-template <bool USE_SMEM, typename scalar_t, int TOKENS_PER_CTA>
+template <bool USE_SMEM, bool APPLY_EXPERT_RESIDUAL, typename scalar_t, int TOKENS_PER_CTA>
 static inline void launch_per_token_quant_fp8_warp_kernel(
     const dim3& grid,
     const dim3& block,
@@ -208,45 +247,80 @@ static inline void launch_per_token_quant_fp8_warp_kernel(
     torch::Tensor input,
     torch::Tensor output_q,
     torch::Tensor output_s,
+    const float* residual,
+    const int32_t* expert_offsets,
     const int64_t hidden_dim,
-    const int64_t num_tokens) {
+    const int64_t num_tokens,
+    const int64_t num_experts) {
   const size_t smem_size = USE_SMEM ? dynamicSmemSz : 0;
 
   if (use_vec16) {
-    per_token_quant_fp8_kernel<scalar_t, __nv_fp8_e4m3, TOKENS_PER_CTA, 16, USE_SMEM>
+    per_token_quant_fp8_kernel<
+        scalar_t,
+        __nv_fp8_e4m3,
+        TOKENS_PER_CTA,
+        16,
+        USE_SMEM,
+        APPLY_EXPERT_RESIDUAL>
         <<<grid, block, smem_size, stream>>>(
             static_cast<const scalar_t*>(input.data_ptr()),
             static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
             static_cast<float*>(output_s.data_ptr()),
+            residual,
+            expert_offsets,
             hidden_dim,
-            num_tokens);
+            num_tokens,
+            num_experts);
   } else if (use_vec8) {
-    per_token_quant_fp8_kernel<scalar_t, __nv_fp8_e4m3, TOKENS_PER_CTA, 8, USE_SMEM>
+    per_token_quant_fp8_kernel<
+        scalar_t,
+        __nv_fp8_e4m3,
+        TOKENS_PER_CTA,
+        8,
+        USE_SMEM,
+        APPLY_EXPERT_RESIDUAL>
         <<<grid, block, smem_size, stream>>>(
             static_cast<const scalar_t*>(input.data_ptr()),
             static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
             static_cast<float*>(output_s.data_ptr()),
+            residual,
+            expert_offsets,
             hidden_dim,
-            num_tokens);
+            num_tokens,
+            num_experts);
   } else {
-    per_token_quant_fp8_kernel<scalar_t, __nv_fp8_e4m3, TOKENS_PER_CTA, 4, USE_SMEM>
+    per_token_quant_fp8_kernel<
+        scalar_t,
+        __nv_fp8_e4m3,
+        TOKENS_PER_CTA,
+        4,
+        USE_SMEM,
+        APPLY_EXPERT_RESIDUAL>
         <<<grid, block, smem_size, stream>>>(
             static_cast<const scalar_t*>(input.data_ptr()),
             static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
             static_cast<float*>(output_s.data_ptr()),
+            residual,
+            expert_offsets,
             hidden_dim,
-            num_tokens);
+            num_tokens,
+            num_experts);
   }
 }
 
-void sgl_per_token_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Tensor output_s) {
-  CHECK_INPUT(input);
-  CHECK_INPUT(output_q);
-  CHECK_INPUT(output_s);
+template <bool APPLY_EXPERT_RESIDUAL>
+void per_token_quant_fp8_impl(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    const float* residual,
+    const int32_t* expert_offsets,
+    int64_t num_experts) {
   const auto input_sizes = input.sizes();
   const int64_t num_tokens = input_sizes[0];
   const int64_t hidden_dim = input_sizes[1];
   TORCH_CHECK(hidden_dim % 4 == 0, "Hidden dimension must be divisible by 4, but got ", hidden_dim);
+  if (num_tokens == 0) return;
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int sm_count = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
@@ -274,11 +348,45 @@ void sgl_per_token_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch:
       dim3 block(THREADS);
 
       if (use_smem) {
-        launch_per_token_quant_fp8_warp_kernel</*USE_SMEM=*/true, scalar_t, TOKENS_PER_CTA>(
-            grid, block, dynamicSmemSz, stream, use_vec16, use_vec8, input, output_q, output_s, hidden_dim, num_tokens);
+        launch_per_token_quant_fp8_warp_kernel<
+            /*USE_SMEM=*/true,
+            APPLY_EXPERT_RESIDUAL,
+            scalar_t,
+            TOKENS_PER_CTA>(
+            grid,
+            block,
+            dynamicSmemSz,
+            stream,
+            use_vec16,
+            use_vec8,
+            input,
+            output_q,
+            output_s,
+            residual,
+            expert_offsets,
+            hidden_dim,
+            num_tokens,
+            num_experts);
       } else {
-        launch_per_token_quant_fp8_warp_kernel</*USE_SMEM=*/false, scalar_t, TOKENS_PER_CTA>(
-            grid, block, dynamicSmemSz, stream, use_vec16, use_vec8, input, output_q, output_s, hidden_dim, num_tokens);
+        launch_per_token_quant_fp8_warp_kernel<
+            /*USE_SMEM=*/false,
+            APPLY_EXPERT_RESIDUAL,
+            scalar_t,
+            TOKENS_PER_CTA>(
+            grid,
+            block,
+            dynamicSmemSz,
+            stream,
+            use_vec16,
+            use_vec8,
+            input,
+            output_q,
+            output_s,
+            residual,
+            expert_offsets,
+            hidden_dim,
+            num_tokens,
+            num_experts);
       }
     } else {
       // -------- baseline -----------------------------------------------------
@@ -287,28 +395,90 @@ void sgl_per_token_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch:
       dim3 block(THREADS);
 
       if (use_vec16) {
-        per_token_quant_fp8_small_batch_kernel<scalar_t, __nv_fp8_e4m3, 16><<<grid, block, 0, stream>>>(
+        per_token_quant_fp8_small_batch_kernel<scalar_t, __nv_fp8_e4m3, 16, APPLY_EXPERT_RESIDUAL>
+            <<<grid, block, 0, stream>>>(
             static_cast<const scalar_t*>(input.data_ptr()),
             static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
             static_cast<float*>(output_s.data_ptr()),
+            residual,
+            expert_offsets,
             hidden_dim,
-            num_tokens);
+            num_tokens,
+            num_experts);
       } else if (use_vec8) {
-        per_token_quant_fp8_small_batch_kernel<scalar_t, __nv_fp8_e4m3, 8><<<grid, block, 0, stream>>>(
+        per_token_quant_fp8_small_batch_kernel<scalar_t, __nv_fp8_e4m3, 8, APPLY_EXPERT_RESIDUAL>
+            <<<grid, block, 0, stream>>>(
             static_cast<const scalar_t*>(input.data_ptr()),
             static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
             static_cast<float*>(output_s.data_ptr()),
+            residual,
+            expert_offsets,
             hidden_dim,
-            num_tokens);
+            num_tokens,
+            num_experts);
       } else {
-        per_token_quant_fp8_small_batch_kernel<scalar_t, __nv_fp8_e4m3, 4><<<grid, block, 0, stream>>>(
+        per_token_quant_fp8_small_batch_kernel<scalar_t, __nv_fp8_e4m3, 4, APPLY_EXPERT_RESIDUAL>
+            <<<grid, block, 0, stream>>>(
             static_cast<const scalar_t*>(input.data_ptr()),
             static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
             static_cast<float*>(output_s.data_ptr()),
+            residual,
+            expert_offsets,
             hidden_dim,
-            num_tokens);
+            num_tokens,
+            num_experts);
       }
     }
     return true;
   });
 }
+
+void sgl_per_token_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Tensor output_s) {
+  CHECK_INPUT(input);
+  CHECK_INPUT(output_q);
+  CHECK_INPUT(output_s);
+  TORCH_CHECK(input.dim() == 2, "input must have shape [M, K]");
+  per_token_quant_fp8_impl</*APPLY_EXPERT_RESIDUAL=*/false>(
+      input, output_q, output_s, nullptr, nullptr, 0);
+}
+
+#ifndef USE_ROCM
+void humming_per_token_quant_fp8(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    const torch::Tensor& residual,
+    const torch::Tensor& expert_offsets,
+    int64_t num_experts) {
+  CHECK_INPUT(input);
+  CHECK_INPUT(output_q);
+  CHECK_INPUT(output_s);
+  CHECK_INPUT(residual);
+  CHECK_INPUT(expert_offsets);
+  TORCH_CHECK(input.dim() == 2, "input must have shape [M, K]");
+  TORCH_CHECK(output_q.sizes() == input.sizes(), "output_q must have the same shape as input");
+  TORCH_CHECK(output_q.scalar_type() == at::kFloat8_e4m3fn, "output_q must be float8_e4m3fn");
+  TORCH_CHECK(
+      output_s.numel() == input.size(0) && output_s.scalar_type() == at::kFloat,
+      "output_s must be float32 with M elements");
+  TORCH_CHECK(
+      residual.numel() == num_experts && residual.scalar_type() == at::kFloat,
+      "residual must be float32 [E]");
+  TORCH_CHECK(
+      expert_offsets.numel() == num_experts + 1 && expert_offsets.scalar_type() == at::kInt,
+      "expert_offsets must be int32 [E + 1]");
+  TORCH_CHECK(num_experts >= 1 && num_experts <= 256, "num_experts must be in [1, 256]");
+  TORCH_CHECK(
+      input.device() == output_q.device() && input.device() == output_s.device() &&
+          input.device() == residual.device() && input.device() == expert_offsets.device(),
+      "all tensors must be on the same device");
+
+  per_token_quant_fp8_impl</*APPLY_EXPERT_RESIDUAL=*/true>(
+      input,
+      output_q,
+      output_s,
+      static_cast<const float*>(residual.data_ptr()),
+      static_cast<const int32_t*>(expert_offsets.data_ptr()),
+      num_experts);
+}
+#endif

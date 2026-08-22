@@ -145,6 +145,13 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("sgl_per_token_quant_fp8(Tensor input, Tensor! output_q, Tensor! output_s) -> ()");
   m.impl("sgl_per_token_quant_fp8", torch::kCUDA, &sgl_per_token_quant_fp8);
 
+#ifndef USE_ROCM
+  m.def(
+      "humming_per_token_quant_fp8(Tensor input, Tensor! output_q, Tensor! output_s, Tensor residual, "
+      "Tensor expert_offsets, int num_experts) -> ()");
+  m.impl("humming_per_token_quant_fp8", torch::kCUDA, &humming_per_token_quant_fp8);
+#endif
+
   /*
    * From csrc/gemm/gptq
    */
