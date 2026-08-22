@@ -11,7 +11,9 @@ namespace sgl_kernel::swg_detail {
 
 using SwgWorkTile = cutlass::gemm::kernel::detail::PrecomputedGroupWorkTile;
 
-constexpr int kSwgWorkMapMaxSwizzle = 8;
+// Match the Humming single-warpgroup scheduler: interleaving each expert's
+// token tiles adds substantial padding for large routed batches.
+constexpr int kSwgWorkMapMaxSwizzle = 1;
 constexpr int kSwgWorkMapBuilderThreads = 128;
 
 CUTLASS_HOST_DEVICE uint64_t swg_div_up(uint64_t value, uint64_t divisor) {
