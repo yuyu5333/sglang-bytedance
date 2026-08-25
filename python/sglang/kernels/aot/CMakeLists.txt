@@ -16,6 +16,15 @@ set(CMAKE_SHARED_LIBRARY_PREFIX "")
 # GitHub Artifactory
 set(GITHUB_ARTIFACTORY "github.com" CACHE STRING "GitHub mirror URL")
 
+option(SGL_KERNEL_ENABLE_W4A8_INT4 "Build INT4 W4A8 grouped GEMM kernels" ON)
+if(NOT SGL_KERNEL_ENABLE_W4A8_INT4)
+    add_compile_definitions(SGL_KERNEL_DISABLE_W4A8_INT4)
+endif()
+option(SGL_KERNEL_USE_CUTLASS_BUILTIN_E2M1_CONVERTER "Use CUTLASS built-in E2M1 to E4M3 converter" OFF)
+if(SGL_KERNEL_USE_CUTLASS_BUILTIN_E2M1_CONVERTER)
+    add_compile_definitions(SGL_KERNEL_USE_CUTLASS_BUILTIN_E2M1_CONVERTER)
+endif()
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
@@ -104,6 +113,7 @@ else()
 endif()
 
 option(ENABLE_BELOW_SM90 "Enable gencode below SM90" ${DEFAULT_ENABLE_BELOW_SM90})
+option(SGL_KERNEL_ENABLE_SM90A "Enable SM90A" OFF)
 
 set(DEFAULT_SGL_KERNEL_ENABLE_FA3 OFF)
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
@@ -112,6 +122,7 @@ endif()
 if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     set(DEFAULT_SGL_KERNEL_ENABLE_FA3 ON)
 endif()
+option(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL "Enable MXFP4A8 Humming single-warpgroup kernels" ON)
 
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
@@ -124,7 +135,6 @@ set(SGL_KERNEL_CUDA_FLAGS
     "-O3"
     "-Xcompiler"
     "-fPIC"
-    "-gencode=arch=compute_90,code=sm_90"
     "-std=c++17"
     "-DFLASHINFER_ENABLE_F16"
     "-DCUTE_USE_PACKED_TUPLE=1"
@@ -156,6 +166,16 @@ set(SGL_KERNEL_CUDA_FLAGS
     # "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
 )
 
+if (SGL_KERNEL_ENABLE_SM90A)
+    list(APPEND SGL_KERNEL_CUDA_FLAGS
+        "-gencode=arch=compute_90a,code=sm_90a"
+    )
+else()
+    list(APPEND SGL_KERNEL_CUDA_FLAGS
+        "-gencode=arch=compute_90,code=sm_90"
+    )
+endif()
+
 set(SGL_KERNEL_COMPILE_THREADS 32 CACHE STRING "Set compilation threads, default 32")
 
 # When SGL_KERNEL_COMPILE_THREADS value is less than 1, set it to 1
@@ -175,7 +195,6 @@ option(SGL_KERNEL_ENABLE_FP8              "Enable FP8"              ON)
 option(SGL_KERNEL_ENABLE_FP4              "Enable FP4"              OFF)
 option(SGL_KERNEL_ENABLE_FA3              "Enable FA3"              ${DEFAULT_SGL_KERNEL_ENABLE_FA3})
 option(SGL_KERNEL_ENABLE_FA3_SPARSE_MASK  "Enable FA3 sparse mask kernels" OFF)
-option(SGL_KERNEL_ENABLE_SM90A            "Enable SM90A"            OFF)
 option(SGL_KERNEL_ENABLE_SM100A           "Enable SM100A"           OFF)
 
 if (SGL_KERNEL_ENABLE_BF16)
@@ -205,7 +224,7 @@ if (ENABLE_BELOW_SM90)
 
 endif()
 
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_SM100A)
+if (SGL_KERNEL_ENABLE_SM100A)
     # sm_100f is available in CUDA 12.9+ and covers all sm_100, sm_103, sm_107, sm_10x
     if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.9")
         list(APPEND SGL_KERNEL_CUDA_FLAGS
@@ -239,7 +258,7 @@ if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_SM100A)
     endif()
 endif()
 
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4" AND SGL_KERNEL_ENABLE_FA3)
+if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4" AND SGL_KERNEL_ENABLE_FA3 AND NOT SGL_KERNEL_ENABLE_SM90A)
     list(APPEND SGL_KERNEL_CUDA_FLAGS
         "-gencode=arch=compute_90a,code=sm_90a"
     )
@@ -318,6 +337,7 @@ set(INCLUDES
     ${repo-cutlass_SOURCE_DIR}/tools/util/include
     ${repo-flashinfer_SOURCE_DIR}/include
     ${repo-flashinfer_SOURCE_DIR}/csrc
+    ${repo-flashinfer_SOURCE_DIR}/csrc/nv_internal/tensorrt_llm/cutlass_extensions/include
     ${repo-cutlass_SOURCE_DIR}/examples/77_blackwell_fmha
     ${repo-cutlass_SOURCE_DIR}/examples/common
     ${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src
@@ -327,9 +347,21 @@ set(INCLUDES
 # Build SM90 library with fast math optimization (same namespace, different directory)
 Python_add_library(common_ops_sm90_build MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
 
+set_property(
+    SOURCE csrc/moe/cutlass_moe/w4a8/w4a8_grouped_mm_c3x.cu
+    APPEND PROPERTY COMPILE_OPTIONS
+        -static-global-template-stub=false
+        -UCUTE_USE_PACKED_TUPLE
+)
 target_compile_options(common_ops_sm90_build PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS} -use_fast_math>
 )
+if (SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
+    target_compile_definitions(common_ops_sm90_build PRIVATE
+        SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL=1
+        CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS=1
+    )
+endif()
 target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
 # Set output name and separate build directory to avoid conflicts
 set_target_properties(common_ops_sm90_build PROPERTIES
@@ -556,7 +588,10 @@ target_link_libraries(spatial_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
 install(TARGETS spatial_ops LIBRARY DESTINATION sgl_kernel)
 
 # ============================ Extra Install: FLashMLA ============================= #
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/flashmla.cmake)
+option(SGL_KERNEL_ENABLE_FLASHMLA "Build FlashMLA kernels" ON)
+if(SGL_KERNEL_ENABLE_FLASHMLA)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/flashmla.cmake)
+endif()
 
 # ============================ Extra Install: triton kernels ============================= #
 install(DIRECTORY "${repo-triton_SOURCE_DIR}/python/triton_kernels/triton_kernels/"

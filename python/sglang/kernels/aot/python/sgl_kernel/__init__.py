@@ -29,9 +29,12 @@ else:
         merge_state_v2,
     )
     from sgl_kernel.cutlass_moe import (
+        compact_cutlass_w4a8_moe_mm_data,
+        cutlass_mxfp4a8_humming_moe_mm,
         cutlass_mxfp4a8_moe_mm,
         cutlass_w4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
+        get_cutlass_w4a8_moe_mm_data_with_permutation,
     )
     from sgl_kernel.elementwise import (
         concat_mla_absorb_q,
@@ -45,6 +48,7 @@ else:
         gelu_tanh_and_mul,
         gemma_fused_add_rmsnorm,
         gemma_rmsnorm,
+        humming_swiglu_quant_fp8,
         rmsnorm,
         rotary_embedding,
         silu_and_mul,
@@ -59,6 +63,7 @@ else:
         fp8_scaled_mm,
         gptq_gemm,
         gptq_shuffle,
+        humming_per_token_quant_fp8,
         int8_scaled_mm,
         sgl_per_token_group_quant_8bit,
         sgl_per_token_group_quant_fp8,
@@ -157,6 +162,7 @@ else:
         "causal_conv1d_update",
         "concat_mla_absorb_q",
         "concat_mla_k",
+        "compact_cutlass_w4a8_moe_mm_data",
         "copy_to_gpu_no_ce",
         "cutlass_mla_decode",
         "cutlass_mla_get_workspace_size",
@@ -178,8 +184,11 @@ else:
         "gelu_tanh_and_mul",
         "gemma_fused_add_rmsnorm",
         "gemma_rmsnorm",
+        "get_cutlass_w4a8_moe_mm_data_with_permutation",
         "gptq_gemm",
         "gptq_shuffle",
+        "humming_per_token_quant_fp8",
+        "humming_swiglu_quant_fp8",
         "int8_scaled_mm",
         "merge_state_v2",
         "moe_align_block_size",

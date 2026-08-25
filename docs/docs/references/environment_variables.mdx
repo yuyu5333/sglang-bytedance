@@ -814,6 +814,11 @@ SGLang supports various environment variables that can be used to configure its 
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Select the Humming MoE GEMM path for standard dispatch and DeepEP normal dispatch. <code>indexed</code> uses top-k expert ids directly and is the fallback for unset or unknown values. <code>grouped</code> maps to Humming grouped-contiguous GEMM. DeepEP low-latency dispatch uses grouped-masked GEMM internally and does not use this selector.</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>""</code> (<code>indexed</code>)</td>
     </tr>
+    <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>SGLANG_CUTLASS_HUMMING_FUSED_GEMM1</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Enable the experimental SM90 CUTLASS Humming GEMM1 epilogue that consumes a gate/up pair-interleaved W1 copy, writes half-width BF16 SwiGLU staging, and uses a last-arriver row reduction to emit per-token E4M3 activations and scales. The legacy Humming path, EP fallback, and int4 ABI are unchanged when disabled.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><code>false</code></td>
+    </tr>
 </tbody>
 </table>
 

@@ -704,6 +704,9 @@ class Envs:
     SGLANG_HUMMING_INPUT_QUANT_CONFIG = EnvJSON(None)
     SGLANG_HUMMING_USE_F16_ACCUM = EnvBool(False)
     SGLANG_HUMMING_MOE_GEMM_TYPE = EnvStr("")
+    # Experimental CUTLASS Humming path: fuse GEMM1's SwiGLU and per-token
+    # FP8 quantization in the epilogue. Disabled by default.
+    SGLANG_CUTLASS_HUMMING_FUSED_GEMM1 = EnvBool(False)
 
     # Flashinfer
     SGLANG_IS_FLASHINFER_AVAILABLE = EnvBool(True)

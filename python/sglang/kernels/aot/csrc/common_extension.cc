@@ -76,6 +76,13 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
   m.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+#ifndef USE_ROCM
+  m.def(
+      "humming_swiglu_quant_fp8(Tensor input, Tensor! output_q, Tensor! output_s, Tensor residual, "
+      "Tensor expert_offsets, int num_experts, float swiglu_limit, bool has_swiglu_limit) -> ()");
+  m.impl("humming_swiglu_quant_fp8", torch::kCUDA, &humming_swiglu_quant_fp8);
+#endif
+
   m.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   m.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
 
@@ -138,6 +145,13 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("sgl_per_token_quant_fp8(Tensor input, Tensor! output_q, Tensor! output_s) -> ()");
   m.impl("sgl_per_token_quant_fp8", torch::kCUDA, &sgl_per_token_quant_fp8);
 
+#ifndef USE_ROCM
+  m.def(
+      "humming_per_token_quant_fp8(Tensor input, Tensor! output_q, Tensor! output_s, Tensor residual, "
+      "Tensor expert_offsets, int num_experts) -> ()");
+  m.impl("humming_per_token_quant_fp8", torch::kCUDA, &humming_per_token_quant_fp8);
+#endif
+
   /*
    * From csrc/gemm/gptq
    */
@@ -191,6 +205,12 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "()");
   m.impl("prepare_moe_input", torch::kCUDA, &prepare_moe_input);
 
+  m.def(
+      "compact_cutlass_w4a8_moe_mm_data(Tensor expert_offsets, Tensor problem_sizes1, Tensor problem_sizes2, "
+      "Tensor compact_expert_offsets, Tensor compact_problem_sizes1, Tensor compact_problem_sizes2, "
+      "Tensor compact_expert_ids, int num_experts, int max_groups) -> ()");
+  m.impl("compact_cutlass_w4a8_moe_mm_data", torch::kCUDA, &compact_cutlass_w4a8_moe_mm_data);
+
   m.def("shuffle_rows(Tensor input, Tensor dst2src_map, Tensor output) -> ()");
   m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
@@ -232,6 +252,17 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("get_cutlass_w4a8_moe_mm_data", torch::kCUDA, &get_cutlass_w4a8_moe_mm_data);
 
   m.def(
+      "get_cutlass_w4a8_moe_mm_data_with_permutation(Tensor topk_ids, Tensor! expert_offsets, "
+      "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "                        Tensor! input_permutation, "
+      "                        Tensor! output_permutation, int num_experts, "
+      "                        int n, int k) -> ()");
+  m.impl(
+      "get_cutlass_w4a8_moe_mm_data_with_permutation",
+      torch::kCUDA,
+      &get_cutlass_w4a8_moe_mm_data_with_permutation);
+
+  m.def(
       "cutlass_w4a8_moe_mm(Tensor! d, Tensor a, Tensor b, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "
@@ -246,8 +277,55 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "               Tensor b_strides, Tensor d_strides, Tensor s_strides,"
       "               int chunk_size, int topk,"
       "               Tensor? act_block_scales=None, Tensor? as_strides=None,"
-      "               int act_scale_group=0) -> ()");
+      "               int act_scale_group=0, Tensor? expert_ids=None) -> ()");
   m.impl("cutlass_mxfp4a8_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_moe_mm);
+
+  m.def(
+      "cutlass_mxfp4a8_humming_moe_mm(Tensor! d, Tensor a, Tensor b, "
+      "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
+      "               Tensor problem_sizes, Tensor a_strides, "
+      "               Tensor b_strides, Tensor d_strides, Tensor s_strides,"
+      "               int topk, int swg_config, Tensor? expert_ids=None) -> ()");
+  m.impl("cutlass_mxfp4a8_humming_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_humming_moe_mm);
+
+  m.def(
+      "cutlass_mxfp4a8_humming_moe_core("
+      "Tensor! c1, Tensor! c2, Tensor input, Tensor topk_ids, "
+      "Tensor! a_map, Tensor! c_map, Tensor! gateup_input_bf16, Tensor! gateup_input, "
+      "Tensor! a1_scale, Tensor! intermediate_q, Tensor! a2_scale, "
+      "Tensor w1, Tensor w1_scale, Tensor w1_residual, "
+      "Tensor w2, Tensor w2_scale, Tensor w2_residual, "
+      "Tensor! expert_offsets, Tensor gemm_expert_offsets, "
+      "Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "Tensor a_strides1, Tensor b_strides1, Tensor c_strides1, Tensor s_strides1, "
+      "Tensor a_strides2, Tensor b_strides2, Tensor c_strides2, Tensor s_strides2, "
+      "int topk, int gemm1_config, int gemm2_config, int num_experts, "
+      "int intermediate_size, int hidden_size, float swiglu_limit, "
+      "bool has_swiglu_limit, bool prepare_inputs, Tensor? expert_ids=None) -> ()");
+  m.impl(
+      "cutlass_mxfp4a8_humming_moe_core",
+      torch::kCUDA,
+      &cutlass_mxfp4a8_humming_moe_core);
+
+  m.def(
+      "cutlass_mxfp4a8_humming_moe_core_fused_gemm1("
+      "Tensor! c1, Tensor! c2, Tensor input, Tensor topk_ids, "
+      "Tensor! a_map, Tensor! c_map, Tensor! gateup_input_bf16, Tensor! gateup_input, "
+      "Tensor! a1_scale, Tensor! intermediate_q, Tensor! a2_scale, "
+      "Tensor w1, Tensor w1_scale, Tensor w1_residual, "
+      "Tensor w2, Tensor w2_scale, Tensor w2_residual, "
+      "Tensor! expert_offsets, Tensor gemm_expert_offsets, "
+      "Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "Tensor a_strides1, Tensor b_strides1, Tensor c_strides1, Tensor s_strides1, "
+      "Tensor a_strides2, Tensor b_strides2, Tensor c_strides2, Tensor s_strides2, "
+      "int topk, int gemm1_config, int gemm2_config, int num_experts, "
+      "int intermediate_size, int hidden_size, float swiglu_limit, "
+      "bool has_swiglu_limit, bool prepare_inputs, Tensor? expert_ids, "
+      "Tensor! row_amax, Tensor! row_arrivals) -> ()");
+  m.impl(
+      "cutlass_mxfp4a8_humming_moe_core_fused_gemm1",
+      torch::kCUDA,
+      &cutlass_mxfp4a8_humming_moe_core_fused_gemm1);
 
   /*
    * From csrc/speculative
