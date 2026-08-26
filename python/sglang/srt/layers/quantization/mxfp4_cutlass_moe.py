@@ -197,36 +197,36 @@ class Mxfp4CutlassMoEMethod:
                 return scale.view(torch.uint8).contiguous()
             return scale.to(torch.float8_e8m0fnu).view(torch.uint8).contiguous()
 
-        # Build the Humming assets from the untouched checkpoint tensors.  The
+        # Build the fused MXFP4A8 assets from the untouched checkpoint tensors.  The
         # legacy CUTLASS tensors below remain registered for the EP fallback.
-        w13_humming, w13_offset, w13_residual = (
+        w13_fused, w13_offset, w13_residual = (
             preprocess_moe_weights_for_sm90_mixed_gemm_humming(
                 layer.w13_weight.data.view(torch.uint8),
                 _raw_e8m0_bytes(layer.w13_weight_scale_inv.data),
             )
         )
-        w2_humming, w2_offset, w2_residual = (
+        w2_fused, w2_offset, w2_residual = (
             preprocess_moe_weights_for_sm90_mixed_gemm_humming(
                 layer.w2_weight.data.view(torch.uint8),
                 _raw_e8m0_bytes(layer.w2_weight_scale_inv.data),
             )
         )
-        layer.w13_weight_humming = Parameter(
-            w13_humming.view(torch.int8).contiguous(), requires_grad=False
+        layer.w13_weight_fused = Parameter(
+            w13_fused.view(torch.int8).contiguous(), requires_grad=False
         )
-        layer.w2_weight_humming = Parameter(
-            w2_humming.view(torch.int8).contiguous(), requires_grad=False
+        layer.w2_weight_fused = Parameter(
+            w2_fused.view(torch.int8).contiguous(), requires_grad=False
         )
-        layer.w13_weight_scale_humming = Parameter(
+        layer.w13_weight_scale_fused = Parameter(
             w13_offset.contiguous(), requires_grad=False
         )
-        layer.w2_weight_scale_humming = Parameter(
+        layer.w2_weight_scale_fused = Parameter(
             w2_offset.contiguous(), requires_grad=False
         )
-        layer.w13_weight_residual_humming = Parameter(
+        layer.w13_weight_residual_fused = Parameter(
             (w13_residual * 64.0).contiguous(), requires_grad=False
         )
-        layer.w2_weight_residual_humming = Parameter(
+        layer.w2_weight_residual_fused = Parameter(
             (w2_residual * 64.0).contiguous(), requires_grad=False
         )
 
@@ -279,12 +279,12 @@ class Mxfp4CutlassMoEMethod:
             layer.w2_weight,
             layer.w13_weight_scale,
             layer.w2_weight_scale,
-            layer.w13_weight_humming,
-            layer.w2_weight_humming,
-            layer.w13_weight_scale_humming,
-            layer.w2_weight_scale_humming,
-            layer.w13_weight_residual_humming,
-            layer.w2_weight_residual_humming,
+            layer.w13_weight_fused,
+            layer.w2_weight_fused,
+            layer.w13_weight_scale_fused,
+            layer.w2_weight_scale_fused,
+            layer.w13_weight_residual_fused,
+            layer.w2_weight_residual_fused,
             topk_weights,
             topk_ids,
             self.a_strides1,

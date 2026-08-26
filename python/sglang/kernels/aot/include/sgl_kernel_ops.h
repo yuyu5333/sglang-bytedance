@@ -143,7 +143,7 @@ void gemma_rmsnorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, do
 void gemma_fused_add_rmsnorm(at::Tensor& input, at::Tensor& residual, at::Tensor& weight, double eps, bool enable_pdl);
 void silu_and_mul(at::Tensor& out, at::Tensor& input);
 #ifndef USE_ROCM
-void humming_swiglu_quant_fp8(
+void fused_swiglu_quant_fp8(
     const at::Tensor& input,
     at::Tensor& output_q,
     at::Tensor& output_s,
@@ -268,7 +268,7 @@ void sgl_per_token_group_quant_8bit_v2(
     const std::optional<torch::Tensor>& masked_m);
 void sgl_per_token_quant_fp8(at::Tensor input, at::Tensor output_q, at::Tensor output_s);
 #ifndef USE_ROCM
-void humming_per_token_quant_fp8(
+void fused_per_token_quant_fp8(
     const at::Tensor& input,
     at::Tensor& output_q,
     at::Tensor& output_s,
@@ -478,7 +478,7 @@ void cutlass_mxfp4a8_moe_mm(
     int64_t act_scale_group,
     std::optional<torch::Tensor> expert_ids);
 
-void cutlass_mxfp4a8_humming_moe_mm(
+void cutlass_mxfp4a8_fused_moe_mm(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors,
@@ -494,7 +494,7 @@ void cutlass_mxfp4a8_humming_moe_mm(
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids);
 
-void cutlass_mxfp4a8_humming_moe_core(
+void cutlass_mxfp4a8_fused_moe_core(
     torch::Tensor& c1,
     torch::Tensor& c2,
     torch::Tensor const& input,

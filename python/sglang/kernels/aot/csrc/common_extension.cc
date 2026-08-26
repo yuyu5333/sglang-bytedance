@@ -267,7 +267,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("cutlass_mxfp4a8_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_moe_mm);
 
   m.def(
-      "cutlass_mxfp4a8_humming_moe_core("
+      "cutlass_mxfp4a8_fused_moe_core("
       "Tensor! c1, Tensor! c2, Tensor input, Tensor topk_ids, "
       "Tensor! a_map, Tensor! c_map, Tensor! gateup_input_bf16, Tensor! gateup_input, "
       "Tensor! a1_scale, Tensor! intermediate_q, Tensor! a2_scale, "
@@ -281,9 +281,9 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "int intermediate_size, int hidden_size, float swiglu_limit, "
       "bool has_swiglu_limit, bool prepare_inputs, Tensor? expert_ids=None) -> ()");
   m.impl(
-      "cutlass_mxfp4a8_humming_moe_core",
+      "cutlass_mxfp4a8_fused_moe_core",
       torch::kCUDA,
-      &cutlass_mxfp4a8_humming_moe_core);
+      &cutlass_mxfp4a8_fused_moe_core);
 
   /*
    * From csrc/speculative

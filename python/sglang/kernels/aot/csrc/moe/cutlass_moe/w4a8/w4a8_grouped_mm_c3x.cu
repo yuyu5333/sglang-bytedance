@@ -83,7 +83,7 @@ struct SM90_SWG_MXFP4 {
       true>;
 };
 
-// General two-consumer-warpgroup Humming tactic. It keeps the pre-MMA E8M0
+// General two-consumer-warpgroup fused MXFP4A8 tactic. It keeps the pre-MMA E8M0
 // mainloop and the existing chunk-major precomputed work map, while using the
 // regular ping-pong kernel for larger token tiles.
 template <
@@ -476,7 +476,7 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
   }
 }
 
-void dispatch_mxfp4a8_humming_moe_mm_sm90(
+void dispatch_mxfp4a8_fused_moe_mm_sm90(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors,
@@ -497,16 +497,16 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
   std::optional<torch::Tensor> as_strides = std::nullopt;
   constexpr int64_t act_scale_group = 0;
 
-  TORCH_CHECK(b_tensors.scalar_type() == torch::kInt8, "Humming interleaved weight must be int8");
-  TORCH_CHECK(b_tensors.is_contiguous(), "Humming interleaved weight must be contiguous");
-  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8, "Humming folded offset must be uint8");
-  TORCH_CHECK(b_scales.is_contiguous(), "Humming folded offset must be contiguous");
-  TORCH_CHECK(a_scales.scalar_type() == torch::kFloat32, "Humming per-row scale must be float32");
-  TORCH_CHECK(a_scales.dim() == 1, "Humming per-row scale must be 1D");
-  TORCH_CHECK(a_scales.is_contiguous(), "Humming per-row scale must be contiguous");
+  TORCH_CHECK(b_tensors.scalar_type() == torch::kInt8, "fused MXFP4A8 interleaved weight must be int8");
+  TORCH_CHECK(b_tensors.is_contiguous(), "fused MXFP4A8 interleaved weight must be contiguous");
+  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8, "fused MXFP4A8 folded offset must be uint8");
+  TORCH_CHECK(b_scales.is_contiguous(), "fused MXFP4A8 folded offset must be contiguous");
+  TORCH_CHECK(a_scales.scalar_type() == torch::kFloat32, "fused MXFP4A8 per-row scale must be float32");
+  TORCH_CHECK(a_scales.dim() == 1, "fused MXFP4A8 per-row scale must be 1D");
+  TORCH_CHECK(a_scales.is_contiguous(), "fused MXFP4A8 per-row scale must be contiguous");
   TORCH_CHECK(
       a_scales.numel() == a_tensors.numel() / a_tensors.size(-1),
-      "Humming per-row scale must contain one value per activation row");
+      "fused MXFP4A8 per-row scale must contain one value per activation row");
   TORCH_CHECK(topk > 0, "topk must be positive");
 
   switch (swg_config) {
@@ -537,12 +537,12 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
     default:
       TORCH_CHECK(
           false,
-          "Unsupported Humming config=",
+          "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334");
   }
 #else
-  TORCH_CHECK(false, "Humming kernels are disabled in this build");
+  TORCH_CHECK(false, "fused MXFP4A8 kernels are disabled in this build");
 #endif
 }
 
@@ -620,7 +620,7 @@ void cutlass_mxfp4a8_moe_mm_sm90(
       expert_ids);
 }
 
-void cutlass_mxfp4a8_humming_moe_mm_sm90(
+void cutlass_mxfp4a8_fused_moe_mm_sm90(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors,
@@ -635,7 +635,7 @@ void cutlass_mxfp4a8_humming_moe_mm_sm90(
     int64_t topk,
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids) {
-  dispatch_mxfp4a8_humming_moe_mm_sm90(
+  dispatch_mxfp4a8_fused_moe_mm_sm90(
       d_tensors,
       a_tensors,
       b_tensors,

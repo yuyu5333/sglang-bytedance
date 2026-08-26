@@ -363,7 +363,7 @@ __global__ void prepare_moe_input_and_quant_fp8_shuffled_kernel(
   }
 }
 
-bool humming_prepare_moe_input_and_quant_fp8_shuffled(
+bool fused_prepare_moe_input_and_quant_fp8_shuffled(
     const torch::Tensor& input,
     const torch::Tensor& topk_ids,
     torch::Tensor& output_q,
@@ -638,7 +638,7 @@ void sgl_per_token_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch:
 }
 
 #ifndef USE_ROCM
-void humming_per_token_quant_fp8(
+void fused_per_token_quant_fp8(
     const torch::Tensor& input,
     torch::Tensor& output_q,
     torch::Tensor& output_s,
@@ -678,7 +678,7 @@ void humming_per_token_quant_fp8(
       num_experts);
 }
 
-void humming_per_token_quant_fp8_shuffled(
+void fused_per_token_quant_fp8_shuffled(
     const torch::Tensor& input,
     const torch::Tensor& permutation,
     torch::Tensor& output_q,

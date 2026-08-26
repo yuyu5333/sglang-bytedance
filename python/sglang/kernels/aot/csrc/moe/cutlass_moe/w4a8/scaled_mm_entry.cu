@@ -44,7 +44,7 @@ void cutlass_mxfp4a8_moe_mm_sm90(
     int64_t act_scale_group,
     std::optional<torch::Tensor> expert_ids);
 
-void cutlass_mxfp4a8_humming_moe_mm_sm90(
+void cutlass_mxfp4a8_fused_moe_mm_sm90(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors,
@@ -60,7 +60,7 @@ void cutlass_mxfp4a8_humming_moe_mm_sm90(
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids);
 
-void humming_per_token_quant_fp8(
+void fused_per_token_quant_fp8(
     const torch::Tensor& input,
     torch::Tensor& output_q,
     torch::Tensor& output_s,
@@ -68,7 +68,7 @@ void humming_per_token_quant_fp8(
     const torch::Tensor& expert_offsets,
     int64_t num_experts);
 
-void humming_per_token_quant_fp8_shuffled(
+void fused_per_token_quant_fp8_shuffled(
     const torch::Tensor& input,
     const torch::Tensor& permutation,
     torch::Tensor& output_q,
@@ -77,7 +77,7 @@ void humming_per_token_quant_fp8_shuffled(
     const torch::Tensor& expert_offsets,
     int64_t num_experts);
 
-bool humming_prepare_moe_input_and_quant_fp8_shuffled(
+bool fused_prepare_moe_input_and_quant_fp8_shuffled(
     const torch::Tensor& input,
     const torch::Tensor& topk_ids,
     torch::Tensor& output_q,
@@ -91,7 +91,7 @@ bool humming_prepare_moe_input_and_quant_fp8_shuffled(
     int64_t num_experts,
     int64_t intermediate_size);
 
-void humming_swiglu_quant_fp8(
+void fused_swiglu_quant_fp8(
     const at::Tensor& input,
     at::Tensor& output_q,
     at::Tensor& output_s,
@@ -193,7 +193,7 @@ void cutlass_mxfp4a8_moe_mm(
   return;
 }
 
-void cutlass_mxfp4a8_humming_moe_mm(
+void cutlass_mxfp4a8_fused_moe_mm(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors,
@@ -208,7 +208,7 @@ void cutlass_mxfp4a8_humming_moe_mm(
     int64_t topk,
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids) {
-  cutlass_mxfp4a8_humming_moe_mm_sm90(
+  cutlass_mxfp4a8_fused_moe_mm_sm90(
       d_tensors,
       a_tensors,
       b_tensors,
@@ -225,7 +225,7 @@ void cutlass_mxfp4a8_humming_moe_mm(
       expert_ids);
 }
 
-void cutlass_mxfp4a8_humming_moe_core(
+void cutlass_mxfp4a8_fused_moe_core(
     torch::Tensor& c1,
     torch::Tensor& c2,
     torch::Tensor const& input,
@@ -266,7 +266,7 @@ void cutlass_mxfp4a8_humming_moe_core(
     bool prepare_inputs,
     std::optional<torch::Tensor> expert_ids) {
   if (prepare_inputs) {
-    const bool fused = humming_prepare_moe_input_and_quant_fp8_shuffled(
+    const bool fused = fused_prepare_moe_input_and_quant_fp8_shuffled(
         input,
         topk_ids,
         gateup_input,
@@ -292,7 +292,7 @@ void cutlass_mxfp4a8_humming_moe_core(
           num_experts,
           intermediate_size,
           hidden_size);
-      humming_per_token_quant_fp8_shuffled(
+      fused_per_token_quant_fp8_shuffled(
           input,
           a_map,
           gateup_input,
@@ -302,7 +302,7 @@ void cutlass_mxfp4a8_humming_moe_core(
           num_experts);
     }
   } else {
-    humming_per_token_quant_fp8_shuffled(
+    fused_per_token_quant_fp8_shuffled(
         input,
         a_map,
         gateup_input,
@@ -311,7 +311,7 @@ void cutlass_mxfp4a8_humming_moe_core(
         expert_offsets,
         num_experts);
   }
-  cutlass_mxfp4a8_humming_moe_mm(
+  cutlass_mxfp4a8_fused_moe_mm(
       c1,
       gateup_input,
       w1,
@@ -326,7 +326,7 @@ void cutlass_mxfp4a8_humming_moe_core(
       topk,
       gemm1_config,
       expert_ids);
-  humming_swiglu_quant_fp8(
+  fused_swiglu_quant_fp8(
       c1,
       intermediate_q,
       a2_scale,
@@ -335,7 +335,7 @@ void cutlass_mxfp4a8_humming_moe_core(
       num_experts,
       swiglu_limit,
       has_swiglu_limit);
-  cutlass_mxfp4a8_humming_moe_mm(
+  cutlass_mxfp4a8_fused_moe_mm(
       c2,
       intermediate_q,
       w2,

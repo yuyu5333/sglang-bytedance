@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """CUTLASS MXFP4A8 fused MoE runner.
 
-For EP=1 this runner uses the explicit Humming SM90 grouped GEMM entry with
+For EP=1 this runner uses the explicit fused MXFP4A8 SM90 grouped GEMM entry with
 load-time-interleaved weights, folded E8M0 offsets, and per-token FP8 activation
 scales. EP keeps the complete legacy MXFP4A8 protocol.
 
   * ``prepare_moe_input`` builds expert offsets, GEMM problem sizes, and both
     permutations in one CUDA path.
   * ``shuffle_rows`` performs the gate/up input reorder.
-  * A Humming-only CUDA op fuses input quantization with the expert residual
+  * A fused MXFP4A8-only CUDA op fuses input quantization with the expert residual
     scale lookup; older kernels fall back to the original CUDA/Triton sequence.
   * ``apply_shuffle_mul_sum`` performs the final top-k reorder, router-weight
     multiply, and reduction.
@@ -187,7 +187,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
 
     @staticmethod
-    def _humming_configs(num_tokens: int) -> Tuple[int, int]:
+    def _fused_configs(num_tokens: int) -> Tuple[int, int]:
         if num_tokens == 2048:
             return 313, 313
         if num_tokens == 4096:
@@ -239,12 +239,12 @@ class CutlassMxfp4A8FusedMoeRunner:
         w2_q: torch.Tensor,
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-        w1_humming: torch.Tensor,
-        w2_humming: torch.Tensor,
-        w1_scale_humming: torch.Tensor,
-        w2_scale_humming: torch.Tensor,
-        w1_residual_humming: torch.Tensor,
-        w2_residual_humming: torch.Tensor,
+        w1_fused: torch.Tensor,
+        w2_fused: torch.Tensor,
+        w1_scale_fused: torch.Tensor,
+        w2_scale_fused: torch.Tensor,
+        w1_residual_fused: torch.Tensor,
+        w2_residual_fused: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         a_strides1: torch.Tensor,
@@ -315,12 +315,12 @@ class CutlassMxfp4A8FusedMoeRunner:
                 swiglu_limit,
             )
 
-        assert w1_humming.dtype == torch.int8
-        assert w2_humming.dtype == torch.int8
-        assert w1_scale_humming.dtype == torch.uint8
-        assert w2_scale_humming.dtype == torch.uint8
-        assert w1_residual_humming.shape == (num_local_experts,)
-        assert w2_residual_humming.shape == (num_local_experts,)
+        assert w1_fused.dtype == torch.int8
+        assert w2_fused.dtype == torch.int8
+        assert w1_scale_fused.dtype == torch.uint8
+        assert w2_scale_fused.dtype == torch.uint8
+        assert w1_residual_fused.shape == (num_local_experts,)
+        assert w2_residual_fused.shape == (num_local_experts,)
 
         topk_ids_i32 = topk_ids.contiguous()
         if topk_ids_i32.dtype != torch.int32:
@@ -372,7 +372,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         a1_scale_per_token = self._empty(
             "a1_scale_per_token", (m * topk,), torch.float32, device
         )
-        # Compact Humming groups use one prebuilt weight TMA descriptor per
+        # Compact fused MXFP4A8 groups use one prebuilt weight TMA descriptor per
         # logical group, mapped through active_expert_ids to the source expert.
         # Compact only when routing is sparse enough to remove at least half of
         # the expert groups. At high coverage, scanning and publishing one
@@ -409,7 +409,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         c1_width = n * 2
         c1 = self._empty("c1", (m * topk, c1_width), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
-        gemm1_config, gemm2_config = self._humming_configs(m)
+        gemm1_config, gemm2_config = self._fused_configs(m)
 
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
@@ -417,7 +417,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         a2_scale_per_token = self._empty(
             "a2_scale_per_token", (m * topk,), torch.float32, device
         )
-        core_op = torch.ops.sgl_kernel.cutlass_mxfp4a8_humming_moe_core.default
+        core_op = torch.ops.sgl_kernel.cutlass_mxfp4a8_fused_moe_core.default
 
         core_op(
             c1,
@@ -431,12 +431,12 @@ class CutlassMxfp4A8FusedMoeRunner:
             a1_scale_per_token,
             intermediate_q,
             a2_scale_per_token,
-            w1_humming,
-            w1_scale_humming,
-            w1_residual_humming,
-            w2_humming,
-            w2_scale_humming,
-            w2_residual_humming,
+            w1_fused,
+            w1_scale_fused,
+            w1_residual_fused,
+            w2_fused,
+            w2_scale_fused,
+            w2_residual_fused,
             expert_offsets,
             expert_offsets_gemm,
             problem_sizes1_gemm,

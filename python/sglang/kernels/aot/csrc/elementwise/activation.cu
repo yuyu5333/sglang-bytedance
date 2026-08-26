@@ -107,7 +107,7 @@ void silu_and_mul(at::Tensor& out, at::Tensor& input) {
 
 #ifndef USE_ROCM
 template <typename T>
-__device__ __forceinline__ T humming_swiglu_value(
+__device__ __forceinline__ T fused_swiglu_value(
     T gate_value,
     T up_value,
     const float swiglu_limit,
@@ -122,7 +122,7 @@ __device__ __forceinline__ T humming_swiglu_value(
 }
 
 template <typename T>
-__global__ void humming_swiglu_quant_fp8_kernel(
+__global__ void fused_swiglu_quant_fp8_kernel(
     const T* __restrict__ input,
     __nv_fp8_e4m3* __restrict__ output_q,
     float* __restrict__ output_s,
@@ -159,12 +159,12 @@ __global__ void humming_swiglu_quant_fp8_kernel(
 #pragma unroll
     for (int j = 0; j < kVecSize; ++j) {
       const T value =
-          humming_swiglu_value(gate_values[j], up_values[j], swiglu_limit, has_swiglu_limit);
+          fused_swiglu_value(gate_values[j], up_values[j], swiglu_limit, has_swiglu_limit);
       max_value = fmaxf(max_value, fabsf(static_cast<float>(value)));
     }
   }
   for (int64_t i = vectorized_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
-    const T value = humming_swiglu_value(gate[i], up[i], swiglu_limit, has_swiglu_limit);
+    const T value = fused_swiglu_value(gate[i], up[i], swiglu_limit, has_swiglu_limit);
     max_value = fmaxf(max_value, fabsf(static_cast<float>(value)));
   }
 
@@ -201,21 +201,21 @@ __global__ void humming_swiglu_quant_fp8_kernel(
     for (int j = 0; j < kVecSize; ++j) {
       const int64_t i = vec * kVecSize + j;
       const T value =
-          humming_swiglu_value(gate_values[j], up_values[j], swiglu_limit, has_swiglu_limit);
+          fused_swiglu_value(gate_values[j], up_values[j], swiglu_limit, has_swiglu_limit);
       float quant_value = static_cast<float>(value) * scale_inv;
       quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
       output_q[token * hidden_dim + i] = static_cast<__nv_fp8_e4m3>(quant_value);
     }
   }
   for (int64_t i = vectorized_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
-    const T value = humming_swiglu_value(gate[i], up[i], swiglu_limit, has_swiglu_limit);
+    const T value = fused_swiglu_value(gate[i], up[i], swiglu_limit, has_swiglu_limit);
     float quant_value = static_cast<float>(value) * scale_inv;
     quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
     output_q[token * hidden_dim + i] = static_cast<__nv_fp8_e4m3>(quant_value);
   }
 }
 
-void humming_swiglu_quant_fp8(
+void fused_swiglu_quant_fp8(
     const at::Tensor& input,
     at::Tensor& output_q,
     at::Tensor& output_s,
@@ -249,7 +249,7 @@ void humming_swiglu_quant_fp8(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), c_type, [&] {
-    humming_swiglu_quant_fp8_kernel<c_type><<<num_tokens, kThreads, 0, stream>>>(
+    fused_swiglu_quant_fp8_kernel<c_type><<<num_tokens, kThreads, 0, stream>>>(
         static_cast<const c_type*>(input.data_ptr()),
         static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
         static_cast<float*>(output_s.data_ptr()),
