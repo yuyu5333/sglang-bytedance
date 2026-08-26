@@ -30,10 +30,8 @@ _is_cuda_alike = is_cuda_alike()
 
 if _is_cuda_alike:
     from sgl_kernel import (
-        cutlass_mxfp4a8_humming_moe_mm,
         cutlass_mxfp4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,
-        humming_swiglu_quant_fp8,
         prepare_moe_input,
         sgl_per_token_quant_fp8,
     )
@@ -47,14 +45,6 @@ if _is_cuda_alike:
         from sgl_kernel import get_cutlass_w4a8_moe_mm_data_with_permutation
     except ImportError:
         get_cutlass_w4a8_moe_mm_data_with_permutation = None
-
-    try:
-        from sgl_kernel import humming_per_token_quant_fp8
-
-        if not hasattr(torch.ops.sgl_kernel, "humming_per_token_quant_fp8"):
-            humming_per_token_quant_fp8 = None
-    except ImportError:
-        humming_per_token_quant_fp8 = None
 
 @triton.jit
 def _apply_shuffle_mul_sum_fp32_factors_kernel(
@@ -195,33 +185,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             scale.numel(),
             num_experts,
             BLOCK=block,
-        )
-
-    def _humming_quantize_fp8_per_token_into(
-        self,
-        x: torch.Tensor,
-        out_q: torch.Tensor,
-        out_s: torch.Tensor,
-        residual: torch.Tensor,
-        expert_offsets: torch.Tensor,
-        num_experts: int,
-    ) -> None:
-        if x.numel() == 0:
-            return
-        if humming_per_token_quant_fp8 is not None:
-            humming_per_token_quant_fp8(
-                x,
-                out_q,
-                out_s.view(-1, 1),
-                residual,
-                expert_offsets,
-                num_experts,
-            )
-            return
-
-        self._quantize_fp8_per_token_into(x, out_q, out_s)
-        self._mul_per_token_scale_by_expert(
-            out_s, residual, expert_offsets, num_experts
         )
 
     @staticmethod

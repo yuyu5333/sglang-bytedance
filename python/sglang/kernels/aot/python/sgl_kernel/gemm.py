@@ -82,25 +82,6 @@ def sgl_per_token_quant_fp8(
     torch.ops.sgl_kernel.sgl_per_token_quant_fp8.default(input, output_q, output_s)
 
 
-def humming_per_token_quant_fp8(
-    input: torch.Tensor,
-    output_q: torch.Tensor,
-    output_s: torch.Tensor,
-    residual: torch.Tensor,
-    expert_offsets: torch.Tensor,
-    num_experts: int,
-) -> None:
-    """Humming-only per-token E4M3 quantization with expert residual scales."""
-    torch.ops.sgl_kernel.humming_per_token_quant_fp8.default(
-        input,
-        output_q,
-        output_s,
-        residual,
-        expert_offsets,
-        num_experts,
-    )
-
-
 def shuffle_rows(input_tensor, dst2src_map, output_tensor_shape):
     output_tensor = torch.empty(
         output_tensor_shape,
