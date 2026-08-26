@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 import torch
 from torch.nn import Module, Parameter
 
-from sglang.srt.environ import envs
 from sglang.srt.utils import set_weight_attrs
 from sglang.srt.utils.common import is_sm90_supported
 
@@ -198,18 +197,6 @@ class Mxfp4CutlassMoEMethod:
                 return scale.view(torch.uint8).contiguous()
             return scale.to(torch.float8_e8m0fnu).view(torch.uint8).contiguous()
 
-        def _pair_interleave_gate_up(tensor: torch.Tensor) -> torch.Tensor:
-            """Map [gate rows; up rows] to [gate0, up0, gate1, up1, ...]."""
-            rows = tensor.size(1)
-            if rows % 2:
-                raise ValueError(f"gate/up row count must be even, got {rows}")
-            half = rows // 2
-            return (
-                torch.stack((tensor[:, :half], tensor[:, half:]), dim=2)
-                .flatten(1, 2)
-                .contiguous()
-            )
-
         # Build the Humming assets from the untouched checkpoint tensors.  The
         # legacy CUTLASS tensors below remain registered for the EP fallback.
         w13_humming, w13_offset, w13_residual = (
@@ -242,32 +229,6 @@ class Mxfp4CutlassMoEMethod:
         layer.w2_weight_residual_humming = Parameter(
             (w2_residual * 64.0).contiguous(), requires_grad=False
         )
-
-        if envs.SGLANG_CUTLASS_HUMMING_FUSED_GEMM1.get():
-            # The fused epilogue consumes adjacent gate/up accumulator channels.
-            # Reorder the logical payload and its E8M0 scale identically before
-            # applying the normal SM90 Humming interleave. Keep the original
-            # Humming assets above for the legacy path and GEMM2.
-            w13_pair_humming, w13_pair_offset, w13_pair_residual = (
-                preprocess_moe_weights_for_sm90_mixed_gemm_humming(
-                    _pair_interleave_gate_up(
-                        layer.w13_weight.data.view(torch.uint8)
-                    ),
-                    _pair_interleave_gate_up(
-                        _raw_e8m0_bytes(layer.w13_weight_scale_inv.data)
-                    ),
-                )
-            )
-            layer.w13_weight_humming_fused = Parameter(
-                w13_pair_humming.view(torch.int8).contiguous(),
-                requires_grad=False,
-            )
-            layer.w13_weight_scale_humming_fused = Parameter(
-                w13_pair_offset.contiguous(), requires_grad=False
-            )
-            layer.w13_weight_residual_humming_fused = Parameter(
-                (w13_pair_residual * 64.0).contiguous(), requires_grad=False
-            )
 
         # --- weights: HF-natural nibble packing passed through as int8 ---
         w13 = repack_hf_mxfp4_to_kernel(layer.w13_weight.data).contiguous()
@@ -311,7 +272,6 @@ class Mxfp4CutlassMoEMethod:
 
         x = dispatch_output.hidden_states
         topk_weights, topk_ids, _ = dispatch_output.topk_output
-        fuse_gemm1 = envs.SGLANG_CUTLASS_HUMMING_FUSED_GEMM1.get()
 
         output = cutlass_mxfp4a8_fused_moe(
             x,
@@ -319,23 +279,11 @@ class Mxfp4CutlassMoEMethod:
             layer.w2_weight,
             layer.w13_weight_scale,
             layer.w2_weight_scale,
-            (
-                layer.w13_weight_humming_fused
-                if fuse_gemm1
-                else layer.w13_weight_humming
-            ),
+            layer.w13_weight_humming,
             layer.w2_weight_humming,
-            (
-                layer.w13_weight_scale_humming_fused
-                if fuse_gemm1
-                else layer.w13_weight_scale_humming
-            ),
+            layer.w13_weight_scale_humming,
             layer.w2_weight_scale_humming,
-            (
-                layer.w13_weight_residual_humming_fused
-                if fuse_gemm1
-                else layer.w13_weight_residual_humming
-            ),
+            layer.w13_weight_residual_humming,
             layer.w2_weight_residual_humming,
             topk_weights,
             topk_ids,
@@ -352,6 +300,5 @@ class Mxfp4CutlassMoEMethod:
             self.problem_sizes2,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor or 1.0,
             swiglu_limit=self.moe_runner_config.swiglu_limit,
-            fuse_gemm1=fuse_gemm1,
         )
         return StandardCombineInput(hidden_states=output)

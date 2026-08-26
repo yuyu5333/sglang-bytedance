@@ -83,58 +83,6 @@ struct SM90_SWG_MXFP4 {
       true>;
 };
 
-template <int N>
-struct SM90_SWG_MXFP4_FUSED_GEMM1 {
-  using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<128>>;
-  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      typename QuantTraits<WType::MXFP4>::Element,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      true,
-      true,
-      true,
-      0,
-      true>;
-};
-
-struct SM90_PRECOMPUTED_MXFP4_FUSED_GEMM1 {
-  using TileShape = cute::Shape<cute::Int<64>, cute::Int<64>, cute::Int<512>>;
-  using ClusterShape = cute::Shape<cute::Int<2>, cute::Int<1>, cute::Int<1>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      typename QuantTraits<WType::MXFP4>::Element,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      false,
-      true,
-      false,
-      0,
-      true>;
-};
-
-struct SM90_PRECOMPUTED_MXFP4_FUSED_GEMM1_M128_N32 {
-  using TileShape = cute::Shape<cute::Int<128>, cute::Int<32>, cute::Int<512>>;
-  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      typename QuantTraits<WType::MXFP4>::Element,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      false,
-      true,
-      true,
-      0,
-      true>;
-};
-
 // General two-consumer-warpgroup Humming tactic. It keeps the pre-MMA E8M0
 // mainloop and the existing chunk-major precomputed work map, while using the
 // regular ping-pong kernel for larger token tiles.
@@ -164,26 +112,9 @@ struct SM90_PRECOMPUTED_MXFP4 {
       static_cast<int>(RowPolicy)>;
 };
 
-// config333: config320's 128x32x512, cluster-1, expert-major scheduler with a
-// register-only GEMM2 epilogue that warp-transposes the SM90 C fragment into
-// contiguous 16-byte BF16 stores.
-struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_GEMM2 {
-  using TileShape = cute::Shape<cute::Int<128>, cute::Int<32>, cute::Int<512>>;
-  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      sgl_kernel::w4a8_detail::WarpShuffleGemm2Epilogue,
-      typename QuantTraits<WType::MXFP4>::Element,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      false,
-      true,
-      false>;
-};
-
-// config334: config333's register transpose with adjacent BF16 values packed
-// into one aligned 32-bit global store per lane.
+// config334: register warp-transpose GEMM2 epilogue with adjacent BF16 values
+// packed into one aligned 32-bit global store per lane. 128x32x512, cluster-1,
+// expert-major scheduler (config320 base).
 struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
   using TileShape = cute::Shape<cute::Int<128>, cute::Int<32>, cute::Int<512>>;
   using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
@@ -192,23 +123,6 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
       ClusterShape,
       cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
       sgl_kernel::w4a8_detail::WarpShufflePackedStoreGemm2Epilogue,
-      typename QuantTraits<WType::MXFP4>::Element,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      false,
-      true,
-      false>;
-};
-
-// config335: config334 plus a 32/240 producer/consumer warpgroup register
-// budget, keeping the total CTA allocation within the SM90 register file.
-struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_MAX_REGS_GEMM2 {
-  using TileShape = cute::Shape<cute::Int<128>, cute::Int<32>, cute::Int<512>>;
-  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      sgl_kernel::w4a8_detail::WarpShufflePackedStoreMaxRegsGemm2Epilogue,
       typename QuantTraits<WType::MXFP4>::Element,
       QuantTraits<WType::MXFP4>::GroupSize,
       false,
@@ -257,55 +171,8 @@ inline void invoke_gemm(
       expert_ids);
 }
 
-template <typename Config>
-inline void invoke_fused_gemm1(
-    torch::Tensor& staging,
-    torch::Tensor& output_q,
-    torch::Tensor& output_s,
-    torch::Tensor& row_amax,
-    torch::Tensor& row_arrivals,
-    torch::Tensor const& expert_residual,
-    torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors,
-    torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales,
-    torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes,
-    torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides,
-    torch::Tensor const& d_strides,
-    torch::Tensor const& s_strides,
-    double swiglu_limit,
-    bool has_swiglu_limit) {
-  using GemmT = typename Config::Cutlass3xW4A8Gemm;
-  cutlass_w4a8_group_gemm_caller<GemmT>(
-      staging,
-      a_tensors,
-      b_tensors,
-      a_scales,
-      b_scales,
-      expert_offsets,
-      problem_sizes,
-      a_strides,
-      b_strides,
-      d_strides,
-      s_strides,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      std::nullopt,
-      std::nullopt,
-      0,
-      std::nullopt,
-      output_q,
-      output_s,
-      row_amax,
-      row_arrivals,
-      expert_residual,
-      swiglu_limit,
-      has_swiglu_limit);
-}
-
-// Helper macro to reduce code duplication
-// Note: Config must be wrapped in parentheses when it contains commas (e.g., template parameters)
+// Helper macro to reduce code duplication.
+// Note: Config must be wrapped in parentheses when it contains commas (e.g., template parameters).
 // This uses a helper macro to strip the parentheses from the template parameter
 #define INVOKE_GEMM_WITH_CONFIG_HELPER(...) \
   invoke_gemm<__VA_ARGS__>(                 \
@@ -519,12 +386,6 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
         case 101:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
           return;
-        case 102:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
-          return;
-        case 103:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
-          return;
 #endif
         default:
           TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM1_CONFIG=", forced_config);
@@ -576,12 +437,6 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
           return;
         case 101:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
-          return;
-        case 102:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
-          return;
-        case 103:
-          INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
           return;
 #endif
         default:
@@ -661,75 +516,14 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
     case 101:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
       return;
-    case 102:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
-      return;
-    case 103:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<40>));
-      return;
-    case 200:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 128>));
-      return;
-    case 201:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 128>));
-      return;
-    case 202:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 128, 128>));
-      return;
-    case 203:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 32, 512>));
-      return;
     case 204:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>));
       return;
     case 205:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 64, 512, 2, 1, false>));
       return;
-    case 310:
-      // Full-expert row bucketing: preserve the original group indices and run
-      // two independently compiled collectives serially on the current stream.
-      // The policies are mutually exclusive and cover every non-empty expert.
-      INVOKE_GEMM_WITH_CONFIG_AS((
-          SM90_PRECOMPUTED_MXFP4<
-              64,
-              32,
-              512,
-              1,
-              1,
-              false,
-              sgl_kernel::swg_detail::ExpertRowPolicy::PreferN32>));
-      INVOKE_GEMM_WITH_CONFIG_AS((
-          SM90_PRECOMPUTED_MXFP4<
-              64,
-              64,
-              512,
-              2,
-              1,
-              false,
-              sgl_kernel::swg_detail::ExpertRowPolicy::PreferN64>));
-      return;
     case 313:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 64, 512, 1, 1, false>));
-      return;
-    case 314:
-      INVOKE_GEMM_WITH_CONFIG_AS((
-          SM90_PRECOMPUTED_MXFP4<
-              64,
-              32,
-              512,
-              1,
-              1,
-              false,
-              sgl_kernel::swg_detail::ExpertRowPolicy::PreferN32>));
-      INVOKE_GEMM_WITH_CONFIG_AS((
-          SM90_PRECOMPUTED_MXFP4<
-              64,
-              64,
-              512,
-              1,
-              1,
-              false,
-              sgl_kernel::swg_detail::ExpertRowPolicy::PreferN64>));
       return;
     case 320:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 512, 1, 1, false>));
@@ -737,120 +531,15 @@ void dispatch_mxfp4a8_humming_moe_mm_sm90(
     case 322:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 512>));
       return;
-    case 333:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_GEMM2));
-      return;
     case 334:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2));
-      return;
-    case 335:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_MAX_REGS_GEMM2));
-      return;
-    // config336: K-split deep-pipeline probe. Same 128x32 weight/token tile and
-    // cluster-1 chunk-major scheduler as config320, but tile-K is halved from
-    // 512 to 256. Halving per-stage smem_A/smem_B/smem_scale lets
-    // StageCountAutoCarveout allocate more mainloop stages; this case exists to
-    // measure the actual stage ceiling the SM90 228KB smem budget permits and
-    // whether the deeper pipeline offsets the halved per-WGMMA K work.
-    case 336:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 256, 1, 1, false>));
-      return;
-    // config337: extreme K-split deep-pipeline probe. Same 128x32 weight/token
-    // tile and cluster-1 chunk-major scheduler as config320/336, but tile-K is
-    // quartered from 512 to 128. This is the most aggressive point that still
-    // keeps a full-MMA-tile-K WGMMA (K=128 == fp8 wgmma native K), minimizing
-    // per-stage smem_A/smem_B/smem_scale so StageCountAutoCarveout reaches the
-    // maximum mainloop stage count the SM90 228KB smem budget permits. Used
-    // together with config336 to bracket the actual stage ceiling and to check
-    // whether the deeper pipeline offsets the quartered per-WGMMA K work.
-    case 337:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 128, 1, 1, false>));
       return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported Humming config=",
           swg_config,
-          "; expected one of 100, 101, 102, 103, 200, 201, 202, 203, 204, 205, 310, 313, 314, "
-          "320, 322, 333");
-  }
-#else
-  TORCH_CHECK(false, "Humming kernels are disabled in this build");
-#endif
-}
-
-void dispatch_mxfp4a8_humming_fused_gemm1_sm90(
-    torch::Tensor& staging,
-    torch::Tensor& output_q,
-    torch::Tensor& output_s,
-    torch::Tensor& row_amax,
-    torch::Tensor& row_arrivals,
-    torch::Tensor const& expert_residual,
-    torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors,
-    torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales,
-    torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes,
-    torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides,
-    torch::Tensor const& d_strides,
-    torch::Tensor const& s_strides,
-    int64_t swg_config,
-    double swiglu_limit,
-    bool has_swiglu_limit) {
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-  TORCH_CHECK(staging.scalar_type() == torch::kBFloat16, "staging must be BF16");
-  TORCH_CHECK(output_q.scalar_type() == torch::kFloat8_e4m3fn, "output_q must be E4M3");
-  TORCH_CHECK(output_s.scalar_type() == torch::kFloat32, "output_s must be FP32");
-  TORCH_CHECK(row_amax.scalar_type() == torch::kFloat32, "row_amax must be FP32");
-  TORCH_CHECK(row_arrivals.scalar_type() == torch::kInt32, "row_arrivals must be int32");
-  TORCH_CHECK(expert_residual.scalar_type() == torch::kFloat32, "expert residual must be FP32");
-  TORCH_CHECK(
-      staging.sizes() == output_q.sizes(),
-      "staging and quantized output shapes must match");
-  TORCH_CHECK(
-      output_s.numel() == staging.size(0) &&
-          row_amax.numel() == staging.size(0) &&
-          row_arrivals.numel() == staging.size(0),
-      "fused GEMM1 row state must contain one element per routed row");
-  TORCH_CHECK(
-      b_tensors.size(1) == staging.size(1) * 2,
-      "pair-interleaved W1 must have twice the staging width");
-  TORCH_CHECK(
-      b_tensors.size(1) % 128 == 0,
-      "pair-interleaved W1 channels must be divisible by 128");
-  switch (swg_config) {
-    case 100:
-      invoke_fused_gemm1<SM90_SWG_MXFP4_FUSED_GEMM1<8>>(
-          staging, output_q, output_s, row_amax, row_arrivals,
-          expert_residual, a_tensors, b_tensors, a_scales, b_scales,
-          expert_offsets, problem_sizes, a_strides, b_strides, d_strides,
-          s_strides, swiglu_limit, has_swiglu_limit);
-      return;
-    case 101:
-      invoke_fused_gemm1<SM90_SWG_MXFP4_FUSED_GEMM1<16>>(
-          staging, output_q, output_s, row_amax, row_arrivals,
-          expert_residual, a_tensors, b_tensors, a_scales, b_scales,
-          expert_offsets, problem_sizes, a_strides, b_strides, d_strides,
-          s_strides, swiglu_limit, has_swiglu_limit);
-      return;
-    case 400:
-      invoke_fused_gemm1<SM90_PRECOMPUTED_MXFP4_FUSED_GEMM1>(
-          staging, output_q, output_s, row_amax, row_arrivals,
-          expert_residual, a_tensors, b_tensors, a_scales, b_scales,
-          expert_offsets, problem_sizes, a_strides, b_strides, d_strides,
-          s_strides, swiglu_limit, has_swiglu_limit);
-      return;
-    case 401:
-      invoke_fused_gemm1<SM90_PRECOMPUTED_MXFP4_FUSED_GEMM1_M128_N32>(
-          staging, output_q, output_s, row_amax, row_arrivals,
-          expert_residual, a_tensors, b_tensors, a_scales, b_scales,
-          expert_offsets, problem_sizes, a_strides, b_strides, d_strides,
-          s_strides, swiglu_limit, has_swiglu_limit);
-      return;
-    default:
-      TORCH_CHECK(false, "Fused Humming GEMM1 supports config 100, 101, 400, or 401");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334");
   }
 #else
   TORCH_CHECK(false, "Humming kernels are disabled in this build");
@@ -961,46 +650,4 @@ void cutlass_mxfp4a8_humming_moe_mm_sm90(
       topk,
       swg_config,
       expert_ids);
-}
-
-void cutlass_mxfp4a8_humming_fused_gemm1_sm90(
-    torch::Tensor& staging,
-    torch::Tensor& output_q,
-    torch::Tensor& output_s,
-    torch::Tensor& row_amax,
-    torch::Tensor& row_arrivals,
-    torch::Tensor const& expert_residual,
-    torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors,
-    torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales,
-    torch::Tensor const& expert_offsets,
-    torch::Tensor const& problem_sizes,
-    torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides,
-    torch::Tensor const& d_strides,
-    torch::Tensor const& s_strides,
-    int64_t swg_config,
-    double swiglu_limit,
-    bool has_swiglu_limit) {
-  dispatch_mxfp4a8_humming_fused_gemm1_sm90(
-      staging,
-      output_q,
-      output_s,
-      row_amax,
-      row_arrivals,
-      expert_residual,
-      a_tensors,
-      b_tensors,
-      a_scales,
-      b_scales,
-      expert_offsets,
-      problem_sizes,
-      a_strides,
-      b_strides,
-      d_strides,
-      s_strides,
-      swg_config,
-      swiglu_limit,
-      has_swiglu_limit);
 }

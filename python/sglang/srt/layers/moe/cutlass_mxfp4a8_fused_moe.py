@@ -16,7 +16,6 @@ scales. EP keeps the complete legacy MXFP4A8 protocol.
 
 from __future__ import annotations
 
-import os
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -264,7 +263,6 @@ class CutlassMxfp4A8FusedMoeRunner:
         apply_router_weight_on_input: bool = False,
         routed_scaling_factor: float = 1.0,
         swiglu_limit: Optional[float] = None,
-        fuse_gemm1: bool = False,
     ) -> torch.Tensor:
         assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
         assert w1_q.dtype == torch.int8
@@ -408,17 +406,10 @@ class CutlassMxfp4A8FusedMoeRunner:
         b_strides2_gemm = b_strides2
         c_strides2_gemm = c_strides2
         s_strides2_gemm = s_strides2
-        c1_width = n if fuse_gemm1 else n * 2
+        c1_width = n * 2
         c1 = self._empty("c1", (m * topk, c1_width), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
         gemm1_config, gemm2_config = self._humming_configs(m)
-
-        # Diagnostic-only override for K-split deep-pipeline stage-ceiling probes
-        # (configs 336/337). Off by default; set SGLANG_MXFP4A8_GEMM1_CONFIG to a
-        # positive integer to pin the non-fused GEMM1 tactic. Never set in prod.
-        _gemm1_override = os.environ.get("SGLANG_MXFP4A8_GEMM1_CONFIG")
-        if _gemm1_override:
-            gemm1_config = int(_gemm1_override)
 
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
@@ -427,26 +418,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             "a2_scale_per_token", (m * topk,), torch.float32, device
         )
         core_op = torch.ops.sgl_kernel.cutlass_mxfp4a8_humming_moe_core.default
-        core_extra_args = ()
-        if fuse_gemm1:
-            if active_expert_ids is not None:
-                raise RuntimeError(
-                    "fused Humming GEMM1 does not support compact expert metadata"
-                )
-            # Decode keeps the high-residency SWG path. Larger batches retain
-            # the production two-warpgroup 64x64x512 tactic and only replace
-            # its epilogue.
-            gemm1_config = 100 if m <= 64 else 401
-            row_amax = self._empty(
-                "gemm1_fused_row_amax", (m * topk,), torch.float32, device
-            )
-            row_arrivals = self._empty(
-                "gemm1_fused_row_arrivals", (m * topk,), torch.int32, device
-            )
-            core_op = (
-                torch.ops.sgl_kernel.cutlass_mxfp4a8_humming_moe_core_fused_gemm1.default
-            )
-            core_extra_args = (row_amax, row_arrivals)
 
         core_op(
             c1,
@@ -488,7 +459,6 @@ class CutlassMxfp4A8FusedMoeRunner:
             swiglu_limit is not None,
             prepare_inputs_in_core,
             active_expert_ids,
-            *core_extra_args,
         )
 
         output = self._empty("output", tuple(a.shape), a.dtype, device)
