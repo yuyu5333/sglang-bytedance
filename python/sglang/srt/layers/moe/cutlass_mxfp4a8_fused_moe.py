@@ -192,7 +192,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             return 313, 313
         if num_tokens == 4096:
             return 320, 334
-        if num_tokens == 8192:
+        if num_tokens >= 8192:
             return 322, 334
         # H20 GPT-OSS buckets selected against per-shape FlashInfer autotune.
         if num_tokens <= 64:
@@ -202,8 +202,9 @@ class CutlassMxfp4A8FusedMoeRunner:
         # chunks (e.g. m=728) they hit a 214KB dynamic-smem launch failure
         # (max_active_blocks=-1, missing cudaFuncSetAttribute opt-in), which shows
         # up as an async illegal-memory-access in the next layer. Route every
-        # non-benchmark bucket to the always-stable SM90_SWG_MXFP4<16> (config 101)
-        # ping-pong tactic until the precomputed-work-map smem opt-in is fixed.
+        # remaining non-benchmark buckets to the always-stable
+        # SM90_SWG_MXFP4<16> (config 101) ping-pong tactic until the
+        # precomputed-work-map smem opt-in is fixed.
         return 101, 101
 
     def _apply_shuffle_mul_sum_fp32_factors(
