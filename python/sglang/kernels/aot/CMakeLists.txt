@@ -123,7 +123,6 @@ endif()
 if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     set(DEFAULT_SGL_KERNEL_ENABLE_FA3 ON)
 endif()
-option(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL "Enable MXFP4A8 Humming single-warpgroup kernels" ON)
 
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
@@ -358,12 +357,9 @@ set_property(
 target_compile_options(common_ops_sm90_build PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS} -use_fast_math>
 )
-if (SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
-    target_compile_definitions(common_ops_sm90_build PRIVATE
-        SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL=1
-        CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS=1
-    )
-endif()
+target_compile_definitions(common_ops_sm90_build PRIVATE
+    CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS=1
+)
 target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
 # Set output name and separate build directory to avoid conflicts
 set_target_properties(common_ops_sm90_build PROPERTIES

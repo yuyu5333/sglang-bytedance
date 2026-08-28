@@ -67,7 +67,6 @@ using SM90_PP_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::PP, WType::MXFP4>;
 template <int M, int N, int K, int A, int B, int C>
 using SM90_CO_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::CO, WType::MXFP4>;
 
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 template <int N>
 struct SM90_SWG_MXFP4 {
   using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<128>>;
@@ -129,7 +128,6 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
       true,
       false>;
 };
-#endif
 
 template <typename Config>
 inline void invoke_gemm(
@@ -379,14 +377,12 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
         case 7:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 2, 1, 1>));
           return;
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
         case 100:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
           return;
         case 101:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
           return;
-#endif
         default:
           TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM1_CONFIG=", forced_config);
       }
@@ -431,14 +427,12 @@ void dispatch_w4a8_mxfp4_moe_mm_sm90(
         case 7:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_CO_MXFP4<128, 128, 128, 2, 1, 1>));
           return;
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
         case 100:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
           return;
         case 101:
           INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16>));
           return;
-#endif
         default:
           TORCH_CHECK(false, "Unsupported SGL_MXFP4A8_GEMM2_CONFIG=", forced_config);
       }
@@ -491,7 +485,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     int64_t topk,
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids) {
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   constexpr int64_t chunk_size = QuantTraits<WType::MXFP4>::GroupSize;
   std::optional<torch::Tensor> act_block_scales = std::nullopt;
   std::optional<torch::Tensor> as_strides = std::nullopt;
@@ -541,9 +534,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334");
   }
-#else
-  TORCH_CHECK(false, "fused MXFP4A8 kernels are disabled in this build");
-#endif
 }
 
 }  // namespace

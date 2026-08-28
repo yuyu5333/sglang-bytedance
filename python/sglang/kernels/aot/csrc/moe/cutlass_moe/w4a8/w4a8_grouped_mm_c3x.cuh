@@ -35,18 +35,14 @@
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass/gemm/kernel/tile_scheduler_params.h"
-#endif
 #include "cutlass_extensions/epilogue/collective/default_epilogue_array_per_token_scale.hpp"
 #include "cutlass_extensions/epilogue/collective/default_epilogue_array_swiglu_quant.hpp"
 #include "cutlass_extensions/epilogue/collective/sm90_epilogue_array_tma_warpspecialized_mixed_input.hpp"
 #include "cutlass_extensions/epilogue/fusion/sm90_ptr_array_per_token_scale_callbacks_tma_warpspecialized.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
 #include "w4a8_swg_precomputed_work_map.cuh"
-#endif
 #include "w4a8_get_group_starts.cuh"
 
 using namespace cute;
@@ -273,10 +269,8 @@ struct cutlass_3x_w4a8_group_gemm {
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreMaxRegsGemm2Epilogue>;
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   static constexpr auto ExpertRows =
       static_cast<sgl_kernel::swg_detail::ExpertRowPolicy>(ExpertRowPolicyValue);
-#endif
   static constexpr bool FuseSwiGLUQuantEpilogue = FuseSwiGLUQuant;
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
@@ -357,7 +351,6 @@ struct cutlass_3x_w4a8_group_gemm {
           : (SingleWarpgroupTileN == 16 ? 5
                                         : (SingleWarpgroupTileN == 32 ? 4 : 3));
 
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   using PrecomputedTileScheduler =
       cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90GroupPrecomputed<
           ProblemShape,
@@ -383,13 +376,6 @@ struct cutlass_3x_w4a8_group_gemm {
               ProblemShape,
               CollectiveMainloopScaleOnly,
               CollectiveEpilogue>>>;
-#else
-  using GemmKernelScaleOnly =
-      cutlass::gemm::kernel::GemmUniversal<
-          ProblemShape,
-          CollectiveMainloopScaleOnly,
-          CollectiveEpilogue>;
-#endif
 
   using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
 
@@ -541,9 +527,7 @@ void cutlass_w4a8_group_gemm_caller(
     hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
   }
   Args arguments;
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;
-#endif
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr());
@@ -655,7 +639,6 @@ void cutlass_w4a8_group_gemm_caller(
          static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
         hw_info};
   }
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
@@ -682,7 +665,6 @@ void cutlass_w4a8_group_gemm_caller(
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
   }
-#endif
 
   // MXFP4A8: feed the activation block-scale into the mainloop's optional path.
   // These members default to nullptr, so the int4a8 path is unaffected.
@@ -710,7 +692,6 @@ void cutlass_w4a8_group_gemm_caller(
     TORCH_CHECK(false, "GEMM initialization failed");
   }
 
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
     sgl_kernel::swg_detail::launch_swg_precomputed_work_map<Gemm>(
         swg_work_map,
@@ -732,12 +713,10 @@ void cutlass_w4a8_group_gemm_caller(
         false,
         stream);
   }
-#endif
 
   status = gemm.run(stream, nullptr, true);
   if (status != cutlass::Status::kSuccess) {
     cudaError_t ce = cudaGetLastError();
-#if defined(SGL_KERNEL_ENABLE_SINGLE_WARPGROUP_EXPERIMENTAL)
     if constexpr (Gemm::UsePreMmaE8M0Scale) {
       auto const grid = Gemm::GemmScaleOnly::get_grid_shape(arguments);
       auto const block = Gemm::GemmKernelScaleOnly::get_block_shape();
@@ -765,7 +744,6 @@ void cutlass_w4a8_group_gemm_caller(
           " max_active_blocks=",
           max_active_blocks);
     }
-#endif
     TORCH_CHECK(
         false, "GEMM execution failed: status=", cutlassGetStatusString(status), " cuda=", cudaGetErrorString(ce));
   }
