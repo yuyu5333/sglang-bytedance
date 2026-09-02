@@ -803,8 +803,8 @@ class TestDSV4KVBitPackedCompressor(CustomTestCase):
         valid_indices = torch.full((1, 1, 64), -1, dtype=torch.int32)
         valid_indices[0, 0, 0] = 1
         lengths = torch.tensor([1], dtype=torch.int32)
-        expected_packed = torch.zeros(256, 380, dtype=torch.uint8)
-        expected_packed[1] = encode_dsv4_bu4_reference(keys)[0]
+        expected_packed = torch.zeros(1, 256 * 380, dtype=torch.uint8)
+        expected_packed.view(-1, 380)[1] = encode_dsv4_bu4_reference(keys)[0]
         expected, _ = dsv4_kvbit_sparse_decode(
             q=q,
             packed=expected_packed,
