@@ -11,13 +11,17 @@ from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
 from sglang.srt.mem_cache.kv_cache_dtype import configure_kv_cache_dtype
 from sglang.srt.mem_cache.kvbit_dsv4 import (
     DSV4_BU4_LAYOUT,
+    DSV4_MXINT4_LAYOUT,
+    DSV4KVBitFormat,
     DSV4KVBitPackedSWAPool,
     DSV4KVBitRuntimeCapability,
     decode_dsv4_bu4_reference,
+    decode_dsv4_mxint4_reference,
     dsv4_kvbit_enabled_for_worker,
     dsv4_kvbit_flashmla_packed_kwargs,
     dsv4_kvbit_sparse_decode,
     encode_dsv4_bu4_reference,
+    encode_dsv4_mxint4_reference,
     fold_dsv4_h256,
     merge_attention_states_natural_log,
     require_dsv4_kvbit_runtime_capability,
@@ -44,6 +48,18 @@ class TestDSV4KVBitLayout(CustomTestCase):
             },
         )
         self.assertEqual(DSV4_BU4_LAYOUT.row_bytes, 380)
+
+    def test_mxint4_layout_is_exactly_360_bytes(self):
+        self.assertEqual(
+            DSV4_MXINT4_LAYOUT.offsets(),
+            {
+                "codes": (0, 224),
+                "header": (224, 232),
+                "rope": (232, 360),
+            },
+        )
+        self.assertEqual(DSV4_MXINT4_LAYOUT.row_bytes, 360)
+        self.assertEqual(DSV4KVBitFormat.MXINT4.value, "kvbit-mxint4")
 
     def test_h256_prefix_round_trip_leaves_tail_unchanged(self):
         kv = torch.randn(2, 512, dtype=torch.bfloat16)
@@ -74,6 +90,64 @@ class TestDSV4KVBitLayout(CustomTestCase):
         with self.assertRaisesRegex(ValueError, "last dimension must be 380"):
             decode_dsv4_bu4_reference(torch.zeros(1, 379, dtype=torch.uint8))
 
+    def test_mxint4_reference_codec_round_trip_and_padding(self):
+        torch.manual_seed(5)
+        kv = torch.randn(3, 512, dtype=torch.bfloat16) * 0.1
+
+        packed = encode_dsv4_mxint4_reference(kv)
+        decoded = decode_dsv4_mxint4_reference(packed)
+
+        self.assertEqual(packed.dtype, torch.uint8)
+        self.assertEqual(tuple(packed.shape), (3, 360))
+        self.assertTrue(torch.equal(packed[:, 231], torch.zeros(3, dtype=torch.uint8)))
+        self.assertTrue(torch.equal(decoded[:, 448:], kv[:, 448:]))
+        torch.testing.assert_close(decoded.float(), kv.float(), atol=0.04, rtol=0.2)
+
+    def test_mxint4_reference_codec_handles_zero_groups(self):
+        kv = torch.zeros(2, 512, dtype=torch.bfloat16)
+
+        packed = encode_dsv4_mxint4_reference(kv)
+        decoded = decode_dsv4_mxint4_reference(packed)
+
+        self.assertTrue(torch.equal(packed[:, 224:231], torch.zeros((2, 7))))
+        self.assertTrue(torch.equal(decoded, kv))
+
+    def test_mxint4_writer_uses_signed_nibbles_rne_and_never_emits_minus_eight(
+        self,
+    ):
+        stored = torch.zeros(1, 512, dtype=torch.float32)
+        stored[0, :10] = torch.tensor(
+            [-7.0, -1.0, 0.0, 1.0, 7.0, -6.5, -5.5, 0.5, 1.5, 2.5]
+        )
+        kv = restore_dsv4_h256(stored)
+
+        packed = encode_dsv4_mxint4_reference(kv)
+        low = packed[0, :5] & 0x0F
+        high = packed[0, :5] >> 4
+
+        self.assertEqual(packed[0, 224].item(), 127)
+        self.assertEqual(packed[0, 231].item(), 0)
+        self.assertEqual(low.tolist(), [9, 0, 7, 10, 2])
+        self.assertEqual(high.tolist(), [15, 1, 10, 0, 2])
+        nibbles = torch.stack((packed[0, :224] & 0x0F, packed[0, :224] >> 4))
+        self.assertFalse(torch.any(nibbles == 8).item())
+
+    def test_mxint4_writer_reserves_scale_ff(self):
+        stored = torch.zeros(1, 512, dtype=torch.float32)
+        # Use the identity tail to avoid overflow in the H256 test setup.
+        stored[0, 256] = 3.0e38
+        kv = restore_dsv4_h256(stored)
+
+        packed = encode_dsv4_mxint4_reference(kv)
+
+        self.assertEqual(packed[0, 228].item(), 253)
+
+    def test_mxint4_and_bu4_rows_are_mutually_rejected(self):
+        with self.assertRaisesRegex(ValueError, "last dimension must be 360"):
+            decode_dsv4_mxint4_reference(torch.zeros(1, 380, dtype=torch.uint8))
+        with self.assertRaisesRegex(ValueError, "last dimension must be 380"):
+            decode_dsv4_bu4_reference(torch.zeros(1, 360, dtype=torch.uint8))
+
     def test_geometry_rejects_non_dsv4_shape(self):
         validate_dsv4_bu4_geometry(448, 64)
         with self.assertRaisesRegex(ValueError, "448-nope/64-rope"):
@@ -92,6 +166,11 @@ class TestDSV4KVBitCapability(CustomTestCase):
         )
         self.assertFalse(
             dsv4_kvbit_enabled_for_worker(kv_cache_dtype="auto", is_draft_worker=False)
+        )
+        self.assertTrue(
+            dsv4_kvbit_enabled_for_worker(
+                kv_cache_dtype="kvbit-mxint4", is_draft_worker=False
+            )
         )
 
     def test_target_kvbit_keeps_tag_and_resolves_backing_dtype_as_auto(self):
@@ -133,6 +212,17 @@ class TestDSV4KVBitCapability(CustomTestCase):
 
         self.assertEqual(tag, "fp8_e4m3")
         self.assertEqual(dtype, torch.float8_e4m3fn)
+
+        mx_tag, mx_dtype = configure_kv_cache_dtype(
+            server_args_kv_cache_dtype="kvbit-mxint4",
+            model=SimpleNamespace(quant_config=None),
+            model_dtype=torch.bfloat16,
+            is_draft_worker=True,
+            is_dflash=False,
+            speculative_draft_attention_backend="fa3",
+        )
+        self.assertEqual(mx_tag, "fp8_e4m3")
+        self.assertEqual(mx_dtype, torch.float8_e4m3fn)
 
     def test_explicit_draft_dtype_takes_precedence_over_target_kvbit(self):
         tag, dtype = configure_kv_cache_dtype(
@@ -182,9 +272,10 @@ class TestDSV4KVBitCapability(CustomTestCase):
 class TestDSV4KVBitPackedSWAPool(CustomTestCase):
     """Target persistent SWA/C4/C128 pools use the packed row ABI."""
 
-    def _owner(self, *, enabled):
+    def _owner(self, *, enabled, kvbit_format=DSV4KVBitFormat.BU4):
         owner = object.__new__(DeepSeekV4TokenToKVPool)
         owner.enable_kvbit_swa = enabled
+        owner.kvbit_format = kvbit_format
         owner.qk_nope_head_dim = 448
         owner.qk_rope_head_dim = 64
         return owner
@@ -226,6 +317,19 @@ class TestDSV4KVBitPackedSWAPool(CustomTestCase):
         self.assertIsInstance(packed_c128, DSV4KVBitPackedSWAPool)
         self.assertEqual(packed_c128.page_size, 2)
         self.assertEqual(packed_c128.bytes_per_page_padded, 2 * 380)
+
+    def test_mxint4_factories_use_360_byte_rows_for_all_pool_kinds(self):
+        owner = self._owner(enabled=True, kvbit_format=DSV4KVBitFormat.MXINT4)
+
+        swa = owner._make_swa_kv_pool(**self._pool_kwargs())
+        c4 = owner._make_compressed_kv_pool(**self._pool_kwargs(page_size=64))
+        c128 = owner._make_compressed_kv_pool(**self._pool_kwargs(page_size=2))
+
+        for pool, page_size in ((swa, 256), (c4, 64), (c128, 2)):
+            with self.subTest(page_size=page_size):
+                self.assertEqual(pool.kvbit_format, DSV4KVBitFormat.MXINT4)
+                self.assertEqual(pool.get_bytes_per_token(), 360)
+                self.assertEqual(pool.bytes_per_page_padded, page_size * 360)
 
     def test_disabled_swa_and_compressed_factories_stay_native(self):
         native_swa = self._owner(enabled=False)._make_swa_kv_pool(**self._pool_kwargs())
@@ -511,6 +615,50 @@ class TestDSV4KVBitAttentionMath(CustomTestCase):
                         (1, extra_page_size, 1, 380),
                     )
                     self.assertIs(call["extra_packed_kcache"]._base, extra_cache)
+
+    def test_mxint4_routes_all_ratios_to_mxint4_flashmla(self):
+        from sglang.srt.layers.attention.deepseek_v4_backend import (
+            DeepseekV4AttnBackend,
+        )
+
+        backend = object.__new__(DeepseekV4AttnBackend)
+        backend.page_size = 256
+        backend.softmax_scale = 512**-0.5
+        backend.head_dim_v = 512
+        backend.token_to_kv_pool = SimpleNamespace(
+            swa_kv_pool=SimpleNamespace(kvbit_format=DSV4KVBitFormat.MXINT4),
+            get_extra_key_buffer=lambda _layer_id: None,
+            get_extra_key_page_size=lambda _layer_id: None,
+        )
+        core = SimpleNamespace(
+            swa_page_indices=torch.zeros(1, 64, dtype=torch.int32),
+            swa_topk_lengths=torch.ones(1, dtype=torch.int32),
+            get_flashmla_metadata=lambda _ratio: object(),
+        )
+        q = torch.zeros(1, 2, 512, dtype=torch.bfloat16)
+        expected = torch.randn(1, 1, 2, 512, dtype=torch.bfloat16)
+        packed = torch.zeros(1, 256 * 360, dtype=torch.uint8)
+
+        with patch(
+            "sgl_kernel.kvbit_flash_mla.kvbit_mxint4_flash_mla_with_kvcache",
+            return_value=(expected, torch.zeros(1, 2, 1)),
+        ) as flashmla:
+            output = backend._forward_kvbit(
+                q=q,
+                layer_id=0,
+                compress_ratio=0,
+                packed_swa_cache=packed,
+                core_attn_metadata=core,
+                attn_sink=torch.zeros(2),
+            )
+
+        torch.testing.assert_close(output, expected.squeeze(1))
+        flashmla.assert_called_once()
+        call = flashmla.call_args.kwargs
+        self.assertEqual(tuple(call["k_cache"].shape), (1, 256, 1, 360))
+        self.assertEqual(tuple(call["packed_kcache"].shape), (256, 360))
+        self.assertIs(call["packed_kcache"]._base, packed)
+        self.assertIsNone(call["extra_packed_kcache"])
 
 
 class TestDSV4KVBitPackedCompressor(CustomTestCase):

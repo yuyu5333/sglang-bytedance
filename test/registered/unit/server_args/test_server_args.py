@@ -109,11 +109,12 @@ class TestPrepareServerArgs(CustomTestCase):
         parser = server_args_module.argparse.ArgumentParser()
         ServerArgs.add_cli_args(parser)
 
-        args = parser.parse_args(
-            ["--model-path", "dummy-model", "--kv-cache-dtype", "kvbit"]
-        )
-
-        self.assertEqual(args.kv_cache_dtype, "kvbit")
+        for dtype in ("kvbit", "kvbit-mxint4"):
+            with self.subTest(dtype=dtype):
+                args = parser.parse_args(
+                    ["--model-path", "dummy-model", "--kv-cache-dtype", dtype]
+                )
+                self.assertEqual(args.kv_cache_dtype, dtype)
 
     def test_kvbit_rejects_non_dsv4_model(self):
         cfg = SimpleNamespace(kv_cache_dtype="kvbit")
@@ -166,26 +167,27 @@ class TestPrepareServerArgs(CustomTestCase):
                 handle_kvbit_kv_cache_compatibility(object())
 
     def test_kvbit_accepts_dsv4_on_sm90(self):
-        cfg = SimpleNamespace(kv_cache_dtype="kvbit")
         model_config = SimpleNamespace(
             hf_config=SimpleNamespace(architectures=["DeepseekV4ForCausalLM"])
         )
         platform = SimpleNamespace(is_cuda=True, is_sm90=True)
-        with (
-            patch(
-                "sglang.srt.arg_groups.kv_cache_hook.resolving_view",
-                return_value=cfg,
-            ),
-            patch(
-                "sglang.srt.arg_groups.kv_cache_hook.model_config_of",
-                return_value=model_config,
-            ),
-            patch(
-                "sglang.srt.arg_groups.kv_cache_hook.get_platform",
-                return_value=platform,
-            ),
-        ):
-            handle_kvbit_kv_cache_compatibility(object())
+        for dtype in ("kvbit", "kvbit-mxint4"):
+            with (
+                self.subTest(dtype=dtype),
+                patch(
+                    "sglang.srt.arg_groups.kv_cache_hook.resolving_view",
+                    return_value=SimpleNamespace(kv_cache_dtype=dtype),
+                ),
+                patch(
+                    "sglang.srt.arg_groups.kv_cache_hook.model_config_of",
+                    return_value=model_config,
+                ),
+                patch(
+                    "sglang.srt.arg_groups.kv_cache_hook.get_platform",
+                    return_value=platform,
+                ),
+            ):
+                handle_kvbit_kv_cache_compatibility(object())
 
     def test_weight_cache_daemon_allows_static_eplb(self):
         args = ServerArgs(

@@ -51,6 +51,28 @@ class Decode_Sm90_Impl : public DecodeImplBase {
   }
 };
 
+class Decode_MxInt4_Sm90_Impl : public DecodeImplBase {
+  DECLARE_SUPPORTED_FEATURES(
+      DecodeFeatures::HEAD_64,
+      DecodeFeatures::HEAD_DIM_512,
+      DecodeFeatures::MODEL1_KVCACHE_FORMAT,
+      DecodeFeatures::ATTN_SINK,
+      DecodeFeatures::TOPK_LENGTH,
+      DecodeFeatures::EXTRA_KVCACHE,
+      DecodeFeatures::EXTRA_TOPK_LENGTH)
+
+ public:
+  DecodeImplMeta get_meta(int h_q, int s_q) override {
+    Arch arch = Arch();
+    return {std::max(arch.num_sms / s_q / (h_q / 64), 1), 5, 64};
+  }
+
+ protected:
+  void run_(const SparseAttnDecodeParams& params, const std::vector<FeatureT>& required_features) override {
+    sm90::decode::sparse_fp8::run_flash_splitkv_mla_mxint4_sparse_kernel<ModelType::MODEL1, 64>(params);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // [M3.c.4 Stage-1a] sparse-path packed buffer validator.
 //
@@ -79,7 +101,7 @@ inline void sparse_validate_packed_buffers(
   TORCH_CHECK(R_matrix.dtype() == at::kBFloat16, "fixed-BU4 R_matrix must be bfloat16");
   TORCH_CHECK(zero_point.dtype() == at::kFloat, "zero_point must be float32");
 
-  TORCH_CHECK(packed_kcache.stride(-1) == 1, "packed_kcache must have contiguous last dim");
+  KU_CHECK_CONTIGUOUS(packed_kcache);
   KU_CHECK_CONTIGUOUS(scale_kcache);
   KU_CHECK_CONTIGUOUS(R_matrix);
   KU_CHECK_CONTIGUOUS(zero_point);
@@ -121,6 +143,26 @@ inline void sparse_validate_packed_buffers(
 
   *out_qk_nope_head_dim = qk_nope;
   *out_packed_row_bytes = static_cast<int>(pk_cols);
+}
+
+inline void sparse_validate_mxint4_buffer(const at::Tensor& packed_kcache, int kv_num_rows, const char* name) {
+  KU_CHECK_DEVICE(packed_kcache);
+  TORCH_CHECK(packed_kcache.dtype() == at::kByte, name, " must be uint8");
+  TORCH_CHECK(packed_kcache.dim() == 2, name, " must be rank-2 [num_rows, 360], got ", packed_kcache.dim());
+  TORCH_CHECK(packed_kcache.is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(
+      packed_kcache.size(0) == kv_num_rows,
+      name,
+      " row count ",
+      packed_kcache.size(0),
+      " must equal KV num_rows ",
+      kv_num_rows);
+  TORCH_CHECK(
+      packed_kcache.size(1) == 360,
+      name,
+      " row_bytes must be 360 (224-byte signed nibbles + 7-byte UE8M0 + "
+      "1-byte padding + 128-byte BF16 RoPE), got ",
+      packed_kcache.size(1));
 }
 
 static std::tuple<at::Tensor, at::Tensor, std::optional<at::Tensor>, std::optional<at::Tensor>>
@@ -175,7 +217,8 @@ sparse_attn_decode_interface(
     // (scale/R/zero/dim_of_bit/bitpos/row_bytes/bit_uniform). Only the
     // byte buffer + its per-page stride differ from SWA. None -> extra
     // blocks stay on the dense FP8 (shadow/native) path (byte-identical).
-    const std::optional<at::Tensor>& extra_packed_kcache = std::nullopt) {
+    const std::optional<at::Tensor>& extra_packed_kcache = std::nullopt,
+    bool is_mxint4 = false) {
   using bf16 = cutlass::bfloat16_t;
 
   // [Stage-1a fix] Re-introduce mutable local copies so the rest of this
@@ -327,11 +370,15 @@ sparse_attn_decode_interface(
   KU_CHECK_SHAPE(q, b, s_q, h_q, d_qk);
   {
     // The shape-carrier aliases the fixed packed row ABI.
-    constexpr int bytes_per_token = 380;
+    const int bytes_per_token = is_mxint4 ? 360 : 380;
     KU_CHECK_SHAPE(kv, num_blocks, page_block_size, h_kv, bytes_per_token);
     if (extra_kv.has_value()) {
       const int extra_bpt = static_cast<int>(extra_kv->size(3));
-      TORCH_CHECK(extra_bpt == bytes_per_token, "fixed-BU4 extra_kv bytes_per_token must be 380, got ", extra_bpt);
+      TORCH_CHECK(
+          extra_bpt == bytes_per_token,
+          is_mxint4 ? "MXINT4 extra_kv bytes_per_token must be 360, got "
+                    : "fixed-BU4 extra_kv bytes_per_token must be 380, got ",
+          extra_bpt);
       KU_CHECK_SHAPE(extra_kv, extra_num_blocks, extra_page_block_size, h_kv, extra_bpt);
       TORCH_CHECK(
           extra_kv->stride(1) == extra_bpt,
@@ -370,7 +417,8 @@ sparse_attn_decode_interface(
     features.push_back(DecodeFeatures::EXTRA_TOPK_LENGTH);
   }
 
-  DecodeImplBase* impl = new Decode_Sm90_Impl();
+  DecodeImplBase* impl = is_mxint4 ? static_cast<DecodeImplBase*>(new Decode_MxInt4_Sm90_Impl())
+                                   : static_cast<DecodeImplBase*>(new Decode_Sm90_Impl());
 
   DecodeImplMeta impl_meta = impl->get_meta(h_q, s_q);
 
@@ -490,16 +538,39 @@ sparse_attn_decode_interface(
                                    (R_matrix.has_value() ? 1 : 0) + (zero_point.has_value() ? 1 : 0) +
                                    (dim_of_bit.has_value() ? 1 : 0) + (bitpos_in_dim.has_value() ? 1 : 0);
     TORCH_CHECK(
-        num_packed_present == 6,
-        "KVBit sparse decode requires all six packed tensors "
-        "(packed_kcache, scale_kcache, R_matrix, zero_point, "
-        "dim_of_bit, bitpos_in_dim); got non-None count=",
+        is_mxint4 ? num_packed_present == 1 : num_packed_present == 6,
+        is_mxint4 ? "KVBit MXINT4 sparse decode requires only packed_kcache"
+                  : "KVBit sparse decode requires all six packed tensors "
+                    "(packed_kcache, scale_kcache, R_matrix, zero_point, dim_of_bit, bitpos_in_dim)",
+        "; got non-None count=",
         num_packed_present);
+    TORCH_CHECK(packed_kcache.has_value(), "KVBit sparse decode requires packed_kcache");
     TORCH_CHECK(
         !have_extra_kcache || extra_packed_kcache.has_value(),
         "KVBit sparse decode requires extra_packed_kcache when extra_kv is present");
 
-    if (num_packed_present == 6) {
+    if (is_mxint4) {
+      const at::Tensor& pk = packed_kcache.value();
+      sparse_validate_mxint4_buffer(pk, num_blocks * page_block_size, "packed_kcache");
+      params.packed_kcache_ptr = pk.data_ptr();
+      params.packed_row_bytes = 360;
+      params.packed_kv_block_stride = static_cast<int64_t>(page_block_size) * 360;
+      params.qk_nope_head_dim = 448;
+      params.row_bits = 1792;
+      params.bit_uniform = 4;
+      params.identity_tail_bypass = 1;
+      params.uniform_group_size = 64;
+      params.uniform_num_groups = 7;
+      params.uniform_header_bytes = 8;
+
+      if (extra_packed_kcache.has_value()) {
+        TORCH_CHECK(extra_kv.has_value(), "extra_packed_kcache requires extra_kv");
+        const at::Tensor& epk = extra_packed_kcache.value();
+        sparse_validate_mxint4_buffer(epk, extra_num_blocks * extra_page_block_size, "extra_packed_kcache");
+        params.extra_packed_kcache_ptr = epk.data_ptr();
+        params.extra_packed_kv_block_stride = static_cast<int64_t>(extra_page_block_size) * 360;
+      }
+    } else if (num_packed_present == 6) {
       const at::Tensor& pk = packed_kcache.value();
       const at::Tensor& sk = scale_kcache.value();
       const at::Tensor& Rm = R_matrix.value();
@@ -552,7 +623,7 @@ sparse_attn_decode_interface(
         const at::Tensor& epk = extra_packed_kcache.value();
         KU_CHECK_DEVICE(epk);
         TORCH_CHECK(epk.dtype() == at::kByte, "extra_packed_kcache must be uint8");
-        TORCH_CHECK(epk.stride(-1) == 1, "extra_packed_kcache must have contiguous last dim");
+        KU_CHECK_CONTIGUOUS(epk);
         TORCH_CHECK(epk.dim() == 2, "extra_packed_kcache must be rank-2 [num_rows, row_bytes], got ", epk.dim());
         TORCH_CHECK(extra_kv.has_value(), "extra_packed_kcache requires extra_kv to be present");
         const auto epk_cols = epk.size(1);

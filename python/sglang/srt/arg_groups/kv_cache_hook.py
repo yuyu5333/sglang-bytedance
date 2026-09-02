@@ -24,14 +24,15 @@ logger = logging.getLogger(__name__)
 def handle_kvbit_kv_cache_compatibility(server_args: Any) -> None:
     """Validate the narrow hardware and model contract of the KVBit dtype."""
     cfg = resolving_view(server_args)
-    if cfg.kv_cache_dtype != "kvbit":
+    if cfg.kv_cache_dtype not in ("kvbit", "kvbit-mxint4"):
         return
 
+    dtype = cfg.kv_cache_dtype
     platform = get_platform()
     if not platform.is_cuda:
-        raise ValueError("--kv-cache-dtype kvbit requires a CUDA GPU.")
+        raise ValueError(f"--kv-cache-dtype {dtype} requires a CUDA GPU.")
     if not platform.is_sm90:
-        raise ValueError("--kv-cache-dtype kvbit requires an SM90 CUDA GPU.")
+        raise ValueError(f"--kv-cache-dtype {dtype} requires an SM90 CUDA GPU.")
 
     from sglang.srt.configs.model_config import is_deepseek_v4
 
@@ -39,7 +40,7 @@ def handle_kvbit_kv_cache_compatibility(server_args: Any) -> None:
     if not is_deepseek_v4(hf_config):
         model_arch = (getattr(hf_config, "architectures", None) or ["unknown"])[0]
         raise ValueError(
-            "--kv-cache-dtype kvbit currently supports only DeepSeek V4 models; "
+            f"--kv-cache-dtype {dtype} currently supports only DeepSeek V4 models; "
             f"got {model_arch}."
         )
 

@@ -21,7 +21,10 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.base_swa_memory_pool import BaseSWAKVPool
 from sglang.srt.mem_cache.deepseek_v4_compress_state import CompressStatePool
-from sglang.srt.mem_cache.kvbit_dsv4 import DSV4KVBitPackedSWAPool
+from sglang.srt.mem_cache.kvbit_dsv4 import (
+    DSV4KVBitFormat,
+    DSV4KVBitPackedSWAPool,
+)
 from sglang.srt.mem_cache.memory_pool import KVCache
 from sglang.srt.runtime_context import get_exec, get_spec
 from sglang.srt.utils import ceil_div, is_hip
@@ -494,6 +497,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         online_mtp_max_draft_tokens: int = 0,
         num_req_slots: Optional[int] = None,
         enable_kvbit_swa: bool = False,
+        kvbit_format: DSV4KVBitFormat | str | None = None,
     ):
         super().__init__(
             swa_size,
@@ -542,6 +546,11 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         self.compression_ratios = compression_ratios
         self.online_mtp_max_draft_tokens = online_mtp_max_draft_tokens
         self.enable_kvbit_swa = enable_kvbit_swa
+        self.kvbit_format = (
+            DSV4KVBitFormat(kvbit_format)
+            if kvbit_format is not None
+            else DSV4KVBitFormat.BU4
+        )
         self.online_c128_state_num_req_slots = c128_state_pool_size
         self.online_c128_mtp_pending_seq_lens: Optional[torch.Tensor] = None
         if ONLINE_C128 and envs.SGLANG_EXPERIMENTAL_ONLINE_C128_MTP.get():
@@ -898,6 +907,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             layer_num=layer_num,
             device=device,
             enable_memory_saver=enable_memory_saver,
+            kvbit_format=getattr(self, "kvbit_format", DSV4KVBitFormat.BU4),
         )
 
     def _make_compressed_kv_pool(
@@ -933,6 +943,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             layer_num=layer_num,
             device=device,
             enable_memory_saver=enable_memory_saver,
+            kvbit_format=getattr(self, "kvbit_format", DSV4KVBitFormat.BU4),
         )
 
     def _make_indexer_pool(

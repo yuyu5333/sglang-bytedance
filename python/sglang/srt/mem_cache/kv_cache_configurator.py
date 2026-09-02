@@ -51,6 +51,7 @@ from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.mem_cache.hisparse_memory_pool import HiSparseDSATokenToKVPool
 from sglang.srt.mem_cache.kvbit_dsv4 import (
     dsv4_kvbit_enabled_for_worker,
+    dsv4_kvbit_format,
     require_dsv4_kvbit_runtime_capability,
     validate_dsv4_bu4_geometry,
 )
@@ -1348,6 +1349,7 @@ class KVCacheConfigurator:
             enable_hisparse=get_memory().enable_hisparse,
             online_mtp_max_draft_tokens=(max_speculative_num_draft_tokens() or 0),
             enable_kvbit_swa=enable_kvbit_swa,
+            kvbit_format=dsv4_kvbit_format(self.kv_cache_dtype_str),
         )
         return token_to_kv_pool
 

@@ -34,19 +34,20 @@ def configure_kv_cache_dtype(
         if speculative_draft_kv_cache_dtype is not None:
             server_args_kv_cache_dtype = speculative_draft_kv_cache_dtype
             resolved_kv_cache_dtype = server_args_kv_cache_dtype
-        elif server_args_kv_cache_dtype == "kvbit":
+        elif server_args_kv_cache_dtype in ("kvbit", "kvbit-mxint4"):
             # KVBit is target-only. DSV4's draft pool uses the existing
             # 584-byte FP8 layout, so preserve that default unless the user
             # explicitly selected a draft dtype.
             server_args_kv_cache_dtype = "fp8_e4m3"
             resolved_kv_cache_dtype = "fp8_e4m3"
 
-    use_kvbit = server_args_kv_cache_dtype == "kvbit"
+    use_kvbit = server_args_kv_cache_dtype in ("kvbit", "kvbit-mxint4")
     if use_kvbit:
-        # Keep "kvbit" as the target worker's routing tag while resolving the
-        # backing torch dtype exactly as --kv-cache-dtype auto would.
+        # Keep the selected KVBit format as the target worker's routing tag
+        # while resolving the backing torch dtype exactly as auto would.
+        kvbit_tag = server_args_kv_cache_dtype
         server_args_kv_cache_dtype = "auto"
-        resolved_kv_cache_dtype = "kvbit"
+        resolved_kv_cache_dtype = kvbit_tag
 
     if server_args_kv_cache_dtype == "auto":
         quant_config = getattr(model, "quant_config", None)

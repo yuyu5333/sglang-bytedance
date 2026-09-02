@@ -68,7 +68,11 @@ from sglang.srt.layers.attention.verify_mask import (
 )
 from sglang.srt.layers.cp.utils import is_cp_v2_active
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
-from sglang.srt.mem_cache.kvbit_dsv4 import dsv4_kvbit_flashmla_packed_kwargs
+from sglang.srt.mem_cache.kvbit_dsv4 import (
+    DSV4KVBitFormat,
+    dsv4_kvbit_flashmla_packed_kwargs,
+    dsv4_kvbit_layout,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.runtime_context import (
     get_parallel,
@@ -1691,14 +1695,16 @@ class DeepseekV4AttnBackend(
         if swa_indices.ndim == 2:
             swa_indices = swa_indices.unsqueeze(1)
 
-        swa_packed_kwargs = dsv4_kvbit_flashmla_packed_kwargs(
-            packed_swa_cache, page_size=self.page_size
+        swa_pool = getattr(self.token_to_kv_pool, "swa_kv_pool", None)
+        kvbit_format = DSV4KVBitFormat(
+            getattr(swa_pool, "kvbit_format", DSV4KVBitFormat.BU4)
         )
+        layout = dsv4_kvbit_layout(kvbit_format)
         swa_shape_carrier = packed_swa_cache.view(
             packed_swa_cache.shape[0],
             self.page_size,
             1,
-            -1,
+            layout.row_bytes,
         )
 
         extra_shape_carrier = None
@@ -1723,34 +1729,56 @@ class DeepseekV4AttnBackend(
                 extra_cache.shape[0],
                 extra_page_size,
                 1,
-                -1,
+                layout.row_bytes,
             )
-            extra_packed_rows = dsv4_kvbit_flashmla_packed_kwargs(
-                extra_cache, page_size=extra_page_size
-            )["packed_kcache"]
+            if kvbit_format is DSV4KVBitFormat.BU4:
+                extra_packed_rows = dsv4_kvbit_flashmla_packed_kwargs(
+                    extra_cache, page_size=extra_page_size
+                )["packed_kcache"]
 
         assert swa_indices.shape[-1] % 64 == 0
         if extra_indices is not None:
             assert extra_indices.shape[-1] % 64 == 0
 
-        from sgl_kernel.kvbit_flash_mla import kvbit_flash_mla_with_kvcache
+        common_kwargs = {
+            "q": q.contiguous(),
+            "k_cache": swa_shape_carrier,
+            "head_dim_v": self.head_dim_v,
+            "sched_meta": core_attn_metadata.get_flashmla_metadata(compress_ratio),
+            "softmax_scale": self.softmax_scale,
+            "indices": swa_indices,
+            "attn_sink": attn_sink,
+            "extra_k_cache": extra_shape_carrier,
+            "extra_indices_in_kvcache": extra_indices,
+            "topk_length": swa_lengths,
+            "extra_topk_length": extra_lengths,
+        }
+        if kvbit_format is DSV4KVBitFormat.MXINT4:
+            from sgl_kernel.kvbit_flash_mla import (
+                kvbit_mxint4_flash_mla_with_kvcache,
+            )
 
-        output, _ = kvbit_flash_mla_with_kvcache(
-            q=q.contiguous(),
-            k_cache=swa_shape_carrier,
-            head_dim_v=self.head_dim_v,
-            sched_meta=core_attn_metadata.get_flashmla_metadata(compress_ratio),
-            softmax_scale=self.softmax_scale,
-            indices=swa_indices,
-            attn_sink=attn_sink,
-            extra_k_cache=extra_shape_carrier,
-            extra_indices_in_kvcache=extra_indices,
-            topk_length=swa_lengths,
-            extra_topk_length=extra_lengths,
-            identity_tail_bypass=True,
-            extra_packed_kcache=extra_packed_rows,
-            **swa_packed_kwargs,
-        )
+            output, _ = kvbit_mxint4_flash_mla_with_kvcache(
+                **common_kwargs,
+                packed_kcache=packed_swa_cache.view(-1, layout.row_bytes),
+                extra_packed_kcache=(
+                    None
+                    if extra_shape_carrier is None
+                    else extra_shape_carrier.view(-1, layout.row_bytes)
+                ),
+            )
+        else:
+            from sgl_kernel.kvbit_flash_mla import kvbit_flash_mla_with_kvcache
+
+            swa_packed_kwargs = dsv4_kvbit_flashmla_packed_kwargs(
+                packed_swa_cache, page_size=self.page_size
+            )
+            output, _ = kvbit_flash_mla_with_kvcache(
+                **common_kwargs,
+                identity_tail_bypass=True,
+                extra_packed_kcache=extra_packed_rows,
+                **swa_packed_kwargs,
+            )
         return output.squeeze(1)
 
     def forward(

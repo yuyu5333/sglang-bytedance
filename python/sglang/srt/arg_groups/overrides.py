@@ -628,7 +628,7 @@ def _dsa_kv_cache_dtype_default(view: Any) -> dict:
 
     requested_kv_cache_dtype = view.kv_cache_dtype
     kv_cache_dtype = requested_kv_cache_dtype
-    if kv_cache_dtype == "kvbit":
+    if kv_cache_dtype in ("kvbit", "kvbit-mxint4"):
         # KVBit remains a target-worker routing tag. Backend selection follows
         # the same effective dtype that DSV4's auto policy would choose.
         kv_cache_dtype = "fp8_e4m3"
@@ -643,7 +643,7 @@ def _dsa_kv_cache_dtype_default(view: Any) -> dict:
         "bfloat16",
         "fp8_e4m3",
     ], "DeepSeek DSA only supports bf16/bfloat16 or fp8_e4m3 kv_cache_dtype"
-    if requested_kv_cache_dtype == "kvbit":
+    if requested_kv_cache_dtype in ("kvbit", "kvbit-mxint4"):
         return {}
     if kv_cache_dtype != requested_kv_cache_dtype:
         return {"kv_cache_dtype": kv_cache_dtype}
@@ -692,7 +692,9 @@ def _dsa_split_backend_resolution(view: Any) -> dict:
 
     major, _ = torch.cuda.get_device_capability()
     kv_cache_dtype = (
-        "fp8_e4m3" if view.kv_cache_dtype == "kvbit" else view.kv_cache_dtype
+        "fp8_e4m3"
+        if view.kv_cache_dtype in ("kvbit", "kvbit-mxint4")
+        else view.kv_cache_dtype
     )
     user_set_prefill = view.dsa_prefill_backend is not None
     user_set_decode = view.dsa_decode_backend is not None
@@ -924,7 +926,7 @@ def _deepseek_v4_kv_cache_dtype(view: Any) -> dict:
 
     requested_kv_cache_dtype = view.kv_cache_dtype
     kv_cache_dtype = requested_kv_cache_dtype
-    if kv_cache_dtype == "kvbit":
+    if kv_cache_dtype in ("kvbit", "kvbit-mxint4"):
         # Preserve the public target-worker tag; the backing dtype and DSA
         # backend choices follow the model's existing auto policy.
         kv_cache_dtype = "fp8_e4m3"
@@ -937,7 +939,7 @@ def _deepseek_v4_kv_cache_dtype(view: Any) -> dict:
         "fp8_e4m3",
         "bfloat16",
     ], f"{kv_cache_dtype} is not supported for {model_arch}"
-    if requested_kv_cache_dtype == "kvbit":
+    if requested_kv_cache_dtype in ("kvbit", "kvbit-mxint4"):
         return {}
     if kv_cache_dtype != requested_kv_cache_dtype:
         return {"kv_cache_dtype": kv_cache_dtype}

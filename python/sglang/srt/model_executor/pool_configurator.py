@@ -38,9 +38,10 @@ from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
     get_compress_state_write_pad,
 )
 from sglang.srt.mem_cache.kvbit_dsv4 import (
-    DSV4_KVBIT_ROW_BYTES,
     DSV4_NATIVE_SWA_ROW_BYTES,
     dsv4_kvbit_enabled_for_worker,
+    dsv4_kvbit_format,
+    dsv4_kvbit_layout,
     dsv4_kvbit_target_persistent_savings,
     validate_dsv4_bu4_geometry,
 )
@@ -876,6 +877,9 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             is_draft_worker=kvc.is_draft_worker,
         )
         if self.kvbit_packed_swa:
+            kvbit_format = dsv4_kvbit_format(kvc.kv_cache_dtype_str)
+            assert kvbit_format is not None
+            packed_layout = dsv4_kvbit_layout(kvbit_format)
             validate_dsv4_bu4_geometry(
                 self.qk_nope_head_dim,
                 self.qk_rope_head_dim,
@@ -886,6 +890,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
                 num_c4_layers=self.num_layers_ca4,
                 num_c128_layers=self.num_layers_ca128,
                 c4_shrink_factor=self.c4_shrink_factor,
+                row_bytes=packed_layout.row_bytes,
             )
             self.bytes_per_full_token -= target_persistent_savings
             logger.info(
@@ -893,7 +898,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
                 "packed_row=%d, target_layers=%d, c4_layers=%d, "
                 "c128_layers=%d, savings_per_full_token=%.2f, scratch=disabled",
                 DSV4_NATIVE_SWA_ROW_BYTES,
-                DSV4_KVBIT_ROW_BYTES,
+                packed_layout.row_bytes,
                 self.num_layers_total,
                 self.num_layers_ca4,
                 self.num_layers_ca128,

@@ -80,3 +80,48 @@ def kvbit_flash_mla_with_kvcache(
     sched_meta.tile_scheduler_metadata = new_metadata
     sched_meta.num_splits = new_num_splits
     return out, lse
+
+
+def kvbit_mxint4_flash_mla_with_kvcache(
+    *,
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    head_dim_v: int,
+    sched_meta: FlashMLASchedMeta,
+    softmax_scale: float,
+    indices: torch.Tensor,
+    topk_length: Optional[torch.Tensor],
+    attn_sink: Optional[torch.Tensor],
+    packed_kcache: torch.Tensor,
+    extra_k_cache: Optional[torch.Tensor] = None,
+    extra_indices_in_kvcache: Optional[torch.Tensor] = None,
+    extra_topk_length: Optional[torch.Tensor] = None,
+    extra_packed_kcache: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run the fixed 360-byte MXINT4+Hadamard MODEL1/H64 specialization."""
+    if _kvbit_flashmla_import_error is not None:
+        raise _IMPORT_ERROR from _kvbit_flashmla_import_error
+    if indices is None:
+        raise ValueError("KVBit MXINT4 FlashMLA requires sparse decode indices")
+
+    out, lse, new_metadata, new_num_splits = (
+        torch.ops.sgl_kernel.kvbit_mxint4_sparse_decode_fwd.default(
+            q,
+            k_cache,
+            indices,
+            topk_length,
+            attn_sink,
+            sched_meta.tile_scheduler_metadata,
+            sched_meta.num_splits,
+            extra_k_cache,
+            extra_indices_in_kvcache,
+            extra_topk_length,
+            head_dim_v,
+            softmax_scale,
+            packed_kcache,
+            extra_packed_kcache,
+        )
+    )
+    sched_meta.tile_scheduler_metadata = new_metadata
+    sched_meta.num_splits = new_num_splits
+    return out, lse
