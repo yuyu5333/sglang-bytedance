@@ -206,8 +206,10 @@ target_compile_options(kvbit_flashmla_ops PRIVATE
 target_include_directories(kvbit_flashmla_ops PRIVATE
     ${KVBIT_FLASHMLA_ROOT}
     ${repo-flashmla_SOURCE_DIR}/csrc
+    ${repo-flashmla_SOURCE_DIR}/csrc/api
     ${repo-flashmla_SOURCE_DIR}/csrc/kerutils/include
     ${repo-flashmla_SOURCE_DIR}/csrc/sm90
+    ${repo-flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8
     ${repo-flashmla_SOURCE_DIR}/csrc/cutlass/include
     ${repo-flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
     ${FLASHMLA_CCCL_INCLUDE}
