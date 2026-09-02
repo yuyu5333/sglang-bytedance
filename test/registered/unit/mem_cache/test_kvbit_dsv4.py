@@ -481,7 +481,7 @@ class TestDSV4KVBitAttentionMath(CustomTestCase):
                         side_effect=packed_kwargs,
                     ),
                     patch(
-                        "sgl_kernel.flash_mla.flash_mla_with_kvcache",
+                        "sgl_kernel.kvbit_flash_mla.kvbit_flash_mla_with_kvcache",
                         return_value=(expected, torch.zeros(1, 2, 1)),
                     ) as flashmla,
                 ):
@@ -700,7 +700,8 @@ class TestDSV4KVBitPackedCompressor(CustomTestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_flashmla_fused_swa_and_extra_match_cpu_reference(self):
-        from sgl_kernel.flash_mla import FlashMLASchedMeta, flash_mla_with_kvcache
+        from sgl_kernel.flash_mla import FlashMLASchedMeta
+        from sgl_kernel.kvbit_flash_mla import kvbit_flash_mla_with_kvcache
 
         torch.manual_seed(17)
         num_heads = 64
@@ -751,15 +752,12 @@ class TestDSV4KVBitPackedCompressor(CustomTestCase):
                 extra_indices[0, 0, :3] = extra_locs.cuda()
                 lengths = torch.tensor([3], dtype=torch.int32, device="cuda")
 
-                output, _ = flash_mla_with_kvcache(
+                output, _ = kvbit_flash_mla_with_kvcache(
                     q=q.cuda(),
                     k_cache=swa_cache.view(swa_cache.shape[0], 256, 1, 380),
-                    block_table=None,
-                    cache_seqlens=None,
                     head_dim_v=512,
-                    tile_scheduler_metadata=FlashMLASchedMeta(),
+                    sched_meta=FlashMLASchedMeta(),
                     softmax_scale=512**-0.5,
-                    is_fp8_kvcache=True,
                     indices=swa_indices,
                     attn_sink=sink.cuda(),
                     extra_k_cache=extra_cache.view(
@@ -793,6 +791,68 @@ class TestDSV4KVBitPackedCompressor(CustomTestCase):
                     all_keys,
                 )
                 torch.testing.assert_close(output[0], expected, atol=0.04, rtol=0.04)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_flashmla_masks_garbage_indices_past_topk_length(self):
+        from sgl_kernel.flash_mla import FlashMLASchedMeta
+        from sgl_kernel.kvbit_flash_mla import kvbit_flash_mla_with_kvcache
+
+        torch.manual_seed(19)
+        keys = torch.randn(1, 512, dtype=torch.bfloat16) * 0.1
+        q = torch.randn(1, 1, 64, 512, dtype=torch.bfloat16) * 0.1
+        valid_indices = torch.full((1, 1, 64), -1, dtype=torch.int32)
+        valid_indices[0, 0, 0] = 1
+        lengths = torch.tensor([1], dtype=torch.int32)
+        expected_packed = torch.zeros(256, 380, dtype=torch.uint8)
+        expected_packed[1] = encode_dsv4_bu4_reference(keys)[0]
+        expected, _ = dsv4_kvbit_sparse_decode(
+            q=q,
+            packed=expected_packed,
+            indices=valid_indices,
+            lengths=lengths,
+            attn_sink=None,
+            page_size=256,
+            softmax_scale=512**-0.5,
+        )
+
+        pool = DSV4KVBitPackedSWAPool(
+            size=255,
+            page_size=256,
+            dtype=torch.bfloat16,
+            qk_nope_head_dim=448,
+            qk_rope_head_dim=64,
+            layer_num=1,
+            device="cuda",
+            enable_memory_saver=False,
+        )
+        pool.set_key_buffer_fused(
+            0, torch.tensor([1], dtype=torch.int32, device="cuda"), keys.cuda()
+        )
+        packed = pool.get_key_buffer(0)
+        indices = torch.full(
+            (1, 1, 64),
+            torch.iinfo(torch.int32).max,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        indices[0, 0, 0] = 1
+
+        output, _ = kvbit_flash_mla_with_kvcache(
+            q=q.cuda(),
+            k_cache=packed.view(packed.shape[0], 256, 1, 380),
+            head_dim_v=512,
+            sched_meta=FlashMLASchedMeta(),
+            softmax_scale=512**-0.5,
+            indices=indices,
+            topk_length=lengths.cuda(),
+            attn_sink=None,
+            identity_tail_bypass=True,
+            **dsv4_kvbit_flashmla_packed_kwargs(packed, page_size=256),
+        )
+
+        torch.testing.assert_close(
+            output.cpu().float(), expected.float(), atol=0.03, rtol=0.03
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_cuda_fused_write_and_direct_decode_match_cpu_reference(self):

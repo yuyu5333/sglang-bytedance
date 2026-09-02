@@ -1733,19 +1733,14 @@ class DeepseekV4AttnBackend(
         if extra_indices is not None:
             assert extra_indices.shape[-1] % 64 == 0
 
-        from sgl_kernel.flash_mla import flash_mla_with_kvcache
+        from sgl_kernel.kvbit_flash_mla import kvbit_flash_mla_with_kvcache
 
-        output, _ = flash_mla_with_kvcache(
+        output, _ = kvbit_flash_mla_with_kvcache(
             q=q.contiguous(),
             k_cache=swa_shape_carrier,
-            block_table=None,
-            cache_seqlens=None,
             head_dim_v=self.head_dim_v,
-            tile_scheduler_metadata=core_attn_metadata.get_flashmla_metadata(
-                compress_ratio
-            ),
+            sched_meta=core_attn_metadata.get_flashmla_metadata(compress_ratio),
             softmax_scale=self.softmax_scale,
-            is_fp8_kvcache=True,
             indices=swa_indices,
             attn_sink=attn_sink,
             extra_k_cache=extra_shape_carrier,
