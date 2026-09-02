@@ -7,8 +7,10 @@ used before the target worker may allocate packed SWA storage.
 
 from __future__ import annotations
 
+import os
 from contextlib import nullcontext
 from enum import Enum
+from pathlib import Path
 from typing import NamedTuple
 
 import torch
@@ -38,6 +40,58 @@ DSV4_KVBIT_MXINT4_SCALE_BYTES = 8
 DSV4_KVBIT_MXINT4_ROW_BYTES = 360
 DSV4_NATIVE_SWA_ROW_BYTES = 584
 DSV4_KVBIT_HADAMARD_DIM = 256
+
+_DSV4_KV_DUMP_COUNTS: dict[tuple[int, int], int] = {}
+
+
+def _dump_dsv4_kv_sample(
+    *,
+    layer_id: int,
+    loc: torch.Tensor,
+    cache_k: torch.Tensor,
+) -> None:
+    dump_dir = os.environ.get("SGLANG_DSV4_KV_DUMP_DIR")
+    trigger = os.environ.get("SGLANG_DSV4_KV_DUMP_TRIGGER")
+    if not dump_dir or not trigger or not Path(trigger).is_file():
+        return
+
+    selected_layers = {
+        int(item)
+        for item in os.environ.get("SGLANG_DSV4_KV_DUMP_LAYERS", "0,15,30,45,60").split(
+            ","
+        )
+        if item.strip()
+    }
+    if layer_id not in selected_layers:
+        return
+
+    rows = cache_k.detach().reshape(-1, cache_k.shape[-1])
+    if rows.shape[-1] != 512:
+        return
+    key = (os.getpid(), layer_id)
+    dumped = _DSV4_KV_DUMP_COUNTS.get(key, 0)
+    limit = int(os.environ.get("SGLANG_DSV4_KV_DUMP_MAX_TOKENS", "4096"))
+    count = min(rows.shape[0], limit - dumped)
+    if count <= 0:
+        return
+
+    output_dir = Path(dump_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "kv": rows[:count].to(device="cpu", dtype=torch.bfloat16),
+        "loc": loc.detach().reshape(-1)[:count].to(device="cpu"),
+        "layer_id": layer_id,
+        "pid": os.getpid(),
+        "offset": dumped,
+    }
+    output = output_dir / (
+        f"kv_pid{os.getpid()}_layer{layer_id:02d}_offset{dumped:05d}.pt"
+    )
+    temporary = output.with_suffix(".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(output)
+    _DSV4_KV_DUMP_COUNTS[key] = dumped + count
+
 
 _FLASHMLA_BU4_METADATA: dict[tuple[str, int | None], dict[str, torch.Tensor]] = {}
 
@@ -1191,6 +1245,7 @@ class DSV4KVBitPackedSWAPool(KVCache):
         loc: torch.Tensor,
         cache_k: torch.Tensor,
     ) -> None:
+        _dump_dsv4_kv_sample(layer_id=layer_id, loc=loc, cache_k=cache_k)
         writer = (
             write_dsv4_mxint4_packed
             if self.kvbit_format is DSV4KVBitFormat.MXINT4
