@@ -593,8 +593,7 @@ if _HAS_TRITON:
         prefix = tl.where((offs & 64) == 0, prefix + partner, partner - prefix)
         partner = tl.gather(prefix, offs ^ 128, axis=0)
         prefix = tl.where((offs & 128) == 0, prefix + partner, partner - prefix)
-        grouped = tl.reshape(values, [8, 64])
-
+        values = tl.where(offs < 256, prefix * 0.0625, values)
         grouped = tl.reshape(values, [8, 64])
         max_abs = tl.max(tl.abs(grouped), axis=1)
         exponent = tl.where(
