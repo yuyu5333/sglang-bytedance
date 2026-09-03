@@ -217,4 +217,13 @@ target_include_directories(kvbit_flashmla_ops PRIVATE
     ${FLASHMLA_CCCL_INCLUDE}
 )
 target_link_libraries(kvbit_flashmla_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
-install(TARGETS kvbit_flashmla_ops LIBRARY DESTINATION "sgl_kernel")
+install(
+    TARGETS kvbit_flashmla_ops
+    LIBRARY DESTINATION "sgl_kernel"
+    COMPONENT kvbit_flashmla
+)
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/../python/sgl_kernel/kvbit_flash_mla.py"
+    DESTINATION "sgl_kernel"
+    COMPONENT kvbit_flashmla
+)
