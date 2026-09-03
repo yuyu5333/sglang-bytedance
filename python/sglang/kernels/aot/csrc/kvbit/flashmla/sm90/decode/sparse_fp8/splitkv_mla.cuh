@@ -383,7 +383,7 @@ __forceinline__ __device__ void scale_softmax(
 }
 
 template <ModelType MODEL_TYPE, int NUM_HEADS>
-template <typename TMAParams, bool PACKED_BU4, bool PACKED_MXINT4>
+template <typename TMAParams, bool PACKED_BU4, bool PACKED_MXINT4, bool PACKED_SINT4_FP16STEP>
 __device__ void
 KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& params, const TMAParams& tma_params) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 900)) || (defined(__CLION_IDE__) || defined(__VSCODE_IDE__))
@@ -894,7 +894,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
         // they share SWA's calib (R/scale/zero/bit_uniform/row layout),
         // so only the packed byte buffer + its per-page stride switch.
         // [DEBUG L2] packed real path re-enabled, setmaxnreg still off
-        const bool use_packed = PACKED_BU4 || PACKED_MXINT4 ||
+        const bool use_packed = PACKED_BU4 || PACKED_MXINT4 || PACKED_SINT4_FP16STEP ||
                                 (!IS_EXTRA_BLOCK && params.packed_kcache_ptr != nullptr) ||
                                 (IS_EXTRA_BLOCK && params.extra_packed_kcache_ptr != nullptr);
 
@@ -1158,6 +1158,13 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                     // One UE8M0 scale byte per group64. Zero is the
                     // canonical all-zero group; 0xff is writer-reserved.
                     reinterpret_cast<uint8_t*>(s_hdr)[idx] = pk_row != nullptr ? pk_row[224 + g] : 0;
+                  } else if constexpr (PACKED_SINT4_FP16STEP) {
+                    // One exact FP16 absmax/7 step per group64. Keep
+                    // s_hdr's low half zero so the common signed-int4
+                    // Hadamard path can read the step from the high half.
+                    const __half step =
+                        pk_row != nullptr ? reinterpret_cast<const __half*>(pk_row + 224)[g] : __float2half(0.0f);
+                    s_hdr[idx] = __half2(__float2half(0.0f), step);
                   } else {
                     __half2 hdr = __half2(__float2half(0.0f), __float2half(0.0f));
                     if (pk_row != nullptr) {
@@ -1445,7 +1452,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                   CUTE_UNROLL
                   for (int j = 0; j < 8; ++j) {
                     const int nibble = static_cast<int>((word >> (j * 4)) & 0xFu);
-                    const int code = PACKED_MXINT4 ? ((nibble ^ 8) - 8) : nibble;
+                    const int code = (PACKED_MXINT4 || PACKED_SINT4_FP16STEP) ? ((nibble ^ 8) - 8) : nibble;
                     const float x_val = pk_row != nullptr ? fmaf(static_cast<float>(code), fstep, fmin) : 0.0f;
                     values[j] = static_cast<float>(bf16(x_val));
                   }
@@ -1506,7 +1513,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                     CUTE_UNROLL
                     for (int j = 0; j < 8; ++j) {
                       const int nibble = static_cast<int>((tail_word >> (j * 4)) & 0xFu);
-                      const int code = PACKED_MXINT4 ? ((nibble ^ 8) - 8) : nibble;
+                      const int code = (PACKED_MXINT4 || PACKED_SINT4_FP16STEP) ? ((nibble ^ 8) - 8) : nibble;
                       const float x_val =
                           pk_row != nullptr ? fmaf(static_cast<float>(code), tail_step, tail_min) : 0.0f;
                       tail_elem[j] = bf16(x_val);
@@ -1718,7 +1725,8 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                   cutlass::arch::fence_view_async_shared();
                   NamedBarrier::sync(128, NamedBarriers::packed_kv_producer_sync);
                 }
-              } else if (PACKED_BU4 || PACKED_MXINT4 || (params.identity_tail_bypass && bu == 4)) {
+              } else if (
+                  PACKED_BU4 || PACKED_MXINT4 || PACKED_SINT4_FP16STEP || (params.identity_tail_bypass && bu == 4)) {
                 run_warp_hadamard256();
               } else {
                 CUTE_NO_UNROLL
@@ -2276,15 +2284,21 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
 #endif
 }
 
-template <typename Kernel, typename TMAParams, bool PACKED_BU4 = false, bool PACKED_MXINT4 = false>
+template <
+    typename Kernel,
+    typename TMAParams,
+    bool PACKED_BU4 = false,
+    bool PACKED_MXINT4 = false,
+    bool PACKED_SINT4_FP16STEP = false>
 __global__ void __launch_bounds__(Kernel::NUM_THREADS, 1, Kernel::CLUSTER_SIZE) flash_fwd_splitkv_mla_fp8_sparse_kernel(
     __grid_constant__ const SparseAttnDecodeParams params, __grid_constant__ const TMAParams tma_params) {
-  Kernel::template devfunc<TMAParams, PACKED_BU4, PACKED_MXINT4>(params, tma_params);
+  Kernel::template devfunc<TMAParams, PACKED_BU4, PACKED_MXINT4, PACKED_SINT4_FP16STEP>(params, tma_params);
 }
 
 template <ModelType MODEL_TYPE, int NUM_HEADS>
-template <bool FORCE_MXINT4>
+template <bool FORCE_MXINT4, bool FORCE_SINT4_FP16STEP>
 void KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_impl(const SparseAttnDecodeParams& params) {
+  static_assert(!(FORCE_MXINT4 && FORCE_SINT4_FP16STEP));
   KU_ASSERT(params.h_kv == 1);
   KU_ASSERT(params.topk % TOPK_BLOCK_SIZE == 0);
   KU_ASSERT(params.d_qk == HEAD_DIM_K);
@@ -2368,6 +2382,13 @@ void KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_impl(const SparseAttnDecodeParam
     mla_kernel = &flash_fwd_splitkv_mla_fp8_sparse_kernel<
         KernelTemplate<MODEL_TYPE, NUM_HEADS>,
         decltype(tma_params),
+        false,
+        true>;
+  } else if constexpr (FORCE_SINT4_FP16STEP) {
+    mla_kernel = &flash_fwd_splitkv_mla_fp8_sparse_kernel<
+        KernelTemplate<MODEL_TYPE, NUM_HEADS>,
+        decltype(tma_params),
+        false,
         false,
         true>;
   } else if (packed_bu4) {
@@ -2475,12 +2496,17 @@ void KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_impl(const SparseAttnDecodeParam
 
 template <ModelType MODEL_TYPE, int NUM_HEADS>
 void KernelTemplate<MODEL_TYPE, NUM_HEADS>::run(const SparseAttnDecodeParams& params) {
-  run_impl<false>(params);
+  run_impl<false, false>(params);
 }
 
 template <ModelType MODEL_TYPE, int NUM_HEADS>
 void KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_mxint4(const SparseAttnDecodeParams& params) {
-  run_impl<true>(params);
+  run_impl<true, false>(params);
+}
+
+template <ModelType MODEL_TYPE, int NUM_HEADS>
+void KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_sint4_fp16step(const SparseAttnDecodeParams& params) {
+  run_impl<false, true>(params);
 }
 
 template <ModelType MODEL_TYPE, int NUM_HEADS>
@@ -2491,6 +2517,11 @@ void run_flash_splitkv_mla_fp8_sparse_kernel(const SparseAttnDecodeParams& param
 template <ModelType MODEL_TYPE, int NUM_HEADS>
 void run_flash_splitkv_mla_mxint4_sparse_kernel(const SparseAttnDecodeParams& params) {
   KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_mxint4(params);
+}
+
+template <ModelType MODEL_TYPE, int NUM_HEADS>
+void run_flash_splitkv_mla_sint4_fp16step_sparse_kernel(const SparseAttnDecodeParams& params) {
+  KernelTemplate<MODEL_TYPE, NUM_HEADS>::run_sint4_fp16step(params);
 }
 
 }  // namespace sm90::decode::sparse_fp8

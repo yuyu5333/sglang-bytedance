@@ -189,6 +189,7 @@ set(KVBIT_FLASHMLA_SOURCES
     ${repo-flashmla_SOURCE_DIR}/csrc/smxx/decode/combine/combine.cu
     ${KVBIT_FLASHMLA_ROOT}/sm90/decode/sparse_fp8/instantiations/model1_persistent_h64.cu
     ${KVBIT_FLASHMLA_ROOT}/sm90/decode/sparse_fp8/instantiations/model1_mxint4_h64.cu
+    ${KVBIT_FLASHMLA_ROOT}/sm90/decode/sparse_fp8/instantiations/model1_sint4_fp16step_h64.cu
 )
 
 Python_add_library(

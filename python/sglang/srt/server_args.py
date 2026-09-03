@@ -601,8 +601,10 @@ class ServerArgs:
                 "selects the MX-style block-size-16 FP4 E2M1 KV cache "
                 'recipe. Both require CUDA 12.8+ and PyTorch 2.8.0+. "kvbit" '
                 "enables the target-only DeepSeek V4 380-byte BU4 cache; "
-                '"kvbit-mxint4" selects its 360-byte MXINT4 cache. Both require '
-                "CUDA SM90 and resolve their backing dtype as auto."
+                '"kvbit-mxint4" selects its 360-byte MXINT4 cache; '
+                '"kvbit-sint4-fp16step" selects the 368-byte signed INT4 cache '
+                "with seven FP16 steps. All require CUDA SM90 and resolve their "
+                "backing dtype as auto."
             ),
             choices=[
                 "auto",
@@ -616,6 +618,7 @@ class ServerArgs:
                 "fp4_e2m1",
                 "kvbit",
                 "kvbit-mxint4",
+                "kvbit-sint4-fp16step",
             ],
             resolvable=True,
         ),

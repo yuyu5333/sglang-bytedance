@@ -109,7 +109,7 @@ class TestPrepareServerArgs(CustomTestCase):
         parser = server_args_module.argparse.ArgumentParser()
         ServerArgs.add_cli_args(parser)
 
-        for dtype in ("kvbit", "kvbit-mxint4"):
+        for dtype in ("kvbit", "kvbit-mxint4", "kvbit-sint4-fp16step"):
             with self.subTest(dtype=dtype):
                 args = parser.parse_args(
                     ["--model-path", "dummy-model", "--kv-cache-dtype", dtype]
@@ -171,7 +171,7 @@ class TestPrepareServerArgs(CustomTestCase):
             hf_config=SimpleNamespace(architectures=["DeepseekV4ForCausalLM"])
         )
         platform = SimpleNamespace(is_cuda=True, is_sm90=True)
-        for dtype in ("kvbit", "kvbit-mxint4"):
+        for dtype in ("kvbit", "kvbit-mxint4", "kvbit-sint4-fp16step"):
             with (
                 self.subTest(dtype=dtype),
                 patch(

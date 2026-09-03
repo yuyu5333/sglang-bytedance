@@ -1056,6 +1056,19 @@ class TestDSV4KVBitBudget(CustomTestCase):
         self.assertEqual(configurator.bytes_per_full_token, expected)
         self.assertTrue(configurator.kvbit_packed_swa)
 
+    def test_sint4_fp16step_target_budget_uses_368_byte_rows(self):
+        configurator = self._configurator()
+        configurator._apply_kvbit_target_swa_budget(
+            SimpleNamespace(
+                is_draft_worker=False,
+                kv_cache_dtype_str="kvbit-sint4-fp16step",
+            )
+        )
+
+        expected = 100_000.0 - (584 - 368) * (0.5 * 60 + 15 / 4 + 45 / 128)
+        self.assertEqual(configurator.bytes_per_full_token, expected)
+        self.assertTrue(configurator.kvbit_packed_swa)
+
     def test_draft_and_disabled_budgets_remain_native(self):
         for kv_cache_dtype, is_draft_worker in (("auto", False), ("kvbit", True)):
             with self.subTest(

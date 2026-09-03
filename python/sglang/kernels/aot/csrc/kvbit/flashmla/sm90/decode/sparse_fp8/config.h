@@ -262,14 +262,15 @@ class KernelTemplate {
     }
   }
 
-  template <typename TMAParams, bool PACKED_BU4 = false, bool PACKED_MXINT4 = false>
+  template <typename TMAParams, bool PACKED_BU4 = false, bool PACKED_MXINT4 = false, bool PACKED_SINT4_FP16STEP = false>
   static __device__ __forceinline__ void devfunc(const SparseAttnDecodeParams& params, const TMAParams& tma_params);
 
-  template <bool FORCE_MXINT4>
+  template <bool FORCE_MXINT4, bool FORCE_SINT4_FP16STEP>
   static void run_impl(const SparseAttnDecodeParams& params);
 
   static void run(const SparseAttnDecodeParams& params);
   static void run_mxint4(const SparseAttnDecodeParams& params);
+  static void run_sint4_fp16step(const SparseAttnDecodeParams& params);
 };
 
 }  // namespace sm90::decode::sparse_fp8

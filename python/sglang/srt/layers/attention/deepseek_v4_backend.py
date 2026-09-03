@@ -1753,7 +1753,21 @@ class DeepseekV4AttnBackend(
             "topk_length": swa_lengths,
             "extra_topk_length": extra_lengths,
         }
-        if kvbit_format is DSV4KVBitFormat.MXINT4:
+        if kvbit_format is DSV4KVBitFormat.SINT4_FP16STEP:
+            from sgl_kernel.kvbit_flash_mla import (
+                kvbit_sint4_fp16step_flash_mla_with_kvcache,
+            )
+
+            output, _ = kvbit_sint4_fp16step_flash_mla_with_kvcache(
+                **common_kwargs,
+                packed_kcache=packed_swa_cache.view(-1, layout.row_bytes),
+                extra_packed_kcache=(
+                    None
+                    if extra_shape_carrier is None
+                    else extra_shape_carrier.view(-1, layout.row_bytes)
+                ),
+            )
+        elif kvbit_format is DSV4KVBitFormat.MXINT4:
             from sgl_kernel.kvbit_flash_mla import (
                 kvbit_mxint4_flash_mla_with_kvcache,
             )

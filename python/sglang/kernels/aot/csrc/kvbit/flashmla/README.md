@@ -24,8 +24,18 @@ The independent `kvbit_mxint4_sparse_decode_fwd` specialization consumes a
 - 1 byte: zero padding
 - 128 bytes: 64 BF16 RoPE values
 
-Both specializations use MODEL1/H64 and restore the NoPE key with normalized
+The independent `kvbit_sint4_fp16step_sparse_decode_fwd` specialization
+consumes a 368-byte row:
+
+- 224 bytes: 448 signed two's-complement int4 values, even dimension in the
+  low nibble
+- 14 bytes: seven FP16 `absmax / 7` steps
+- 2 bytes: zero padding
+- 128 bytes: 64 BF16 RoPE values
+
+All specializations use MODEL1/H64 and restore the NoPE key with normalized
 H256 on dimensions `[0, 256)` plus identity on `[256, 448)`. SWA and optional
-extra KV use the same row format and scale contract. MXINT4 has its own Torch
-op and Python wrapper, `kvbit_mxint4_flash_mla_with_kvcache`; the official
-FlashMLA ABI and the existing fixed-BU4 ABI remain unchanged.
+extra KV use the same row format and scale contract. MXINT4 and SINT4
+FP16-step each have an independent Torch op, Python wrapper, and compile-time
+kernel specialization; the official FlashMLA ABI and the existing fixed-BU4
+and MXINT4 ABIs remain unchanged.

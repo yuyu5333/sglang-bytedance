@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 def handle_kvbit_kv_cache_compatibility(server_args: Any) -> None:
     """Validate the narrow hardware and model contract of the KVBit dtype."""
     cfg = resolving_view(server_args)
-    if cfg.kv_cache_dtype not in ("kvbit", "kvbit-mxint4"):
+    if cfg.kv_cache_dtype not in (
+        "kvbit",
+        "kvbit-mxint4",
+        "kvbit-sint4-fp16step",
+    ):
         return
 
     dtype = cfg.kv_cache_dtype
