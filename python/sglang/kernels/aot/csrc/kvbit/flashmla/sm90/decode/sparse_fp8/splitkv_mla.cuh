@@ -487,7 +487,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
   };
 
   if (warpgroup_idx == 0) {
-    cutlass::arch::warpgroup_reg_alloc<192>();
+    cutlass::arch::warpgroup_reg_alloc<184>();
 
     TiledMMA tiled_mma_QK = TiledMMA_QK{};
     ThrMMA thr_mma_QK = tiled_mma_QK.get_slice(idx_in_warpgroup);
@@ -714,7 +714,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
       sync_all_threads_in_cluster();
     }
   } else if (warpgroup_idx == 1) {
-    cutlass::arch::warpgroup_reg_dealloc<160>();
+    cutlass::arch::warpgroup_reg_dealloc<152>();
 
     TiledMMA tiled_mma_PV = TiledMMA_PV_RemoteP{};
     ThrMMA thr_mma_PV = tiled_mma_PV.get_slice(idx_in_warpgroup);
