@@ -826,7 +826,9 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
     }
   } else {
     // Producer warpgroup
-    cutlass::arch::warpgroup_reg_dealloc<152>();
+    // The production PACKED_INT4 path uses warp-local H256 reconstruction
+    // and no longer keeps the legacy RC_GROUP=4 WGMMA accumulators live.
+    cutlass::arch::warpgroup_reg_dealloc<128>();
 
     static_assert(CLUSTER_SIZE == 1 || CLUSTER_SIZE == 2);
     static constexpr int NUM_TOKENS_PER_THREAD = CLUSTER_SIZE == 1 ? 2 : 1;
@@ -928,7 +930,11 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
           const int64_t pk_block_stride =
               IS_EXTRA_BLOCK ? params.extra_packed_kv_block_stride : params.packed_kv_block_stride;
 
-          bf16* staging = plan.packed_nope_staging;
+          // PACKED_INT4 always executes run_warp_hadamard256(), which writes
+          // directly to sK. Reuse the current sK backing for the discarded
+          // generic R@X branch so its two legacy 8 KiB scratch tiles do not
+          // inflate SharedMemoryPlan.
+          bf16* staging = plan.u.k[buf_idx].data();
 
           // Wait for the nope buffer to be available
 #ifdef FMLA_CLK_PROFILE
@@ -1029,10 +1035,9 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
           // R@X FLOPs stay identical but come from tensor cores
           //   (wgmma m64n64k16) instead of 128 lanes x 224 FMA.
           //
-          // Preconditions: sX_tile aliases packed_nope_staging (8KB
-          // reused as wgmma A during issue, then overwritten with
-          // bf16(rC) before staging->sK copy). sR_tile is a
-          // dedicated 8KB smem region (packed_r_tile).
+          // The generic R@X path below is compile-time discarded for the
+          // dedicated PACKED_INT4 specialization. Its tensor declarations
+          // alias the current sK buffer instead of reserving dead scratch.
           // ==========================================================
           // Bit-uniform parameters hoisted here so they are in scope
           // for BOTH the wgmma_uniform_supported path below AND the
@@ -1050,8 +1055,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
             if constexpr (bu > 0) {
               // [step3k smem-fit revert] Producer R@X wgmma loop,
               //   single-buffer, dim-block-by-1. Uses only
-              //   packed_nope_staging (aliased sX + staging) and
-              //   packed_r_tile (sR) -- NO alt tiles.
+              //   legacy sX/staging and sR tiles.
               //
               // Why: packed_x_alt_tile + packed_r_alt_tile (+16 KB)
               //   were REMOVED from SharedMemoryPlan to fit under
@@ -1073,12 +1077,10 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
               //   tensor shape, same staging->sK copy layout. Only
               //   the in-loop schedule changes (1-at-a-time instead
               //   of 2-at-a-time, no fill-wgmma overlap).
-              Tensor sX_tile =
-                  make_tensor(make_smem_ptr(reinterpret_cast<bf16*>(plan.packed_nope_staging)), SmemLayoutXTile{});
-              Tensor sR_tile = make_tensor(make_smem_ptr(plan.packed_r_tile.data()), SmemLayoutKTile{});
-              Tensor sStaging = make_tensor(
-                  make_smem_ptr(reinterpret_cast<bf16*>(plan.packed_nope_staging)),
-                  Layout<Shape<Int<64>, Int<64>>, Stride<Int<64>, _1>>{});
+              Tensor sX_tile = make_tensor(make_smem_ptr(staging), SmemLayoutXTile{});
+              Tensor sR_tile = make_tensor(make_smem_ptr(staging), SmemLayoutKTile{});
+              Tensor sStaging =
+                  make_tensor(make_smem_ptr(staging), Layout<Shape<Int<64>, Int<64>>, Stride<Int<64>, _1>>{});
 
               TiledMMA tiled_mma_wg = TiledMMA_QK{};
               ThrMMA thr_mma_wg = tiled_mma_wg.get_slice(idx_in_warpgroup);
@@ -1560,10 +1562,8 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                   const int abs_token = idx_in_cluster * (TOPK_BLOCK_SIZE / 2) + my_token_idx;
                   const int dim_in_block = (lane_idx / 8) * 16;
 
-                  bf16x8 val_lo =
-                      *reinterpret_cast<bf16x8*>(plan.packed_nope_staging + abs_token * 64 + dim_in_block + 0);
-                  bf16x8 val_hi =
-                      *reinterpret_cast<bf16x8*>(plan.packed_nope_staging + abs_token * 64 + dim_in_block + 8);
+                  bf16x8 val_lo = *reinterpret_cast<bf16x8*>(staging + abs_token * 64 + dim_in_block + 0);
+                  bf16x8 val_hi = *reinterpret_cast<bf16x8*>(staging + abs_token * 64 + dim_in_block + 8);
 
                   bf16* sK_nope_base =
                       plan.u.k[buf_idx].data() + abs_token * 8 + ((lane_idx / 8) * 16) * TOPK_BLOCK_SIZE;
@@ -1585,10 +1585,8 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                   int my_token_idx = my_token_idx_base + round * NUM_TOKENS_PER_ROUND;
                   const int abs_token = idx_in_cluster * (TOPK_BLOCK_SIZE / 2) + my_token_idx;
                   const int dim_in_block = (lane_idx / 8) * 16;
-                  bf16x8 val_lo =
-                      *reinterpret_cast<bf16x8*>(plan.packed_nope_staging + abs_token * 64 + dim_in_block + 0);
-                  bf16x8 val_hi =
-                      *reinterpret_cast<bf16x8*>(plan.packed_nope_staging + abs_token * 64 + dim_in_block + 8);
+                  bf16x8 val_lo = *reinterpret_cast<bf16x8*>(staging + abs_token * 64 + dim_in_block + 0);
+                  bf16x8 val_hi = *reinterpret_cast<bf16x8*>(staging + abs_token * 64 + dim_in_block + 8);
                   bf16* sK_nope_base =
                       plan.u.k[buf_idx].data() + abs_token * 8 + ((lane_idx / 8) * 16) * TOPK_BLOCK_SIZE;
                   *(__int128_t*)(sK_nope_base + (dim_base + 0) * TOPK_BLOCK_SIZE) = *(__int128_t*)&val_lo;
@@ -1614,7 +1612,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
               //   feed all 3 dim_blocks (each needs its own sR + gemm).
               //   fill count drops 49 -> ceil(7/3)*7 = 21 (3x instead
               //   of 7x). 3 rC = 96 regs/thread, fits the producer
-              //   warpgroup_reg_dealloc<152> budget (7 rC = 224 would
+              //   historical producer register budget (7 rC = 224 would
               //   not). A full kt-outer (all 7 rC) is register-
               //   infeasible; smem-caching 7 X tiles (56 KB) also
               //   overflows the ~7 KB dyn-smem headroom.
@@ -1629,7 +1627,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
               // [step3n] RC_GROUP raised 3 -> 4: fill_sX redundancy
               //   3x (21 fills) -> 2x (ceil(7/4)=2 groups x 7 kt = 14
               //   fills). 4 rC accumulators = 4*32 = 128 regs/thread,
-              //   still under the producer warpgroup_reg_dealloc<152>
+              //   still under the historical producer register budget
               //   budget (5 would be 160 -> overflow). If the extra
               //   accumulator spills, the end-to-end cgon tps will
               //   regress vs step3m (259 tps) and we revert to 3.
