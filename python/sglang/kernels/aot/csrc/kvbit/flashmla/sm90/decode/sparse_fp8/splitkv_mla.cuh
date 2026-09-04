@@ -928,10 +928,9 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
           const int64_t pk_block_stride =
               IS_EXTRA_BLOCK ? params.extra_packed_kv_block_stride : params.packed_kv_block_stride;
 
-          // PACKED_INT4 always executes run_warp_hadamard256(), which writes
-          // directly to sK. Reuse the current sK backing for the discarded
-          // generic R@X branch so its two legacy 8 KiB scratch tiles do not
-          // inflate SharedMemoryPlan.
+          // PACKED_INT4 decodes directly to sK. Reuse the current sK backing
+          // for the discarded generic R@X branch so its two legacy 8 KiB
+          // scratch tiles do not inflate SharedMemoryPlan.
           bf16* staging = plan.u.k[buf_idx].data();
 
           // Wait for the nope buffer to be available
@@ -1042,10 +1041,10 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
           // legacy fallback block that follows.
 #ifndef FMLA_PRODUCER_NULL_PROBE
           constexpr int bu = 4;
-          constexpr int u_groups = 7;
+          constexpr int u_groups = 14;
           constexpr int u_hdr_bytes = 16;
-          constexpr int u_group_size = 64;
-          constexpr float u_step_denom = 15.0f;
+          constexpr int u_group_size = 32;
+          constexpr float u_step_denom = 7.0f;
 
           constexpr bool wgmma_uniform_supported = (MODEL_TYPE == ModelType::MODEL1) && (CLUSTER_SIZE == 1);
 
@@ -1143,21 +1142,19 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
               //   Invalid tokens (s_pk_row[t]==nullptr) store {0,0};
               //   the loop still gates on s_pk_row[t].
               __shared__ __half2 s_hdr[(HEAD_DIM_NOPE / 64) * TOPK_BLOCK_SIZE];
-              {
-                const int n_groups = k_tiles;  // == HEAD_DIM_NOPE/64
+              if constexpr (!PACKED_INT4) {
+                const int n_groups = k_tiles;
                 const float inv_denom = 1.0f / u_step_denom;
                 for (int idx = idx_in_warpgroup; idx < n_groups * TOPK_BLOCK_SIZE; idx += 128) {
                   const int t = idx & (TOPK_BLOCK_SIZE - 1);
                   const int g = idx / TOPK_BLOCK_SIZE;
                   const uint8_t* pk_row = s_pk_row[t];
-                  // One exact FP16 absmax/7 step per group64. Keep the low
-                  // half zero so the signed-INT4 path reads the high half.
                   const __half step =
                       pk_row != nullptr ? reinterpret_cast<const __half*>(pk_row + 224)[g] : __float2half(0.0f);
                   s_hdr[idx] = __half2(__float2half(0.0f), step);
                 }
+                NamedBarrier::sync(128, NamedBarriers::packed_kv_producer_sync);
               }
-              NamedBarrier::sync(128, NamedBarriers::packed_kv_producer_sync);
 
               // [step3o] Loop-invariant hoist. For a given thread the
               //   32 elements share the SAME d = lin & 63 (lin =
@@ -1397,7 +1394,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                 }
               };
 
-              auto run_warp_hadamard256 = [&]() {
+              auto run_warp_int4_g32_decode = [&]() {
                 const int warp = idx_in_warpgroup >> 5;
                 const int lane = idx_in_warpgroup & 31;
                 CUTE_UNROLL
@@ -1408,49 +1405,19 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                   if (pk_row != nullptr) {
                     word = __ldg(reinterpret_cast<const uint32_t*>(pk_row + lane * 4));
                   }
-                  const int group = lane >> 3;
-                  float fmin = 0.0f;
-                  float fstep = 0.0f;
-                  const __half2 hdr = s_hdr[group * TOPK_BLOCK_SIZE + t];
-                  fmin = __half2float(__low2half(hdr));
-                  fstep = __half2float(__high2half(hdr));
-
-                  float values[8];
-                  CUTE_UNROLL
-                  for (int j = 0; j < 8; ++j) {
-                    const int nibble = static_cast<int>((word >> (j * 4)) & 0xFu);
-                    const int code = (nibble ^ 8) - 8;
-                    const float x_val = pk_row != nullptr ? fmaf(static_cast<float>(code), fstep, fmin) : 0.0f;
-                    values[j] = static_cast<float>(bf16(x_val));
-                  }
-
-                  CUTE_UNROLL
-                  for (int span = 1; span < 8; span <<= 1) {
-                    CUTE_UNROLL
-                    for (int base = 0; base < 8; base += span << 1) {
-                      CUTE_UNROLL
-                      for (int j = 0; j < span; ++j) {
-                        const float a = values[base + j];
-                        const float b = values[base + span + j];
-                        values[base + j] = a + b;
-                        values[base + span + j] = a - b;
-                      }
-                    }
-                  }
-                  CUTE_UNROLL
-                  for (int mask = 1; mask < 32; mask <<= 1) {
-                    CUTE_UNROLL
-                    for (int j = 0; j < 8; ++j) {
-                      const float other = __shfl_xor_sync(0xffffffffu, values[j], mask);
-                      values[j] = (lane & mask) ? other - values[j] : values[j] + other;
-                    }
+                  const int group = lane >> 2;
+                  float scale = 0.0f;
+                  if (pk_row != nullptr) {
+                    scale = static_cast<float>(reinterpret_cast<const __nv_fp8_e4m3*>(pk_row + 224)[group]);
                   }
 
                   bf16x8 prefix_out;
                   bf16* prefix_elem = reinterpret_cast<bf16*>(&prefix_out);
                   CUTE_UNROLL
                   for (int j = 0; j < 8; ++j) {
-                    prefix_elem[j] = bf16(values[j] * 0.0625f);
+                    const int nibble = static_cast<int>((word >> (j * 4)) & 0xFu);
+                    const int code = (nibble ^ 8) - 8;
+                    prefix_elem[j] = bf16(pk_row != nullptr ? static_cast<float>(code) * scale : 0.0f);
                   }
                   const int prefix_dim = lane * 8;
                   const int prefix_group = prefix_dim >> 4;
@@ -1464,20 +1431,18 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                     if (pk_row != nullptr) {
                       tail_word = __ldg(reinterpret_cast<const uint32_t*>(pk_row + (tail_dim >> 1)));
                     }
-                    const int tail_hdr_group = tail_dim >> 6;
-                    float tail_min = 0.0f;
-                    float tail_step = 0.0f;
-                    const __half2 tail_hdr = s_hdr[tail_hdr_group * TOPK_BLOCK_SIZE + t];
-                    tail_min = __half2float(__low2half(tail_hdr));
-                    tail_step = __half2float(__high2half(tail_hdr));
+                    const int tail_hdr_group = tail_dim >> 5;
+                    float tail_scale = 0.0f;
+                    if (pk_row != nullptr) {
+                      tail_scale =
+                          static_cast<float>(reinterpret_cast<const __nv_fp8_e4m3*>(pk_row + 224)[tail_hdr_group]);
+                    }
                     bf16* tail_elem = reinterpret_cast<bf16*>(&tail_out);
                     CUTE_UNROLL
                     for (int j = 0; j < 8; ++j) {
                       const int nibble = static_cast<int>((tail_word >> (j * 4)) & 0xFu);
                       const int code = (nibble ^ 8) - 8;
-                      const float x_val =
-                          pk_row != nullptr ? fmaf(static_cast<float>(code), tail_step, tail_min) : 0.0f;
-                      tail_elem[j] = bf16(x_val);
+                      tail_elem[j] = bf16(pk_row != nullptr ? static_cast<float>(code) * tail_scale : 0.0f);
                     }
                   }
 
@@ -1675,7 +1640,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
               }
 #else
               if constexpr (PACKED_INT4) {
-                run_warp_hadamard256();
+                run_warp_int4_g32_decode();
               } else {
                 CUTE_NO_UNROLL
                 for (int grp0 = 0; grp0 < DIM_BLOCKS; grp0 += RC_GROUP) {

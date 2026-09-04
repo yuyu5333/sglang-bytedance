@@ -27,7 +27,7 @@ from sglang.srt.mem_cache.memory_pool import KVCache
 
 DSV4_KVBIT_NOPE_DIM = 448
 DSV4_KVBIT_ROPE_DIM = 64
-DSV4_KVBIT_GROUP_SIZE = 64
+DSV4_KVBIT_GROUP_SIZE = 32
 DSV4_KVBIT_BITS = 4
 DSV4_KVBIT_CODE_BYTES = 224
 DSV4_KVBIT_ROPE_BYTES = 128
@@ -195,7 +195,7 @@ def restore_dsv4_h256(x: torch.Tensor) -> torch.Tensor:
 
 
 def encode_dsv4_int4_reference(kv: torch.Tensor) -> torch.Tensor:
-    """Encode signed INT4 DSV4 rows with one FP16 step per 64 NoPE values."""
+    """Encode signed INT4 DSV4 rows with one E4M3 scale per 32 NoPE values."""
     _require_cpu_tensor(kv, name="kv")
     layout = DSV4_INT4_LAYOUT
     expected_dim = layout.nope_dim + layout.rope_dim
@@ -205,11 +205,12 @@ def encode_dsv4_int4_reference(kv: torch.Tensor) -> torch.Tensor:
         raise TypeError(f"kv must be floating point, got {kv.dtype}")
 
     leading_shape = kv.shape[:-1]
-    rows = fold_dsv4_h256(kv.reshape(-1, expected_dim))
-    nope = rows[:, : layout.nope_dim].float().reshape(-1, 7, 64)
+    rows = kv.reshape(-1, expected_dim)
+    num_groups = layout.nope_dim // layout.group_size
+    nope = rows[:, : layout.nope_dim].float().reshape(-1, num_groups, layout.group_size)
     max_abs = nope.abs().amax(dim=-1)
-    stored_step = (max_abs / 7.0).clamp_max(torch.finfo(torch.float16).max)
-    stored_step = stored_step.to(torch.float16)
+    stored_step = (max_abs / 7.0).clamp_max(torch.finfo(torch.float8_e4m3fn).max)
+    stored_step = stored_step.to(torch.float8_e4m3fn)
     quant_step = stored_step.float()
     has_step = quant_step > 0
     safe_step = torch.where(has_step, quant_step, torch.ones_like(quant_step))
@@ -222,7 +223,9 @@ def encode_dsv4_int4_reference(kv: torch.Tensor) -> torch.Tensor:
     ).reshape(-1, layout.code_bytes)
 
     headers = torch.zeros((rows.shape[0], layout.header_bytes), dtype=torch.uint8)
-    headers[:, :14] = stored_step.contiguous().view(torch.uint8).reshape(-1, 14)
+    headers[:, :num_groups] = (
+        stored_step.contiguous().view(torch.uint8).reshape(-1, num_groups)
+    )
     rope = (
         rows[:, layout.nope_dim :]
         .to(torch.bfloat16)
@@ -251,14 +254,18 @@ def _decode_dsv4_int4_stored_domain(
     packed_codes = rows[:, : layout.code_bytes]
     unsigned_codes = torch.stack(
         (packed_codes & 0x0F, packed_codes >> 4), dim=-1
-    ).reshape(-1, 7, 64)
+    ).reshape(-1, layout.nope_dim // layout.group_size, layout.group_size)
     codes = unsigned_codes.to(torch.int8)
     codes = torch.where(codes >= 8, codes - 16, codes).float()
     steps = (
-        rows[:, layout.header_offset : layout.header_offset + 14]
+        rows[
+            :,
+            layout.header_offset : layout.header_offset
+            + layout.nope_dim // layout.group_size,
+        ]
         .contiguous()
-        .view(torch.float16)
-        .reshape(-1, 7)
+        .view(torch.float8_e4m3fn)
+        .reshape(-1, layout.nope_dim // layout.group_size)
         .float()
     )
     nope = (codes * steps.unsqueeze(-1)).reshape(-1, layout.nope_dim)
@@ -273,8 +280,8 @@ def _decode_dsv4_int4_stored_domain(
 
 
 def decode_dsv4_int4_reference(packed: torch.Tensor) -> torch.Tensor:
-    """Decode FP16-step signed INT4 rows and restore their H256 prefix."""
-    return restore_dsv4_h256(_decode_dsv4_int4_stored_domain(packed))
+    """Decode E4M3-scale signed INT4 rows without a Hadamard transform."""
+    return _decode_dsv4_int4_stored_domain(packed)
 
 
 def merge_attention_states_natural_log(
@@ -339,28 +346,9 @@ if _HAS_TRITON:
 
         offs = tl.arange(0, 512)
         values = tl.load(kv_ptr + row * stride_kv_row + offs).to(tl.float32)
-        prefix = values
-        partner = tl.gather(prefix, offs ^ 1, axis=0)
-        prefix = tl.where((offs & 1) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 2, axis=0)
-        prefix = tl.where((offs & 2) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 4, axis=0)
-        prefix = tl.where((offs & 4) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 8, axis=0)
-        prefix = tl.where((offs & 8) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 16, axis=0)
-        prefix = tl.where((offs & 16) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 32, axis=0)
-        prefix = tl.where((offs & 32) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 64, axis=0)
-        prefix = tl.where((offs & 64) == 0, prefix + partner, partner - prefix)
-        partner = tl.gather(prefix, offs ^ 128, axis=0)
-        prefix = tl.where((offs & 128) == 0, prefix + partner, partner - prefix)
-        values = tl.where(offs < 256, prefix * 0.0625, values)
-
-        grouped = tl.reshape(values, [8, 64])
+        grouped = tl.reshape(values, [16, 32])
         max_abs = tl.max(tl.abs(grouped), axis=1)
-        stored_step = tl.minimum(max_abs / 7.0, 65504.0).to(tl.float16)
+        stored_step = tl.minimum(max_abs / 7.0, 448.0).to(tl.float8e4nv)
         quant_step = stored_step.to(tl.float32)
         has_step = quant_step > 0
         safe_step = tl.where(has_step, quant_step, 1.0)
@@ -372,7 +360,7 @@ if _HAS_TRITON:
         rounded = lower_i32 + round_up.to(tl.int32)
         rounded = tl.where(has_step[:, None], rounded, 0)
         codes = tl.minimum(tl.maximum(rounded, -7), 7).to(tl.int8)
-        paired = tl.reshape(codes.to(tl.uint8) & 0x0F, [8, 32, 2])
+        paired = tl.reshape(codes.to(tl.uint8) & 0x0F, [16, 16, 2])
         low, high = tl.split(paired)
         packed_codes = tl.reshape((low | (high << 4)), [256])
         code_offsets = tl.arange(0, 256)
@@ -382,13 +370,13 @@ if _HAS_TRITON:
             mask=valid_loc & (code_offsets < 224),
         )
 
-        group_offsets = tl.arange(0, 8)
+        group_offsets = tl.arange(0, 16)
+        stored_step_bits = stored_step.to(tl.uint8, bitcast=True)
         tl.store(
-            (dst + 224).to(tl.pointer_type(tl.float16)) + group_offsets,
-            stored_step,
-            mask=valid_loc & (group_offsets < 7),
+            dst + 224 + group_offsets,
+            tl.where(group_offsets < 14, stored_step_bits, 0),
+            mask=valid_loc,
         )
-        tl.store(dst + 238 + group_offsets, 0, mask=valid_loc & (group_offsets < 2))
 
         rope_offsets = tl.arange(0, 64)
         rope = tl.load(kv_ptr + row * stride_kv_row + 448 + rope_offsets).to(
@@ -458,10 +446,10 @@ if _HAS_TRITON:
             )
 
             score = tl.zeros([BLOCK_N], dtype=tl.float32)
-            for group in range(7):
-                byte_offsets = tl.arange(0, 32)
+            for group in range(14):
+                byte_offsets = tl.arange(0, 16)
                 packed_codes = tl.load(
-                    row_ptr + group * 32 + byte_offsets[None, :],
+                    row_ptr + group * 16 + byte_offsets[None, :],
                     mask=valid_token[:, None],
                     other=0,
                 )
@@ -474,14 +462,18 @@ if _HAS_TRITON:
                     unsigned_codes - 16.0,
                     unsigned_codes,
                 )
-                scale = tl.load(
-                    (row_ptr + 224).to(tl.pointer_type(tl.float16)) + group,
+                scale_bits = tl.load(
+                    row_ptr + 224 + group,
                     mask=valid_token[:, None],
-                    other=0.0,
+                    other=0,
                 )
-                scale = tl.reshape(scale, [BLOCK_N]).to(tl.float32)
+                scale = (
+                    tl.reshape(scale_bits, [BLOCK_N])
+                    .to(tl.float8e4nv, bitcast=True)
+                    .to(tl.float32)
+                )
                 values = signed_codes * scale[:, None]
-                dim_offsets = group * 64 + tl.arange(0, 64)
+                dim_offsets = group * 32 + tl.arange(0, 32)
                 q_group = tl.gather(q, dim_offsets, axis=0)
                 score += tl.sum(q_group[None, :] * values, axis=1)
 
@@ -507,10 +499,10 @@ if _HAS_TRITON:
             probabilities = tl.where(valid_token, probabilities, 0.0)
             accumulator *= rescale
 
-            for group in range(7):
-                byte_offsets = tl.arange(0, 32)
+            for group in range(14):
+                byte_offsets = tl.arange(0, 16)
                 packed_codes = tl.load(
-                    row_ptr + group * 32 + byte_offsets[None, :],
+                    row_ptr + group * 16 + byte_offsets[None, :],
                     mask=valid_token[:, None],
                     other=0,
                 )
@@ -523,17 +515,21 @@ if _HAS_TRITON:
                     unsigned_codes - 16.0,
                     unsigned_codes,
                 )
-                scale = tl.load(
-                    (row_ptr + 224).to(tl.pointer_type(tl.float16)) + group,
+                scale_bits = tl.load(
+                    row_ptr + 224 + group,
                     mask=valid_token[:, None],
-                    other=0.0,
+                    other=0,
                 )
-                scale = tl.reshape(scale, [BLOCK_N]).to(tl.float32)
+                scale = (
+                    tl.reshape(scale_bits, [BLOCK_N])
+                    .to(tl.float8e4nv, bitcast=True)
+                    .to(tl.float32)
+                )
                 values = signed_codes * scale[:, None]
                 partial = tl.sum(probabilities[:, None] * values, axis=0)
-                relative = tl.maximum(tl.minimum(q_offsets - group * 64, 63), 0)
+                relative = tl.maximum(tl.minimum(q_offsets - group * 32, 31), 0)
                 accumulator += tl.where(
-                    (q_offsets >= group * 64) & (q_offsets < (group + 1) * 64),
+                    (q_offsets >= group * 32) & (q_offsets < (group + 1) * 32),
                     tl.gather(partial, relative, axis=0),
                     0.0,
                 )
@@ -586,7 +582,7 @@ def write_dsv4_int4_packed(
     *,
     page_size: int,
 ) -> None:
-    """H256-fold, signed-INT4/FP16-step encode, and scatter DSV4 rows."""
+    """G32 signed-INT4/E4M3 encode and scatter DSV4 rows."""
     if kv.device.type != "cuda" or not _HAS_TRITON:
         raise RuntimeError("DSV4 KVBit packed writes require CUDA and Triton")
     if kv.ndim != 2 or kv.shape[-1] != 512:
@@ -621,7 +617,6 @@ def _dsv4_sparse_decode_reference(
     softmax_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     rows = _reshape_packed_rows(packed, page_size=page_size)
-    q_folded = fold_dsv4_h256(q)
     output = torch.empty_like(q)
     lse = torch.empty(
         (q.shape[0], q.shape[2], q.shape[1]),
@@ -633,7 +628,7 @@ def _dsv4_sparse_decode_reference(
         selected = indices[row, 0, :count].to(torch.long)
         selected = selected[(selected >= 0) & (selected < rows.shape[0])]
         stored = _decode_dsv4_int4_stored_domain(rows[selected].cpu()).to(q.device)
-        scores = torch.einsum("qhd,kd->qhk", q_folded[row].float(), stored.float())
+        scores = torch.einsum("qhd,kd->qhk", q[row].float(), stored.float())
         scores.mul_(softmax_scale)
         if attn_sink is not None:
             sink = attn_sink.float().view(1, -1, 1)
@@ -650,7 +645,7 @@ def _dsv4_sparse_decode_reference(
                 "qhk,kd->qhd", value_probabilities, stored.float()
             ).to(q.dtype)
             lse[row] = torch.logsumexp(scores, dim=-1).transpose(0, 1)
-    return restore_dsv4_h256(output), lse
+    return output, lse
 
 
 def dsv4_kvbit_sparse_decode(
@@ -686,27 +681,27 @@ def dsv4_kvbit_sparse_decode(
             softmax_scale=softmax_scale,
         )
 
-    q_folded = fold_dsv4_h256(q).contiguous()
-    output_folded = torch.empty_like(q_folded)
+    q_contiguous = q.contiguous()
+    output = torch.empty_like(q_contiguous)
     lse = torch.empty(
         (q.shape[0], q.shape[2], 1),
         dtype=torch.float32,
         device=q.device,
     )
     _dsv4_int4_sparse_decode_kernel[(q.shape[0], q.shape[2])](
-        q_folded,
+        q_contiguous,
         packed,
         indices,
         lengths,
         attn_sink if attn_sink is not None else q,
-        output_folded,
+        output,
         lse,
-        q_folded.stride(0),
-        q_folded.stride(2),
+        q_contiguous.stride(0),
+        q_contiguous.stride(2),
         packed.stride(0),
         indices.stride(0),
-        output_folded.stride(0),
-        output_folded.stride(2),
+        output.stride(0),
+        output.stride(2),
         lse.stride(0),
         packed.shape[0],
         softmax_scale,
@@ -719,7 +714,7 @@ def dsv4_kvbit_sparse_decode(
         num_warps=4,
         num_stages=1,
     )
-    return restore_dsv4_h256(output_folded), lse
+    return output, lse
 
 
 class DSV4KVBitPackedSWAPool(KVCache):

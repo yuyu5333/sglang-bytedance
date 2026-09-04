@@ -42,6 +42,7 @@ class TestDSV4INT4Layout(CustomTestCase):
             },
         )
         self.assertEqual(DSV4_INT4_LAYOUT.row_bytes, 368)
+        self.assertEqual(DSV4_INT4_LAYOUT.group_size, 32)
 
     def test_h256_prefix_round_trip_leaves_tail_unchanged(self):
         kv = torch.randn(2, 512, dtype=torch.bfloat16)
@@ -58,30 +59,61 @@ class TestDSV4INT4Layout(CustomTestCase):
         self.assertEqual(packed.dtype, torch.uint8)
         self.assertEqual(tuple(packed.shape), (3, 368))
         self.assertTrue(torch.equal(packed[:, 238:240], torch.zeros((3, 2))))
+        self.assertEqual(
+            tuple(packed[:, 224:238].contiguous().view(torch.float8_e4m3fn).shape),
+            (3, 14),
+        )
         self.assertTrue(torch.equal(decoded[:, 448:], kv[:, 448:]))
         torch.testing.assert_close(decoded.float(), kv.float(), atol=0.04, rtol=0.2)
 
-    def test_reference_codec_uses_rne_signed_range_and_zero_step(self):
+    def test_reference_codec_uses_g32_e4m3_rne_signed_range_and_zero_scale(self):
         stored = torch.zeros(2, 512, dtype=torch.float32)
         stored[0, :10] = torch.tensor(
             [-7.0, -1.0, 0.0, 1.0, 7.0, -6.5, -5.5, 0.5, 1.5, 2.5]
         )
-        packed = encode_dsv4_int4_reference(restore_dsv4_h256(stored))
+        stored[0, 32:64] = 14.0
+        stored[0, 64:96] = 9.0
+        packed = encode_dsv4_int4_reference(stored)
         low = packed[0, :5] & 0x0F
         high = packed[0, :5] >> 4
-        steps = packed[:, 224:238].contiguous().view(torch.float16).reshape(2, 7)
+        scales = (
+            packed[:, 224:238].contiguous().view(torch.float8_e4m3fn).reshape(2, 14)
+        )
         self.assertEqual(low.tolist(), [9, 0, 7, 10, 2])
         self.assertEqual(high.tolist(), [15, 1, 10, 0, 2])
         nibbles = torch.stack((packed[0, :224] & 0x0F, packed[0, :224] >> 4))
         self.assertFalse(torch.any(nibbles == 8).item())
-        self.assertEqual(steps[0, 0].item(), 1.0)
-        self.assertTrue(torch.equal(steps[1], torch.zeros(7, dtype=torch.float16)))
+        self.assertEqual(scales[0, 0].item(), 1.0)
+        self.assertEqual(scales[0, 1].item(), 2.0)
+        self.assertEqual(scales[0, 2].item(), 1.25)
+        self.assertEqual(packed[0, 226].item(), 0x3A)
+        self.assertTrue(
+            torch.equal(
+                scales[1],
+                torch.zeros(14, dtype=torch.float8_e4m3fn),
+            )
+        )
         self.assertTrue(
             torch.equal(
                 decode_dsv4_int4_reference(packed[1:]),
                 torch.zeros(1, 512, dtype=torch.bfloat16),
             )
         )
+
+    def test_reference_codec_keeps_nope_in_original_domain(self):
+        kv = torch.zeros(1, 512, dtype=torch.float32)
+        kv[0, :32] = torch.arange(-16, 16, dtype=torch.float32)
+        packed = encode_dsv4_int4_reference(kv)
+        decoded = decode_dsv4_int4_reference(packed)
+        scale = packed[0, 224:225].view(torch.float8_e4m3fn).float()
+        expected_codes = torch.round(kv[0, :32] / scale).clamp(-7, 7)
+        torch.testing.assert_close(
+            decoded[0, :32].float(),
+            expected_codes * scale,
+            atol=0,
+            rtol=0,
+        )
+        self.assertTrue(torch.equal(decoded[0, 32:], torch.zeros(480)))
 
     def test_reference_codec_rejects_invalid_shape_or_dtype(self):
         with self.assertRaisesRegex(ValueError, "last dimension must be 512"):
