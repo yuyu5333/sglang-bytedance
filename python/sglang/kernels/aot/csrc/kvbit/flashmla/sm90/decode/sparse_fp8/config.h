@@ -88,6 +88,7 @@ class KernelTemplate {
     float sM[BLOCK_M], sL[BLOCK_M], sScale[BLOCK_M], sOScale[BLOCK_M];
     transac_bar_t bar_q, bar_k_local_ready[NUM_K_BUFS], bar_k_remote_ready[NUM_K_BUFS], bar_k_avail[NUM_K_BUFS];
   };
+  static_assert(sizeof(SharedMemoryPlan) <= 208896, "INT4 FlashMLA shared-memory plan regressed");
 
   template <typename Shape_Q, typename TMA_Q>
   struct TmaParams {

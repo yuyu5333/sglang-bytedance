@@ -487,7 +487,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
   };
 
   if (warpgroup_idx == 0) {
-    cutlass::arch::warpgroup_reg_alloc<184>();
+    cutlass::arch::warpgroup_reg_alloc<192>();
 
     TiledMMA tiled_mma_QK = TiledMMA_QK{};
     ThrMMA thr_mma_QK = tiled_mma_QK.get_slice(idx_in_warpgroup);
@@ -714,7 +714,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
       sync_all_threads_in_cluster();
     }
   } else if (warpgroup_idx == 1) {
-    cutlass::arch::warpgroup_reg_dealloc<152>();
+    cutlass::arch::warpgroup_reg_dealloc<160>();
 
     TiledMMA tiled_mma_PV = TiledMMA_PV_RemoteP{};
     ThrMMA thr_mma_PV = tiled_mma_PV.get_slice(idx_in_warpgroup);
@@ -826,9 +826,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
     }
   } else {
     // Producer warpgroup
-    // The production PACKED_INT4 path uses warp-local H256 reconstruction
-    // and no longer keeps the legacy RC_GROUP=4 WGMMA accumulators live.
-    cutlass::arch::warpgroup_reg_dealloc<128>();
+    cutlass::arch::warpgroup_reg_dealloc<152>();
 
     static_assert(CLUSTER_SIZE == 1 || CLUSTER_SIZE == 2);
     static constexpr int NUM_TOKENS_PER_THREAD = CLUSTER_SIZE == 1 ? 2 : 1;
