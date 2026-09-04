@@ -161,70 +161,79 @@ class KernelTemplate {
       int warpgroup_idx,
       int idx_in_warpgroup) {
     using cutlass::arch::NamedBarrier;
-    if constexpr (IS_NO_SPLIT) {
-      // Should convert the output to bfloat16 / float16, and save it to O
-      // Here we don't pipeline STSM and tma store because it's slower
-      Tensor sMyOutputBuf = local_tile(sOutputBuf, Shape<_64, _256>{}, make_coord(_0{}, warpgroup_idx));
+    // Both consumer warpgroups first materialize their 256-column FP32
+    // fragments in the common accumulator buffer. This gives WG0 a complete
+    // logical O row on which to move the H256 transform out of the K producer.
+    CUTLASS_PRAGMA_UNROLL
+    for (int idx = 0; idx < size(rO); idx += 2) {
+      int row = (idx_in_warpgroup / 32) * 16 + (idx_in_warpgroup % 32 / 4) + (idx % 4 >= 2 ? 8 : 0);
+      int col = warpgroup_idx * 256 + (idx_in_warpgroup % 4) * 2 + idx / 4 * 8;
+      *(float2*)(&(sOutputAccumBuf(row, col))) = float2{
+          rO(idx) * o_scales[idx % 4 >= 2],
+          rO(idx + 1) * o_scales[idx % 4 >= 2],
+      };
+    }
+    cutlass::arch::fence_view_async_shared();
+    NamedBarrier::arrive_and_wait(256, NamedBarriers::epilogue_r2s_ready);
 
-      // Calculate "base" ptrs in advance
-      // Each STSM fills a chunk of shape 16x16, while we are using SW-OBUF_SW, so we need OBUF_SW/16 base pointers
-      constexpr int NUM_CHUNKS_IN_SW_ATOM = OBUF_SW / 16;
-      bf16* base_output_buf_ptrs[NUM_CHUNKS_IN_SW_ATOM];
+    if (warpgroup_idx == 0) {
+      const int warp = idx_in_warpgroup >> 5;
+      const int lane = idx_in_warpgroup & 31;
       CUTE_UNROLL
-      for (int i = 0; i < NUM_CHUNKS_IN_SW_ATOM; ++i) {
-        base_output_buf_ptrs[i] = &sMyOutputBuf(
-            (idx_in_warpgroup / 32) * 16 + idx_in_warpgroup % 16, idx_in_warpgroup % 32 / 16 * 8 + i * 16);
-      }
-
-      CUTE_UNROLL
-      for (int idx = 0; idx < (HEAD_DIM_V / 2) / 16; idx += 1) {
-        // In each iteration we deal with a chunk of shape 16x16
-        using bf16x2 = __nv_bfloat162;
-        bf16x2 a01 = __float22bfloat162_rn(float2{rO(idx * 8 + 0) * o_scales[0], rO(idx * 8 + 1) * o_scales[0]});
-        bf16x2 a23 = __float22bfloat162_rn(float2{rO(idx * 8 + 2) * o_scales[1], rO(idx * 8 + 3) * o_scales[1]});
-        bf16x2 a45 = __float22bfloat162_rn(float2{rO(idx * 8 + 4) * o_scales[0], rO(idx * 8 + 5) * o_scales[0]});
-        bf16x2 a67 = __float22bfloat162_rn(float2{rO(idx * 8 + 6) * o_scales[1], rO(idx * 8 + 7) * o_scales[1]});
-        SM90_U32x4_STSM_N::copy(
-            *reinterpret_cast<uint32_t*>(&a01),
-            *reinterpret_cast<uint32_t*>(&a23),
-            *reinterpret_cast<uint32_t*>(&a45),
-            *reinterpret_cast<uint32_t*>(&a67),
-            *reinterpret_cast<uint128_t*>(base_output_buf_ptrs[idx % 4] + (idx / 4 * 4) * 16 * 64));
-      }
-
-      cutlass::arch::fence_view_async_shared();
-      NamedBarrier::arrive_and_wait(256, NamedBarriers::epilogue_r2s_ready);
-
-      if (threadIdx.x == 0) {
-        SM90_TMA_STORE_5D::copy(
-            &tma_params.tensor_map_o, plan.u.oBuf.data(), 0, head_block_idx * 64, 0, s_q_idx, batch_idx);
-        cute::tma_store_arrive();
-      }
-    } else {
-      // Should save the result to OAccum
-      CUTLASS_PRAGMA_UNROLL
-      for (int idx = 0; idx < size(rO); idx += 2) {
-        int row = (idx_in_warpgroup / 32) * 16 + (idx_in_warpgroup % 32 / 4) + (idx % 4 >= 2 ? 8 : 0);
-        int col = warpgroup_idx * 256 + (idx_in_warpgroup % 4) * 2 + idx / 4 * 8;
-        *(float2*)(&(sOutputAccumBuf(row, col))) = float2{
-            rO(idx) * o_scales[idx % 4 >= 2],
-            rO(idx + 1) * o_scales[idx % 4 >= 2],
-        };
-      }
-      cutlass::arch::fence_view_async_shared();
-
-      NamedBarrier::arrive_and_wait(256, NamedBarriers::epilogue_r2s_ready);
-
-      if (elect_one_sync()) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int local_row = 0; local_row < BLOCK_M / (256 / 32); ++local_row) {
-          int row = local_row * (256 / 32) + (threadIdx.x / 32);
-          if (row < num_valid_seq_q) {
-            SM90_BULK_COPY_S2G::copy(&sOutputAccumBuf(row, _0{}), &gOorAccum(row, _0{}), HEAD_DIM_V * sizeof(float));
+      for (int round = 0; round < 16; ++round) {
+        const int row = warp * 16 + round;
+        float values[8];
+        CUTE_UNROLL
+        for (int j = 0; j < 8; ++j) {
+          values[j] = sOutputAccumBuf(row, lane * 8 + j);
+        }
+        CUTE_UNROLL
+        for (int span = 1; span < 8; span <<= 1) {
+          CUTE_UNROLL
+          for (int base = 0; base < 8; base += span << 1) {
+            CUTE_UNROLL
+            for (int j = 0; j < span; ++j) {
+              const float a = values[base + j];
+              const float b = values[base + span + j];
+              values[base + j] = a + b;
+              values[base + span + j] = a - b;
+            }
           }
         }
-        cute::tma_store_arrive();
+        CUTE_UNROLL
+        for (int mask = 1; mask < 32; mask <<= 1) {
+          CUTE_UNROLL
+          for (int j = 0; j < 8; ++j) {
+            const float other = __shfl_xor_sync(0xffffffffu, values[j], mask);
+            values[j] = (lane & mask) ? other - values[j] : values[j] + other;
+          }
+        }
+        CUTE_UNROLL
+        for (int j = 0; j < 8; ++j) {
+          sOutputAccumBuf(row, lane * 8 + j) = values[j] * 0.0625f;
+        }
       }
+    }
+
+    cutlass::arch::fence_view_async_shared();
+    NamedBarrier::arrive_and_wait(256, NamedBarriers::warpgroup0_sync);
+    if (warpgroup_idx != 0) return;
+
+    if constexpr (IS_NO_SPLIT) {
+      // Convert the complete, transformed FP32 tile to global BF16 only
+      // after H256. Do not reuse the aliased sOutputBuf here: its BF16 stores
+      // would clobber unread FP32 values in sOutputAccumBuf.
+      for (int linear_idx = idx_in_warpgroup; linear_idx < num_valid_seq_q * HEAD_DIM_V; linear_idx += 128) {
+        const int row = linear_idx / HEAD_DIM_V;
+        const int col = linear_idx % HEAD_DIM_V;
+        gOorAccum(row, col) = bf16(sOutputAccumBuf(row, col));
+      }
+    } else if (elect_one_sync()) {
+      // WG0's four warp leaders cover all rows; split output remains FP32.
+      for (int row = idx_in_warpgroup / 32; row < num_valid_seq_q; row += 4) {
+        SM90_BULK_COPY_S2G::copy(&sOutputAccumBuf(row, _0{}), &gOorAccum(row, _0{}), HEAD_DIM_V * sizeof(float));
+      }
+      cute::tma_store_arrive();
     }
   }
 

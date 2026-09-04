@@ -518,6 +518,51 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
       // Wait for Q
       plan.bar_q.wait((sched_meta.begin_req_idx - batch_idx) & 1);
 
+      // Move the normalized H256 from every packed K row to the Q/O
+      // boundaries. WG0 owns Q: after the TMA transaction is visible, each
+      // warp transforms 16 rows in place and rounds the result back to BF16
+      // before QK consumes it. The remaining 256 Q dimensions are identity.
+      if constexpr (PACKED_INT4) {
+        const int warp = idx_in_warpgroup >> 5;
+        const int lane = idx_in_warpgroup & 31;
+        CUTE_UNROLL
+        for (int round = 0; round < 16; ++round) {
+          const int row = warp * 16 + round;
+          float values[8];
+          CUTE_UNROLL
+          for (int j = 0; j < 8; ++j) {
+            values[j] = static_cast<float>(sQ(row, lane * 8 + j));
+          }
+          CUTE_UNROLL
+          for (int span = 1; span < 8; span <<= 1) {
+            CUTE_UNROLL
+            for (int base = 0; base < 8; base += span << 1) {
+              CUTE_UNROLL
+              for (int j = 0; j < span; ++j) {
+                const float a = values[base + j];
+                const float b = values[base + span + j];
+                values[base + j] = a + b;
+                values[base + span + j] = a - b;
+              }
+            }
+          }
+          CUTE_UNROLL
+          for (int mask = 1; mask < 32; mask <<= 1) {
+            CUTE_UNROLL
+            for (int j = 0; j < 8; ++j) {
+              const float other = __shfl_xor_sync(0xffffffffu, values[j], mask);
+              values[j] = (lane & mask) ? other - values[j] : values[j] + other;
+            }
+          }
+          CUTE_UNROLL
+          for (int j = 0; j < 8; ++j) {
+            sQ(row, lane * 8 + j) = bf16(values[j] * 0.0625f);
+          }
+        }
+        cutlass::arch::fence_view_async_shared();
+        NamedBarrier::sync(128, NamedBarriers::warpgroup0_sync);
+      }
+
       CUTE_NO_UNROLL
       for (int block_idx = args.start_block_idx; block_idx < args.end_block_idx; block_idx++) {
         int buf_idx = (block_idx - args.start_block_idx) % NUM_K_BUFS;
@@ -928,10 +973,11 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
           const int64_t pk_block_stride =
               IS_EXTRA_BLOCK ? params.extra_packed_kv_block_stride : params.packed_kv_block_stride;
 
-          // PACKED_INT4 always executes run_warp_hadamard256(), which writes
-          // directly to sK. Reuse the current sK backing for the discarded
-          // generic R@X branch so its two legacy 8 KiB scratch tiles do not
-          // inflate SharedMemoryPlan.
+          // PACKED_INT4 decodes the full 448-dim nope vector directly to sK.
+          // H256 now runs once on Q and O instead of once per K row. Reuse the
+          // current sK backing for the compile-time-discarded generic R@X
+          // branch so its two legacy 8 KiB scratch tiles do not inflate
+          // SharedMemoryPlan.
           bf16* staging = plan.u.k[buf_idx].data();
 
           // Wait for the nope buffer to be available
@@ -1397,7 +1443,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                 }
               };
 
-              auto run_warp_hadamard256 = [&]() {
+              auto run_warp_decode_int4 = [&]() {
                 const int warp = idx_in_warpgroup >> 5;
                 const int lane = idx_in_warpgroup & 31;
                 CUTE_UNROLL
@@ -1415,42 +1461,14 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
                   fmin = __half2float(__low2half(hdr));
                   fstep = __half2float(__high2half(hdr));
 
-                  float values[8];
+                  bf16x8 prefix_out;
+                  bf16* prefix_elem = reinterpret_cast<bf16*>(&prefix_out);
                   CUTE_UNROLL
                   for (int j = 0; j < 8; ++j) {
                     const int nibble = static_cast<int>((word >> (j * 4)) & 0xFu);
                     const int code = (nibble ^ 8) - 8;
                     const float x_val = pk_row != nullptr ? fmaf(static_cast<float>(code), fstep, fmin) : 0.0f;
-                    values[j] = static_cast<float>(bf16(x_val));
-                  }
-
-                  CUTE_UNROLL
-                  for (int span = 1; span < 8; span <<= 1) {
-                    CUTE_UNROLL
-                    for (int base = 0; base < 8; base += span << 1) {
-                      CUTE_UNROLL
-                      for (int j = 0; j < span; ++j) {
-                        const float a = values[base + j];
-                        const float b = values[base + span + j];
-                        values[base + j] = a + b;
-                        values[base + span + j] = a - b;
-                      }
-                    }
-                  }
-                  CUTE_UNROLL
-                  for (int mask = 1; mask < 32; mask <<= 1) {
-                    CUTE_UNROLL
-                    for (int j = 0; j < 8; ++j) {
-                      const float other = __shfl_xor_sync(0xffffffffu, values[j], mask);
-                      values[j] = (lane & mask) ? other - values[j] : values[j] + other;
-                    }
-                  }
-
-                  bf16x8 prefix_out;
-                  bf16* prefix_elem = reinterpret_cast<bf16*>(&prefix_out);
-                  CUTE_UNROLL
-                  for (int j = 0; j < 8; ++j) {
-                    prefix_elem[j] = bf16(values[j] * 0.0625f);
+                    prefix_elem[j] = bf16(x_val);
                   }
                   const int prefix_dim = lane * 8;
                   const int prefix_group = prefix_dim >> 4;
@@ -1675,7 +1693,7 @@ KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnDecodeParams& par
               }
 #else
               if constexpr (PACKED_INT4) {
-                run_warp_hadamard256();
+                run_warp_decode_int4();
               } else {
                 CUTE_NO_UNROLL
                 for (int grp0 = 0; grp0 < DIM_BLOCKS; grp0 += RC_GROUP) {
