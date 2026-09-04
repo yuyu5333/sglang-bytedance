@@ -200,6 +200,7 @@ target_compile_options(kvbit_flashmla_ops PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-extended-lambda>
     $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+    $<$<COMPILE_LANGUAGE:CUDA>:--maxrregcount=160>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcudafe=--diag_suppress=177>
     $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_90a,code=sm_90a>
 )
