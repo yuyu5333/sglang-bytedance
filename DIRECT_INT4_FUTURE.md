@@ -5,9 +5,13 @@
 Branch: `feat/dsv4-direct-int4-g32-e4m3-future`.
 Starting commit: `13119ebba6`.
 
-This is a local research iteration, not a deployment-ready revision. No SSH,
+The sections below record the original local research stage. Subsequent H20
+builds, numerical tests, synchronization fixes, sanitizers, and model A/B status
+are recorded in [Remote Validation](DIRECT_INT4_FUTURE_REMOTE_VALIDATION.md).
+
+At the end of that local stage, this was not a deployment-ready revision. No SSH,
 remote build, GPU execution, model evaluation, service launch, or performance
-benchmark was performed. Historical H20 results do not validate this revision.
+benchmark had been performed. Historical H20 results did not validate the revision.
 Defaults retain the compact format and scalar dequantization, but the producer
 and combine implementation have changed even with all experimental switches off.
 
