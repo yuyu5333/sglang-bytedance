@@ -9,6 +9,10 @@ by one correct answer in this single paired evaluation, which does not
 establish accuracy equivalence. This document supersedes the local-only
 verification status in `DIRECT_INT4_FUTURE.md`.
 
+The subsequent producer optimization and fresh before/after INT4 comparison
+are recorded in [Round 2](DIRECT_INT4_FUTURE_ROUND2.md). The measurements below
+remain the original round-1 results.
+
 - Host: `115.190.141.215`, hostname `iv-yehwog4ni84c5qw9eqe0`.
 - Hardware: eight NVIDIA H20 GPUs, 97,871 MiB reported memory per GPU.
 - Kernel-validation container: `kvbit-ds`.
