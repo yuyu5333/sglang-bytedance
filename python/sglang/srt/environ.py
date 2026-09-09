@@ -954,6 +954,10 @@ class Envs:
     SGLANG_CPU_QUANTIZATION = EnvBool(False)
     SGLANG_USE_DYNAMIC_MXFP4_LINEAR = EnvBool(False)
     SGLANG_FORCE_FP8_MARLIN = EnvBool(False)
+    # Experimental per-call token cap for Marlin route-expanded activation
+    # buffers. 0 preserves full-batch execution; positive values trade extra
+    # GEMM/align launches and expert-weight reads for lower peak scratch usage.
+    SGLANG_MARLIN_MOE_CHUNK_SIZE = EnvInt(0)
     SGLANG_MOE_NVFP4_DISPATCH = EnvBool(False)
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN = EnvBool(False)
     SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE = EnvBool(False)

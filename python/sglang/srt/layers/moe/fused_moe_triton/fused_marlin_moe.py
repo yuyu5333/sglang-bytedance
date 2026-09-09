@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from sglang.srt.environ import envs
 from sglang.srt.layers import zero_copy_context
 from sglang.srt.utils import is_cuda
 from sglang.srt.utils.custom_op import register_custom_op
@@ -235,44 +236,35 @@ def fused_marlin_moe(
     topk = topk_ids.shape[1]
     gemm1_n = 2 * N if is_gated else N
 
+    chunk_limit = envs.SGLANG_MARLIN_MOE_CHUNK_SIZE.get()
+    if chunk_limit < 0:
+        raise ValueError("SGLANG_MARLIN_MOE_CHUNK_SIZE must be nonnegative")
+    output = zero_copy_context.get_moe_output(hidden_states)
+    if output is None and inplace:
+        output = hidden_states
+    if M == 0:
+        return output if output is not None else torch.empty_like(hidden_states)
+    chunk_tokens = min(M, chunk_limit) if chunk_limit else M
+    # Exact input/output aliasing is safe after a chunk's two GEMMs finish.
+    # An offset alias could overwrite tokens that a later chunk has not read.
+    if (
+        chunk_tokens < M
+        and output is not None
+        and output.untyped_storage().data_ptr()
+        == hidden_states.untyped_storage().data_ptr()
+        and output.data_ptr() != hidden_states.data_ptr()
+    ):
+        chunk_tokens = M
+    chunked = chunk_tokens < M
+
     # M block size selection logic
     # TODO: tune this further for specific models
     for block_size_m in [8, 16, 32, 48, 64]:
-        if M * topk / E / block_size_m < 0.9:
+        if chunk_tokens * topk / E / block_size_m < 0.9:
             break
 
     if global_num_experts == -1:
         global_num_experts = E
-    if (
-        M == 1
-        and topk <= 32
-        and expert_map is None
-        # The JIT kernel is int32-only; torch-native topk emits int64 -- let
-        # that (test-only) shape take the generic path instead of casting.
-        and topk_ids.dtype == torch.int32
-    ):
-        # Single-token decode: top-k ids are distinct, so alignment is a
-        # single-warp sort instead of the align + count_and_sort kernel pair.
-        from sglang.kernels.ops.moe.moe_align_single_token import moe_align_single_token
-
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_single_token(
-            topk_ids, block_size_m
-        )
-    else:
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, block_size_m, global_num_experts
-        )
-
-    if workspace is None:
-        max_workspace_size = (max(2 * N, K) // 64) * (
-            sorted_token_ids.size(0) // block_size_m
-        )
-        device = hidden_states.device
-        sms = torch.cuda.get_device_properties(device).multi_processor_count
-        max_workspace_size = min(max_workspace_size, sms * 4)
-        workspace = torch.zeros(
-            max_workspace_size, dtype=torch.int, device=device, requires_grad=False
-        )
 
     scalar_type1 = get_scalar_type(
         num_bits, w1_zeros is not None, w1_scale, w1_global_scale
@@ -281,148 +273,175 @@ def fused_marlin_moe(
         num_bits, w2_zeros is not None, w2_scale, w2_global_scale
     )
 
-    intermediate_cache2 = torch.empty(
-        (M * topk_ids.shape[1], N),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+    intermediate_cache2 = (
+        torch.empty(
+            (chunk_tokens * topk, N),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        if is_gated
+        else None
     )
     # Marlin skips masked expert rows, so their shared cache must start at zero.
+    # These buffers are private to this invocation, including during graph capture.
     intermediate_cache13 = torch.zeros(
-        (M * topk_ids.shape[1] * max(gemm1_n, K),),
+        (chunk_tokens * topk * max(gemm1_n, K),),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
-    intermediate_cache1 = intermediate_cache13[: M * topk_ids.shape[1] * gemm1_n]
-    intermediate_cache1 = intermediate_cache1.view(-1, gemm1_n)
-    intermediate_cache3 = intermediate_cache13[: M * topk_ids.shape[1] * K]
-    intermediate_cache3 = intermediate_cache3.view(-1, K)
 
     use_atomic_add = (
         hidden_states.dtype == torch.half
         or torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
     ) and (not is_mxfp4_marlin)
 
-    intermediate_cache1 = moe_wna16_marlin_gemm(
-        hidden_states,
-        intermediate_cache1,
-        w1,
-        w1_bias,
-        w1_scale,
-        w1_global_scale,
-        w1_zeros,
-        g_idx1,
-        sort_indices1,
-        workspace,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        topk_weights,
-        moe_block_size=block_size_m,
-        top_k=topk,
-        mul_topk_weights=False,
-        is_ep=expert_map is not None,
-        b_q_type=scalar_type1,
-        size_m=M,
-        size_n=gemm1_n,
-        size_k=K,
-        is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=True,
-        is_zp_float=False,
-    )
-
-    if activation == "silu" and is_gated and gemm1_alpha is not None:
-        if clamp_limit is None:
-            raise ValueError("GPT-OSS Marlin activation requires clamp_limit.")
-        swiglu_gpt_oss_sigmoid_alpha_contiguous(
-            intermediate_cache2,
-            intermediate_cache1.view(-1, gemm1_n),
-            gemm1_alpha,
-            clamp_limit,
-        )
-    elif activation == "silu" and is_gated and clamp_limit is not None:
-        swiglu_limit_func(
-            intermediate_cache2,
-            intermediate_cache1.view(-1, gemm1_n),
-            clamp_limit,
-        )
-    elif activation == "silu" and is_gated:
-        silu_and_mul(intermediate_cache1.view(-1, gemm1_n), intermediate_cache2)
-    elif activation == "situ" and is_gated:
-        situ_and_mul(
-            intermediate_cache2,
-            intermediate_cache1.view(-1, gemm1_n),
-            situ_beta=gemm1_alpha if gemm1_alpha is not None else 4.0,
-            linear_beta=clamp_limit,
-        )
-    elif activation == "silu" and not is_gated:
-        intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
-    elif activation == "relu2" and not is_gated:
-        intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
-    else:
-        raise ValueError(f"Unsupported activation: {activation=}, with {is_gated=}")
-
-    if expert_map is not None:
-        intermediate_cache3.zero_()
-
-    intermediate_cache3 = moe_wna16_marlin_gemm(
-        intermediate_cache2,
-        intermediate_cache3,
-        w2,
-        w2_bias,
-        w2_scale,
-        w2_global_scale,
-        w2_zeros,
-        g_idx2,
-        sort_indices2,
-        workspace,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        topk_weights,
-        moe_block_size=block_size_m,
-        top_k=1,
-        mul_topk_weights=True,
-        is_ep=expert_map is not None,
-        b_q_type=scalar_type2,
-        size_m=M * topk,
-        size_n=K,
-        size_k=N,
-        is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=True,
-        is_zp_float=False,
-    ).view(-1, topk, K)
-
-    output = zero_copy_context.get_moe_output(hidden_states)
-    if output is None:
-        output = hidden_states if inplace else torch.empty_like(hidden_states)
-
-    if is_mxfp4_marlin:
-        # Top-k weights (incl. routed scaling) are already applied above via
-        # mul_topk_weights, so this is a plain sum over the topk dim. The JIT
-        # vectorized pass (~1.5us at decode shapes) beats sgl_kernel's
-        # moe_sum_reduce_kernel_general (~5.7us) and the generic at::native
-        # reduce_kernel torch.sum dispatches to (~6.7us).
+    for start in range(0, M, chunk_tokens):
+        end = min(start + chunk_tokens, M)
+        chunk_m = end - start
+        chunk_ids = topk_ids[start:end]
+        chunk_weights = topk_weights[start:end]
+        rows = chunk_m * topk
+        cache1 = intermediate_cache13[: rows * gemm1_n].view(rows, gemm1_n)
+        cache2 = intermediate_cache2[:rows] if is_gated else None
+        cache3 = intermediate_cache13[: rows * K].view(rows, K)
+        if start:
+            intermediate_cache13[: rows * max(gemm1_n, K)].zero_()
         if (
-            intermediate_cache3.dtype == torch.bfloat16
-            and intermediate_cache3.is_contiguous()
-            and output.is_contiguous()
-            and intermediate_cache3.shape[-1] % 8 == 0
+            chunk_m == 1
+            and topk <= 32
+            and expert_map is None
+            and chunk_ids.dtype == torch.int32
         ):
-            from sglang.kernels.ops.moe.moe_topk_sum import moe_topk_sum
+            # Keep the existing single-token alignment path, including tail chunks.
+            from sglang.kernels.ops.moe.moe_align_single_token import (
+                moe_align_single_token,
+            )
 
-            moe_topk_sum(intermediate_cache3, output)
+            sorted_token_ids, expert_ids, num_tokens_post_padded = (
+                moe_align_single_token(chunk_ids, block_size_m)
+            )
         else:
-            moe_sum_reduce(intermediate_cache3, output, 1.0)
-        return output
-    else:
-        if routed_scaling_factor is None:
-            routed_scaling_factor = 1.0
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                chunk_ids, block_size_m, global_num_experts
+            )
 
-        moe_sum_reduce(
-            intermediate_cache3,
-            output,
-            routed_scaling_factor,
+        if workspace is None:
+            max_workspace_size = (max(2 * N, K) // 64) * (
+                sorted_token_ids.size(0) // block_size_m
+            )
+            device = hidden_states.device
+            sms = torch.cuda.get_device_properties(device).multi_processor_count
+            max_workspace_size = min(max_workspace_size, sms * 4)
+            workspace = torch.zeros(
+                max_workspace_size, dtype=torch.int, device=device, requires_grad=False
+            )
+
+        cache1 = moe_wna16_marlin_gemm(
+            hidden_states[start:end],
+            cache1,
+            w1,
+            w1_bias,
+            w1_scale,
+            w1_global_scale,
+            w1_zeros,
+            g_idx1,
+            sort_indices1,
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            chunk_weights,
+            moe_block_size=block_size_m,
+            top_k=topk,
+            mul_topk_weights=False,
+            is_ep=expert_map is not None,
+            b_q_type=scalar_type1,
+            size_m=chunk_m,
+            size_n=gemm1_n,
+            size_k=K,
+            is_k_full=is_k_full,
+            use_atomic_add=use_atomic_add,
+            use_fp32_reduce=True,
+            is_zp_float=False,
         )
-        return output
+
+        if activation == "silu" and is_gated and gemm1_alpha is not None:
+            if clamp_limit is None:
+                raise ValueError("GPT-OSS Marlin activation requires clamp_limit.")
+            swiglu_gpt_oss_sigmoid_alpha_contiguous(
+                cache2, cache1, gemm1_alpha, clamp_limit
+            )
+        elif activation == "silu" and is_gated and clamp_limit is not None:
+            swiglu_limit_func(cache2, cache1, clamp_limit)
+        elif activation == "silu" and is_gated:
+            silu_and_mul(cache1, cache2)
+        elif activation == "situ" and is_gated:
+            situ_and_mul(
+                cache2,
+                cache1,
+                situ_beta=gemm1_alpha if gemm1_alpha is not None else 4.0,
+                linear_beta=clamp_limit,
+            )
+        elif activation == "silu" and not is_gated:
+            cache2 = F.silu(cache1.view(-1, N))
+        elif activation == "relu2" and not is_gated:
+            cache2 = torch.square(F.relu(cache1.view(-1, N)))
+        else:
+            raise ValueError(f"Unsupported activation: {activation=}, with {is_gated=}")
+
+        # In chunk mode, masked routes must not retain gate-up or prior-chunk data.
+        if expert_map is not None or chunked:
+            cache3.zero_()
+
+        cache3 = moe_wna16_marlin_gemm(
+            cache2,
+            cache3,
+            w2,
+            w2_bias,
+            w2_scale,
+            w2_global_scale,
+            w2_zeros,
+            g_idx2,
+            sort_indices2,
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            chunk_weights,
+            moe_block_size=block_size_m,
+            top_k=1,
+            mul_topk_weights=True,
+            is_ep=expert_map is not None,
+            b_q_type=scalar_type2,
+            size_m=rows,
+            size_n=K,
+            size_k=N,
+            is_k_full=is_k_full,
+            use_atomic_add=use_atomic_add,
+            use_fp32_reduce=True,
+            is_zp_float=False,
+        ).view(chunk_m, topk, K)
+
+        if output is None:
+            output = torch.empty_like(hidden_states)
+        chunk_output = output[start:end]
+        if is_mxfp4_marlin:
+            # Top-k weights, including routed scaling, were applied in GEMM2.
+            if (
+                cache3.dtype == torch.bfloat16
+                and cache3.is_contiguous()
+                and chunk_output.is_contiguous()
+                and K % 8 == 0
+            ):
+                from sglang.kernels.ops.moe.moe_topk_sum import moe_topk_sum
+
+                moe_topk_sum(cache3, chunk_output)
+            else:
+                moe_sum_reduce(cache3, chunk_output, 1.0)
+        else:
+            moe_sum_reduce(
+                cache3,
+                chunk_output,
+                1.0 if routed_scaling_factor is None else routed_scaling_factor,
+            )
+    return output
