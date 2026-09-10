@@ -51,8 +51,6 @@ struct ProducerDecodeMainloop : RawMainloop {
   using RawMma = typename Base::TiledMma;
   using Utils = detail::MixedGroupedGemmInputUtils<Base>;
   static constexpr bool ProducerDecodesA = true;
-  static constexpr int ResidentCtas =
-      cute::size<0>(TileShape{}) == 64 && cute::size<2>(TileShape{}) == 256 ? 2 : 1;
   static constexpr int NumProducerThreadEvents = 128;
   static constexpr int KBlocks = cute::size<2>(TileShape{}) / 32;
   using TiledMma = decltype(cute::make_tiled_mma(

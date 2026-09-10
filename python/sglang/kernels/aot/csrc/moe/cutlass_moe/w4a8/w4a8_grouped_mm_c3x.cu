@@ -553,9 +553,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 369:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRODUCER_DECODE_MXFP4<64, 64, 512>));
       return;
-    case 370:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRODUCER_DECODE_MXFP4<64, 64, 256>));
-      return;
     case 371:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8, 256>));
       return;
@@ -567,7 +564,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 368, 369, 370, 371, 372");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 368, 369, 371, 372");
   }
 }
 
