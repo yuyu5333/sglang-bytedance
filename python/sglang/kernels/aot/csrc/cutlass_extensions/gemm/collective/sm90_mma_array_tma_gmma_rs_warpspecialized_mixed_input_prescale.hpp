@@ -1087,6 +1087,9 @@ struct CollectiveMmaArrayMixedInput<
     Tensor tCrA_scale = make_fragment_like<WeightScaleRawElement>(tCrA_load_4b_packed);
     cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
     cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
+    static_assert(K_BLOCK_MAX % 4 == 0);
+    cute::array<uint32_t, (K_BLOCK_MAX / 4) * ScalePairCount> lo_packed_offsets;
+    cute::array<uint32_t, (K_BLOCK_MAX / 4) * ScalePairCount> hi_packed_offsets;
 
     ConsumerToken barrier_token = {BarrierStatus::WaitAgain};
     auto copy_scale_kblock = [&](auto k_block_c, int read_stage) {
@@ -1096,8 +1099,25 @@ struct CollectiveMmaArrayMixedInput<
         if constexpr (UseExpandedScaleRFForLargeM) {
           copy(scales, tCrA_scale(_, _, k_block_c));
         } else {
-          Utils::cache_A_kblock_fused_e8m0_pre_mma_exp_offsets(
-              scales, k_block_c, Int<ScalePairCount>{}, lo_exp_offsets, hi_exp_offsets);
+          Tensor scales_vm = cute::group_modes<1, -1>(cute::zipped_divide(scales, Int<8>{}));
+          static_assert(decltype(size<1>(scales_vm))::value == ScalePairCount * 2);
+          cute::for_each(cute::make_seq<ScalePairCount>{}, [&](auto pair_c) {
+            constexpr int pair = decltype(pair_c)::value;
+            constexpr int packed_index = (k_block / 4) * ScalePairCount + pair;
+            constexpr int cache_index = k_block * ScalePairCount + pair;
+            if constexpr (k_block % 4 == 0) {
+              // Folded scales store a row's four K32 offsets in one aligned word.
+              Tensor row_scales = scales_vm(_, Int<pair * 2>{});
+              constexpr int ScaleValueCount = decltype(size(row_scales))::value;
+              static_assert(ScaleValueCount == 2 || ScaleValueCount == 8);
+              constexpr int HiScaleIndex = ScaleValueCount == 8 ? 4 : 1;
+              lo_packed_offsets[packed_index] = *reinterpret_cast<uint32_t const*>(&row_scales(0));
+              hi_packed_offsets[packed_index] = *reinterpret_cast<uint32_t const*>(&row_scales(HiScaleIndex));
+            }
+            constexpr int shift = (k_block % 4) * 8;
+            lo_exp_offsets[cache_index] = (lo_packed_offsets[packed_index] >> shift) & 0xffu;
+            hi_exp_offsets[cache_index] = (hi_packed_offsets[packed_index] >> shift) & 0xffu;
+          });
         }
       }
     };
