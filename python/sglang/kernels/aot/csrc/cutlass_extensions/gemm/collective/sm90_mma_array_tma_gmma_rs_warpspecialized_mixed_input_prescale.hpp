@@ -1066,7 +1066,7 @@ struct CollectiveMmaArrayMixedInput<
     PipelineState smem_pipe_release = smem_pipe_read;
 
     constexpr int K_BLOCK_MAX = size<2>(tCrA_load);
-    constexpr int K_COMMIT_GROUP_SIZE = K_BLOCK_MAX >= 16 ? 2 : 4;
+    constexpr int K_COMMIT_GROUP_SIZE = 4;
     constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
@@ -1124,10 +1124,10 @@ struct CollectiveMmaArrayMixedInput<
     };
     auto commit_mma_group = [&] {
       warpgroup_commit_batch();
-      // A operand slots are reused by the next K tile. Commit adjacent K
-      // blocks as one group and keep only the tail groups outstanding. The
+      // A operand slots are reused by the next K tile.  Commit four adjacent K
+      // blocks as one group and keep only the tail groups outstanding.  The
       // wait is FIFO: after the last group of tile T, the first group of T is
-      // retired before tile T+1 overwrites its slots. Subsequent commits in
+      // retired before tile T+1 overwrites slots 0..3.  Subsequent commits in
       // tile T+1 keep retiring older tail groups before their slots are reused.
       warpgroup_wait<K_WAIT_MAX>();
     };
@@ -1194,7 +1194,7 @@ struct CollectiveMmaArrayMixedInput<
         copy_scale_for_mma(cute::Int<1>{}, next_read_stage);
 
         // The rolling wait after the last commit has retired the oldest group
-        // from the previous tile, which reads the first A-slot group.
+        // from the previous tile, which is the group that reads A slots 0..3.
         convert_A_kblock_static(cute::Int<0>{}, next_read_stage);
       } else {
         warpgroup_wait<0>();
