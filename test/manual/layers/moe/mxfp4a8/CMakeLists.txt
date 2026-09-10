@@ -24,13 +24,28 @@ if(NOT EXISTS "${FLASHINFER_ROOT}/include/flashinfer/activation.cuh")
   message(FATAL_ERROR "Set FLASHINFER_ROOT to the production FlashInfer dependency")
 endif()
 
-add_library(${EXPERIMENT_NAMESPACE} SHARED
-  bindings.cpp
+set(REUSE_CUDA_OBJECTS "" CACHE STRING "Explicit verified CUDA object files to relink")
+set(CUDA_SOURCES
   "${MOE}/w4a8_grouped_mm_c3x.cu"
   "${MOE}/w4a8_moe_data.cu"
   "${MOE}/scaled_mm_entry.cu"
   "${AOT}/csrc/gemm/per_token_quant_fp8.cu"
   "${AOT}/csrc/elementwise/activation.cu")
+if(REUSE_CUDA_OBJECTS)
+  list(LENGTH REUSE_CUDA_OBJECTS OBJECT_COUNT)
+  if(NOT OBJECT_COUNT EQUAL 5)
+    message(FATAL_ERROR "REUSE_CUDA_OBJECTS must contain the five verified CUDA objects")
+  endif()
+  foreach(OBJECT IN LISTS REUSE_CUDA_OBJECTS)
+    if(NOT EXISTS "${OBJECT}")
+      message(FATAL_ERROR "Missing CUDA object: ${OBJECT}")
+    endif()
+  endforeach()
+  set_source_files_properties(${REUSE_CUDA_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE)
+  add_library(${EXPERIMENT_NAMESPACE} SHARED bindings.cpp ${REUSE_CUDA_OBJECTS})
+else()
+  add_library(${EXPERIMENT_NAMESPACE} SHARED bindings.cpp ${CUDA_SOURCES})
+endif()
 set_target_properties(${EXPERIMENT_NAMESPACE} PROPERTIES
   CXX_STANDARD 17 CUDA_STANDARD 17 CUDA_ARCHITECTURES OFF
   CXX_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
@@ -38,7 +53,7 @@ target_include_directories(${EXPERIMENT_NAMESPACE} PRIVATE
   "${AOT}/include" "${AOT}/csrc" "${Python3_INCLUDE_DIRS}"
   "${CUTLASS_ROOT}/include" "${CUTLASS_ROOT}/tools/util/include"
   "${FLASHINFER_ROOT}/include" "${FLASHINFER_ROOT}/csrc")
-target_link_libraries(${EXPERIMENT_NAMESPACE} PRIVATE "${TORCH_LIBRARIES}" CUDA::cuda_driver)
+target_link_libraries(${EXPERIMENT_NAMESPACE} PRIVATE "${TORCH_LIBRARIES}" CUDA::cuda_driver CUDA::cudart)
 target_compile_definitions(${EXPERIMENT_NAMESPACE} PRIVATE
   EXPERIMENT_NAMESPACE=${EXPERIMENT_NAMESPACE}
   CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS=1

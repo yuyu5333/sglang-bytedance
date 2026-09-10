@@ -22,6 +22,15 @@ with `-DEXPERIMENT_NAMESPACE=mxfp4a8_candidate`. Do not rebuild the baseline
 directory from modified source. Keep its commit, compiler flags and library
 SHA256 with the results.
 
+For a distinct namespace without recompiling CUDA, pass
+`-DREUSE_CUDA_OBJECTS="/absolute/first.cu.o;...;/absolute/fifth.cu.o"` to a
+separate build directory. Supply all five verified CUDA objects from matching
+toolchain builds; only `bindings.cpp` uses `EXPERIMENT_NAMESPACE`.
+Record the object paths and hashes with the resulting library. This supports
+an incremental stable-patch baseline, for example unchanged GEMM objects plus
+the verified SwiGLU object. Do not rebuild source object directories while
+linking, or mistake the current source HEAD for the reused objects' provenance.
+
 ```bash
 python test/manual/layers/moe/mxfp4a8/bench.py \
   --baseline /tmp/mxfp4a8-baseline/libmxfp4a8_baseline.so \
