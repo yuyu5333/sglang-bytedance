@@ -22,6 +22,7 @@ def main():
     args = parser.parse_args()
     m, hidden, inter, experts, topk = args.tokens, 4096, 2048, 256, 6
     w1, s1, r1, w2, s2, r2 = make_weights(experts, hidden, inter, args.seed)
+    w1, w2 = w1.view(torch.uint8), w2.view(torch.uint8)
     gen = torch.Generator(device="cuda").manual_seed(args.seed + m)
     x = torch.randn((m, hidden), device="cuda", dtype=torch.bfloat16,
                     generator=gen) * 0.1
