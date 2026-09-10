@@ -244,6 +244,8 @@ template <
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
+  static constexpr int ProducerDecodeCtasPerSm =
+      UseProducerDecode && cute::size<0>(TileShape{}) == 64 && cute::size<2>(TileShape{}) == 256 ? 2 : 1;
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
@@ -302,7 +304,8 @@ struct cutlass_3x_w4a8_group_gemm {
       ClusterShape,
       std::conditional_t<
           UseSingleWarpgroupKernel || UseProducerDecode,
-          cutlass::gemm::collective::StageCount<UseProducerDecode && cute::size<2>(TileShape{}) >= 512 ? 2 : 3>,
+          cutlass::gemm::collective::StageCount<
+              UseProducerDecode && (cute::size<2>(TileShape{}) >= 512 || ProducerDecodeCtasPerSm == 2) ? 2 : 3>,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>>,
       KernelSchedule,
@@ -485,6 +488,8 @@ void cutlass_w4a8_group_gemm_caller(
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
+  } else {
+    hw_info.sm_count *= Gemm::ProducerDecodeCtasPerSm;
   }
   Args arguments;
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;

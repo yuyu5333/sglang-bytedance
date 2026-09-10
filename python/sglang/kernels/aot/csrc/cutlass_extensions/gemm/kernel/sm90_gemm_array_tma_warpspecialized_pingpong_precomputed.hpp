@@ -96,11 +96,15 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
 };
 
 template <class Mainloop, class = void>
-struct HasProducerDecode : std::false_type {};
+struct HasProducerDecode : std::false_type {
+  static constexpr int ResidentCtas = 1;
+};
 
 template <class Mainloop>
 struct HasProducerDecode<Mainloop, std::void_t<decltype(Mainloop::ProducerDecodesA)>>
-    : std::bool_constant<Mainloop::ProducerDecodesA> {};
+    : std::bool_constant<Mainloop::ProducerDecodesA> {
+  static constexpr int ResidentCtas = Mainloop::ResidentCtas;
+};
 
 #endif
 
@@ -179,14 +183,16 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr uint32_t MaxThreadsPerBlock =
       CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
-  static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
+  static constexpr uint32_t MinBlocksPerMultiprocessor = HasProducerDecode<CollectiveMainloop>::ResidentCtas;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
   static constexpr bool ProducerDecodesA = HasProducerDecode<CollectiveMainloop>::value;
-  static constexpr uint32_t LoadRegisterRequirement = ProducerDecodesA ? 128 : (UseMaxMmaRegisters ? 32 : 40);
-  static constexpr uint32_t MmaRegisterRequirement = ProducerDecodesA ? 176 : (UseMaxMmaRegisters ? 240 : 232);
+  static constexpr uint32_t LoadRegisterRequirement =
+      ProducerDecodesA ? (MinBlocksPerMultiprocessor == 2 ? 96 : 128) : (UseMaxMmaRegisters ? 32 : 40);
+  static constexpr uint32_t MmaRegisterRequirement =
+      ProducerDecodesA ? (MinBlocksPerMultiprocessor == 2 ? 80 : 176) : (UseMaxMmaRegisters ? 240 : 232);
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
@@ -666,7 +672,11 @@ class GemmUniversalPrecomputedScheduler<
     auto k_tile_count = size<3>(gA_mkl);
 
     if (warp_group_role == WarpGroupRole::Producer) {
-      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      if constexpr (MinBlocksPerMultiprocessor == 2) {
+        cutlass::arch::warpgroup_reg_alloc<LoadRegisterRequirement>();
+      } else {
+        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      }
 
       // Mainloop Producer Warp
       if (ProducerDecodesA || producer_warp_role == ProducerWarpRole::Mainloop) {
@@ -879,7 +889,11 @@ class GemmUniversalPrecomputedScheduler<
     }  // Producer Warp Group End
 
     else if (warp_group_role == WarpGroupRole::Consumer0 || warp_group_role == WarpGroupRole::Consumer1) {
-      cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+      if constexpr (MinBlocksPerMultiprocessor == 2) {
+        cutlass::arch::warpgroup_reg_dealloc<MmaRegisterRequirement>();
+      } else {
+        cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+      }
 
       // Index of warp group within consumer warp groups
       int consumer_warp_group_idx = warp_group_role == WarpGroupRole::Consumer0 ? 0 : 1;
