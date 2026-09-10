@@ -369,14 +369,9 @@ struct CollectiveMmaArrayMixedInput<
   }
 
   int current_group_idx_ = 0;
-  bool use_n16_tail_ = false;
   cute::TmaDescriptor const* current_tma_desc_b_ = nullptr;
 
  public:
-  CUTLASS_DEVICE void set_tile_rows(int rows) {
-    use_n16_tail_ = rows <= 16;
-  }
-
   static constexpr ConversionMode KernelConversionMode = get_conversion_mode();
   // MixedInputUtils consumes these traits for shared-memory sizing and layout
   // selection.  Prescale only supports the FP4->FP8 scale-table case below.
@@ -1143,31 +1138,6 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
 
-    if constexpr (size<1>(TileShape{}) == 32) {
-      if (use_n16_tail_) {
-        clear(accum);
-      }
-    }
-    auto issue_mma = [&](auto k, int stage) {
-      if constexpr (size<1>(TileShape{}) == 32) {
-        if (use_n16_tail_) {
-          cute::for_each(cute::make_seq<size<1>(accum)>{}, [&](auto m) {
-            auto a = recast<uint32_t>(tCrA_mma(_, m, k));
-            auto b = recast<uint64_t>(tCrB(_, Int<0>{}, k, stage));
-            auto c = accum(_, m, Int<0>{});
-            static_assert(decltype(size(a))::value == 4 && decltype(size(c))::value == 16);
-            cute::SM90::GMMA::MMA_64x16x32_F32E4M3E4M3_RS_TN<>::fma(
-                a(0), a(1), a(2), a(3), b(0),
-                c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7), tiled_mma.accumulate_);
-          });
-        } else {
-          cute::gemm(tiled_mma, tCrA_mma(_, _, k), tCrB(_, _, k, stage), accum);
-        }
-      } else {
-        cute::gemm(tiled_mma, tCrA_mma(_, _, k), tCrB(_, _, k, stage), accum);
-      }
-    };
-
     // First K tile.
     {
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
@@ -1189,7 +1159,7 @@ struct CollectiveMmaArrayMixedInput<
 
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
       warpgroup_arrive();
-      issue_mma(cute::Int<0>{}, read_stage);
+      cute::gemm(tiled_mma, tCrA_mma(_, _, cute::Int<0>{}), tCrB(_, _, cute::Int<0>{}, read_stage), accum);
       maybe_commit_mma_group(cute::Int<0>{});
       tiled_mma.accumulate_ = GMMA::ScaleOut::One;
 
@@ -1200,7 +1170,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX - 1>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value + 1;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
@@ -1242,7 +1213,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
@@ -1283,7 +1255,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {

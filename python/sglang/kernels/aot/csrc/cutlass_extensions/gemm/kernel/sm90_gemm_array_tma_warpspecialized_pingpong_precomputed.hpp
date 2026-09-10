@@ -95,13 +95,6 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
-template <class Mainloop, class = void>
-struct SupportsTileRows : std::false_type {};
-
-template <class Mainloop>
-struct SupportsTileRows<Mainloop, std::void_t<decltype(std::declval<Mainloop>().set_tile_rows(0))>>
-    : std::true_type {};
-
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -932,9 +925,6 @@ class GemmUniversalPrecomputedScheduler<
         if (TileScheduler::valid_warpgroup_in_work_tile(work_tile_info)) {
           math_wg_order_barrier.wait();
 
-          if constexpr (SupportsTileRows<CollectiveMainloop>::value) {
-            collective_mainloop.set_tile_rows(int(get<1>(problem_shape_MNKL)) - int(n_coord) * int(size<1>(blk_shape)));
-          }
           collective_mainloop.mma(
               mainloop_pipeline,
               mainloop_pipe_consumer_state,
