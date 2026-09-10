@@ -230,6 +230,7 @@ def main():
     parser.add_argument("--baseline-namespace", default="mxfp4a8_baseline")
     parser.add_argument("--candidate-namespace", default="mxfp4a8_candidate")
     parser.add_argument("--configs", type=int, nargs=2)
+    parser.add_argument("--baseline-configs", type=int, nargs=2)
     parser.add_argument("--tokens", type=int, nargs="+",
                         default=[4, 16, 64, 256, 1024, 2048, 4096, 8192])
     parser.add_argument("--hidden", type=int, default=4096)
@@ -275,7 +276,8 @@ def main():
         factors, ids = logits.softmax(-1).topk(args.topk, dim=-1)
         factors = (factors / factors.sum(-1, keepdim=True)).contiguous()
         ids = ids.to(torch.int32).contiguous()
-        left = Runner(baseline, x, ids, factors, weights, args, default_configs(m))
+        left = Runner(baseline, x, ids, factors, weights, args,
+                      args.baseline_configs or default_configs(m))
         right = Runner(candidate, x, ids, factors, weights, args,
                        args.configs or default_configs(m))
         equality = assert_equal(left, right)
