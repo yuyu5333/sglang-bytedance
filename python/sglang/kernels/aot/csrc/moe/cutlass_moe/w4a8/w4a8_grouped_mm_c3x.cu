@@ -68,9 +68,9 @@ using SM90_PP_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::PP, WType::MXFP4>;
 template <int M, int N, int K, int A, int B, int C>
 using SM90_CO_MXFP4 = SM90W4A8Config<M, N, K, A, B, C, Sched::CO, WType::MXFP4>;
 
-template <int N, int M = 128, int K = 128>
+template <int N>
 struct SM90_SWG_MXFP4 {
-  using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<128>>;
   using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
   using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
       TileShape,
@@ -529,18 +529,15 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 360:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 48, 512, 1, 1, false>));
       return;
-    case 362:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<16, 64, 256>));
-      return;
-    case 363:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32, 64, 256>));
+    case 361:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 24, 512, 1, 1, false>));
       return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 360, 362, 363");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 360, 361");
   }
 }
 
