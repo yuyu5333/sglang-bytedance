@@ -1085,9 +1085,8 @@ struct CollectiveMmaArrayMixedInput<
     // tensor in RF.  Smaller M tiles still prefer the compact offset cache.
     constexpr bool UseExpandedScaleRFForLargeM = size<0>(TileShape{}) >= 256;
     Tensor tCrA_scale = make_fragment_like<WeightScaleRawElement>(tCrA_load_4b_packed);
-    // Prepare LUT words at the prefetch point, ahead of the A conversion.
-    cute::array<uint2, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
-    cute::array<uint2, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
+    cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
+    cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
 
     ConsumerToken barrier_token = {BarrierStatus::WaitAgain};
     auto copy_scale_kblock = [&](auto k_block_c, int read_stage) {

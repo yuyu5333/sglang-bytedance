@@ -288,13 +288,13 @@ struct MixedGroupedGemmInputUtils {
     }
   }
 
-  __device__ __inline__ static void fp4tofp8_fused_e8m0_pre_mma_lut_pair(
+  __device__ __inline__ static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
       __nv_fp4x8_storage_t fp4x8_0,
       __nv_fp4x8_storage_t fp4x8_1,
       __nv_fp8x8_storage_t& fp8x8_raw_0,
       __nv_fp8x8_storage_t& fp8x8_raw_1,
-      uint2 lo_lut,
-      uint2 hi_lut) {
+      uint32_t lo_exp_offset,
+      uint32_t hi_exp_offset) {
     // One WGMMA A operand lane contributes two fp4x8 registers whose low
     // fp8x4 chunks share one row scale, and high chunks share the other.
     __nv_fp8x4_storage_t* fp8x4_raw_0 = reinterpret_cast<__nv_fp8x4_storage_t*>(&fp8x8_raw_0);
@@ -304,8 +304,15 @@ struct MixedGroupedGemmInputUtils {
     uint32_t const fp4_raw_1 = reinterpret_cast<uint32_t const&>(fp4x8_1);
     uint32_t const em_selector_0 = fp4_raw_0 & 0x77777777U;
     uint32_t const em_selector_1 = fp4_raw_1 & 0x77777777U;
-    uint32_t const lo_em_fp8x4_0 = prmt(lo_lut.y, lo_lut.x, em_selector_0);
-    uint32_t const lo_em_fp8x4_1 = prmt(lo_lut.y, lo_lut.x, em_selector_1);
+    constexpr uint32_t fp4_codes_0_to_3_em_bias = 0x0c080000U;
+    constexpr uint32_t fp4_codes_4_to_7_em_bias = 0x1c181410U;
+    uint32_t const lo_l4b_exp_offseted_lut = (lo_exp_offset * 0x08080800U) + fp4_codes_0_to_3_em_bias;
+    uint32_t const lo_h4b_exp_offseted_lut = (lo_exp_offset * 0x08080808U) + fp4_codes_4_to_7_em_bias;
+    uint32_t const hi_l4b_exp_offseted_lut = (hi_exp_offset * 0x08080800U) + fp4_codes_0_to_3_em_bias;
+    uint32_t const hi_h4b_exp_offseted_lut = (hi_exp_offset * 0x08080808U) + fp4_codes_4_to_7_em_bias;
+
+    uint32_t const lo_em_fp8x4_0 = prmt(lo_h4b_exp_offseted_lut, lo_l4b_exp_offseted_lut, em_selector_0);
+    uint32_t const lo_em_fp8x4_1 = prmt(lo_h4b_exp_offseted_lut, lo_l4b_exp_offseted_lut, em_selector_1);
 
 #if defined(CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS)
     fp8x4_raw_0[0] = (fp4_raw_0 & 0x80808080U) | lo_em_fp8x4_0;
@@ -324,8 +331,8 @@ struct MixedGroupedGemmInputUtils {
     fp8x4_raw_1[0] = l4b_sign_fp8x4_1 | lo_em_fp8x4_1;
 #endif
 
-    uint32_t const hi_em_fp8x4_0 = prmt(hi_lut.y, hi_lut.x, em_selector_0 >> 16U);
-    uint32_t const hi_em_fp8x4_1 = prmt(hi_lut.y, hi_lut.x, em_selector_1 >> 16U);
+    uint32_t const hi_em_fp8x4_0 = prmt(hi_h4b_exp_offseted_lut, hi_l4b_exp_offseted_lut, em_selector_0 >> 16U);
+    uint32_t const hi_em_fp8x4_1 = prmt(hi_h4b_exp_offseted_lut, hi_l4b_exp_offseted_lut, em_selector_1 >> 16U);
 
 #if defined(CUTLASS_MIXED_GEMM_FP4_FP8_PREPROCESSED_SIGNS)
     fp8x4_raw_0[1] = ((fp4_raw_0 << 4U) & 0x80808080U) | hi_em_fp8x4_0;
@@ -334,21 +341,6 @@ struct MixedGroupedGemmInputUtils {
     fp8x4_raw_0[1] = h4b_sign_fp8x4_0 | hi_em_fp8x4_0;
     fp8x4_raw_1[1] = h4b_sign_fp8x4_1 | hi_em_fp8x4_1;
 #endif
-  }
-
-  CUTLASS_DEVICE static uint2 prepare_e8m0_lut(uint32_t offset) {
-    return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
-  }
-
-  __device__ __inline__ static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
-      __nv_fp4x8_storage_t src0,
-      __nv_fp4x8_storage_t src1,
-      __nv_fp8x8_storage_t& dst0,
-      __nv_fp8x8_storage_t& dst1,
-      uint32_t lo_offset,
-      uint32_t hi_offset) {
-    fp4tofp8_fused_e8m0_pre_mma_lut_pair(
-        src0, src1, dst0, dst1, prepare_e8m0_lut(lo_offset), prepare_e8m0_lut(hi_offset));
   }
 
   template <class EngineIn, class LayoutIn, class EngineOut, class LayoutOut>
@@ -633,8 +625,8 @@ struct MixedGroupedGemmInputUtils {
       ScaleScalar const lo_scale = row_scales(0);
       ScaleScalar const hi_scale = row_scales(HiScaleIndex);
       constexpr int cache_index = KBlock * ScalePairCount + pair;
-      lo_exp_offsets[cache_index] = prepare_e8m0_lut(static_cast<uint32_t>(lo_scale.storage));
-      hi_exp_offsets[cache_index] = prepare_e8m0_lut(static_cast<uint32_t>(hi_scale.storage));
+      lo_exp_offsets[cache_index] = static_cast<uint32_t>(lo_scale.storage);
+      hi_exp_offsets[cache_index] = static_cast<uint32_t>(hi_scale.storage);
     });
   }
 
@@ -685,13 +677,9 @@ struct MixedGroupedGemmInputUtils {
       auto dst_vec0 = dst_vm(_, i);
       auto dst_vec1 = dst_vm(_, i + 1);
       constexpr int cache_index = KBlock * ScalePairCount + pair;
-      fp4tofp8_fused_e8m0_pre_mma_lut_pair(
-          cute::recast<__nv_fp4x8_storage_t>(src_vec0)(0),
-          cute::recast<__nv_fp4x8_storage_t>(src_vec1)(0),
-          cute::recast<__nv_fp8x8_storage_t>(dst_vec0)(0),
-          cute::recast<__nv_fp8x8_storage_t>(dst_vec1)(0),
-          lo_exp_offsets[cache_index],
-          hi_exp_offsets[cache_index]);
+      uint32_t const lo_exp_offset = lo_exp_offsets[cache_index];
+      uint32_t const hi_exp_offset = hi_exp_offsets[cache_index];
+      fp4tofp8_fused_e8m0_pre_mma_convert_pair(src_vec0, src_vec1, dst_vec0, dst_vec1, lo_exp_offset, hi_exp_offset);
     });
   }
 
