@@ -309,7 +309,7 @@ def main():
             equality = assert_equal(left, right)
             # Replay with changed values at fixed addresses, not cached outputs.
             x.mul_(0.75)
-            ids.copy_(ids.roll(1, dims=0))
+            ids.copy_((ids.roll(1, dims=0) + 1) % args.experts)
             equality = assert_equal(left, right)
         results = paired_times((left, right), args.warmup, args.iters)
         row = dict(tokens=m, equal=equality, baseline=results[0],

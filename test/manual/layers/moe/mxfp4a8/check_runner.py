@@ -63,7 +63,7 @@ def main():
             with torch.cuda.graph(graph):
                 graph_output = run()
             x.mul_(0.75)
-            ids.copy_(ids.roll(1, dims=0))
+            ids.copy_((ids.roll(1, dims=0) + 1) % options.experts)
             graph.replay()
             expected = reference().clone()
             torch.cuda.synchronize()
