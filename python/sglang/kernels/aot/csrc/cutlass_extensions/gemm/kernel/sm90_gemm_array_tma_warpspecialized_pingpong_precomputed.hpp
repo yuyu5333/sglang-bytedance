@@ -192,7 +192,7 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t LoadRegisterRequirement =
       ProducerDecodesA ? (MinBlocksPerMultiprocessor == 2 ? 96 : 128) : (UseMaxMmaRegisters ? 32 : 40);
   static constexpr uint32_t MmaRegisterRequirement =
-      ProducerDecodesA ? (MinBlocksPerMultiprocessor == 2 ? 72 : 176) : (UseMaxMmaRegisters ? 240 : 232);
+      ProducerDecodesA ? (MinBlocksPerMultiprocessor == 2 ? 80 : 176) : (UseMaxMmaRegisters ? 240 : 232);
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
