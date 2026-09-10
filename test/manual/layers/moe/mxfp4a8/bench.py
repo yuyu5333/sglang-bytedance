@@ -158,18 +158,36 @@ def assert_equal(left, right):
     right()
     torch.cuda.synchronize()
     result = {}
-    for name in ("a_map", "c_map", "offsets", "a1", "s1", "c1", "a2", "s2",
-                 "c2", "output"):
+    for runner in (left, right):
+        routes = torch.arange(runner.ids.numel(), device=runner.ids.device)
+        c_map = runner.c_map.long()
+        if not torch.equal(c_map.sort().values, routes):
+            raise AssertionError("c_map is not a bijection")
+        if not torch.equal(runner.a_map[c_map].long(), routes // runner.topk):
+            raise AssertionError("input/output permutation mismatch")
+        experts = runner.ids.flatten().long()
+        if not ((c_map >= runner.offsets[experts]) &
+                (c_map < runner.offsets[experts + 1])).all().item():
+            raise AssertionError("route outside its expert interval")
+    result["permutations_valid"] = True
+    for name in ("offsets", "problems1", "problems2", "a1", "s1", "c1",
+                 "a2", "s2", "c2", "output"):
         a, b = getattr(left, name), getattr(right, name)
-        equal = torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+        # Atomic routing may change expert-local order between identical calls.
+        # Compare all row intermediates in the original token-route order.
+        a_bytes, b_bytes = a.view(torch.uint8), b.view(torch.uint8)
+        if name in ("a1", "s1", "c1", "a2", "s2", "c2"):
+            a_bytes = a_bytes.reshape(a.shape[0], -1)[left.c_map.long()]
+            b_bytes = b_bytes.reshape(b.shape[0], -1)[right.c_map.long()]
+        equal = torch.equal(a_bytes, b_bytes)
         if a.dtype in (torch.float32, torch.bfloat16):
             if not torch.isfinite(a).all().item() or not torch.isfinite(b).all().item():
                 raise AssertionError(f"{name}: nonfinite values")
         result[name] = equal
         if not equal:
-            diff = (a.float() - b.float()).abs()
+            diff = (a_bytes.to(torch.int16) - b_bytes.to(torch.int16)).abs()
             raise AssertionError(
-                f"{name}: max_abs={diff.max().item()} mean_abs={diff.mean().item()}"
+                f"{name}: differing bytes={(diff != 0).sum().item()}"
             )
     return result
 
