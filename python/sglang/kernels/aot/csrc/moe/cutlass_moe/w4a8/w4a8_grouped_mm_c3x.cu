@@ -127,6 +127,21 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
       false>;
 };
 
+struct SM90_PRECOMPUTED_MXFP4_RING_GEMM2 {
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<32>, cute::Int<512>>;
+  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
+  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
+      TileShape,
+      ClusterShape,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
+      sgl_kernel::w4a8_detail::RingOperandGemm2Epilogue,
+      typename QuantTraits<WType::MXFP4>::Element,
+      QuantTraits<WType::MXFP4>::GroupSize,
+      false,
+      true,
+      false>;
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -525,12 +540,15 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 334:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2));
       return;
+    case 351:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_RING_GEMM2));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 351");
   }
 }
 
