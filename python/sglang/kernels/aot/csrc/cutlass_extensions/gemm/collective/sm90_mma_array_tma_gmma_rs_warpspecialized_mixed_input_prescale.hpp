@@ -253,8 +253,8 @@ struct CollectiveMmaArrayMixedInput<
       WeightScaleLogicalMPerFoldBlock % WeightScaleFoldedMPerFoldBlock == 0,
       "Folded weight scale M dimension must evenly divide the logical M block.");
   static_assert(
-      WeightScalePhysicalColsPerFoldBlock * cutlass::sizeof_bits<WeightScaleRawElement>::value == 128,
-      "Folded weight scale must expose 16B per folded-M coordinate.");
+      (WeightScalePhysicalColsPerFoldBlock * cutlass::sizeof_bits<WeightScaleRawElement>::value) % 128 == 0,
+      "Folded weight scale must expose a multiple of 16B per folded-M coordinate.");
   static constexpr int ScaleNRawElementsPerStage = size<1>(TileShape{}) * ActScaleTmaChunks;
   static constexpr int ScaleNElementsPerStage = size<1>(TileShape{});
   static constexpr int WeightScaleRawElementsPerFoldBlock =
@@ -393,9 +393,10 @@ struct CollectiveMmaArrayMixedInput<
                                                   cute::is_same_v<ElementA, cutlass::int4b_t> &&
                                                   cute::is_same_v<ElementB, cutlass::float_e4m3_t>;
   static_assert(
-      UseFP4ToFP8LookupTable && cute::is_same_v<ElementScale, cutlass::float_ue8m0_t>,
+      UseFP4ToFP8LookupTable &&
+          (cute::is_same_v<ElementScale, cutlass::float_ue8m0_t> || cute::is_same_v<ElementScale, uint64_t>),
       "Fused e8m0 pre-MMA scale is only implemented for MXFP4 x FP8 with folded scalar "
-      "e8m0 scales.");
+      "e8m0 scales or precomputed uint64 LUTs.");
   static constexpr size_t SmemAlignmentA = cutlass::detail::alignment_for_swizzle(SmemLayoutA{});
   static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
   static constexpr size_t SmemAlignmentScale = cute::max(SmemAlignmentA, SmemAlignmentB);
@@ -1083,10 +1084,12 @@ struct CollectiveMmaArrayMixedInput<
     // TileM256 has enough scale pairs per K block that the compact offset
     // cache creates a longer dependency chain than keeping the expanded scale
     // tensor in RF.  Smaller M tiles still prefer the compact offset cache.
-    constexpr bool UseExpandedScaleRFForLargeM = size<0>(TileShape{}) >= 256;
+    constexpr bool UsePrecomputedLut = cute::is_same_v<ElementScale, uint64_t>;
+    constexpr bool UseExpandedScaleRFForLargeM = size<0>(TileShape{}) >= 256 && !UsePrecomputedLut;
     Tensor tCrA_scale = make_fragment_like<WeightScaleRawElement>(tCrA_load_4b_packed);
-    cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
-    cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
+    using CachedScale = cute::conditional_t<UsePrecomputedLut, uint64_t, uint32_t>;
+    cute::array<CachedScale, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
+    cute::array<CachedScale, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
 
     ConsumerToken barrier_token = {BarrierStatus::WaitAgain};
     auto copy_scale_kblock = [&](auto k_block_c, int read_stage) {

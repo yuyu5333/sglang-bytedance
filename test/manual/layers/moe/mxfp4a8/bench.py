@@ -100,6 +100,18 @@ def make_weights(experts, hidden, inter, seed):
     return weights
 
 
+def weights_for_configs(weights, configs):
+    result = list(weights)
+    for gemm, config in enumerate(configs):
+        if 377 <= config <= 382:
+            index = gemm * 3 + 1
+            offset = weights[index].to(torch.int64)
+            lo = (offset * 0x08080800 + 0x0C080000) & 0xFFFFFFFF
+            hi = (offset * 0x08080808 + 0x1C181410) & 0xFFFFFFFF
+            result[index] = (lo | (hi << 32)).contiguous()
+    return result
+
+
 class Runner:
     def __init__(self, ops, x, ids, factors, weights, args, configs):
         self.ops, self.x, self.ids, self.factors = ops, x, ids, factors
@@ -296,13 +308,15 @@ def main():
         factors, ids = logits.softmax(-1).topk(args.topk, dim=-1)
         factors = (factors / factors.sum(-1, keepdim=True)).contiguous()
         ids = ids.to(torch.int32).contiguous()
-        left = Runner(baseline, x, ids, factors, weights, args,
-                      args.baseline_configs or default_configs(m))
+        baseline_configs = args.baseline_configs or default_configs(m)
+        left_weights = weights_for_configs(weights, baseline_configs)
+        left = Runner(baseline, x, ids, factors, left_weights, args, baseline_configs)
         configs = args.configs or (
             selector(m, args.hidden, args.inter, args.experts, args.topk)
             if selector else default_configs(m)
         )
-        right = Runner(candidate, x, ids, factors, weights, args, configs)
+        right_weights = weights_for_configs(weights, configs)
+        right = Runner(candidate, x, ids, factors, right_weights, args, configs)
         equality = assert_equal(left, right)
         if args.graph:
             left.capture()
@@ -313,7 +327,10 @@ def main():
             ids.copy_((ids.roll(1, dims=0) + 1) % args.experts)
             equality = assert_equal(left, right)
         results = paired_times((left, right), args.warmup, args.iters)
-        row = dict(tokens=m, equal=equality, baseline=results[0],
+        row = dict(tokens=m, equal=equality,
+                   weight_bytes=[sum(w.numel() * w.element_size() for w in ws)
+                                 for ws in (left_weights, right_weights)],
+                   baseline=results[0],
                    candidate=results[1], configs=[left.configs, right.configs],
                    reduction_pct=100 * (1 - results[1]["median_ms"] /
                                         results[0]["median_ms"]))

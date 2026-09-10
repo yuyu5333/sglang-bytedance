@@ -189,6 +189,8 @@ void run_int4_fp8_get_group_gemm_starts(
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   if constexpr (std::is_same_v<ElementBScale, cutlass::float_ue8m0_t>) {
     TORCH_CHECK(b_scales.dtype() == torch::kUInt8, "prescale weight scales must be raw uint8 E8M0");
+  } else if constexpr (std::is_same_v<ElementBScale, uint64_t>) {
+    TORCH_CHECK(b_scales.dtype() == torch::kInt64, "prescale LUTs must use int64 storage");
   } else {
     TORCH_CHECK(b_scales.dtype() == torch::kBFloat16);
   }

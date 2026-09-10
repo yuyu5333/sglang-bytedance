@@ -238,7 +238,8 @@ template <
     bool UsePreMmaE8M0 = false,
     bool ChunkMajorWorkMap = true,
     int ExpertRowPolicyValue = 0,
-    bool FuseSwiGLUQuant = false>
+    bool FuseSwiGLUQuant = false,
+    class PreMmaScale = cutlass::float_ue8m0_t>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
@@ -251,7 +252,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool FuseSwiGLUQuantEpilogue = FuseSwiGLUQuant;
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
-  using ElementScale = std::conditional_t<UsePreMmaE8M0Scale, cutlass::float_ue8m0_t, DefaultElementScale>;
+  using ElementScale = std::conditional_t<UsePreMmaE8M0Scale, PreMmaScale, DefaultElementScale>;
   using ElementScalePacked =
       std::conditional_t<UsePreMmaE8M0Scale, ElementScale, cutlass::Array<ElementScale, PackedScalesNum>>;
   // Alignment for the 4-bit weight operand (int4b_t / float_e2m1_t are both 4-bit).
