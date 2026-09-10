@@ -54,6 +54,28 @@ namespace sgl_kernel::w4a8_detail {
 struct WarpShuffleGemm2Epilogue {};
 struct WarpShufflePackedStoreGemm2Epilogue {};
 struct WarpShufflePackedStoreMaxRegsGemm2Epilogue {};
+struct RingOperandGemm2Epilogue {};
+
+template <class Base, bool Enable>
+struct RingOperandMainloop : Base {};
+
+template <class Base>
+struct RingOperandMainloop<Base, true> : Base {
+  static constexpr int Mxfp4MmaRegisterRequirement = 96;
+  template <class FrgTensorC>
+  CUTLASS_DEVICE void mma(
+      typename Base::MainloopPipeline pipeline,
+      typename Base::PipelineState state,
+      FrgTensorC& accum,
+      int k_tile_count,
+      int thread_idx,
+      typename Base::TensorStorage& storage,
+      typename Base::Params const& params) {
+    typename Base::NoopReleasedStageProducer producer;
+    this->template mma_with_released_stage_producer<FrgTensorC, typename Base::NoopReleasedStageProducer, 4>(
+        pipeline, state, accum, k_tile_count, thread_idx, storage, params, producer);
+  }
+};
 
 // Type definitions
 using MmaType = cutlass::float_e4m3_t;            // FP8 e4m3 type
@@ -185,6 +207,10 @@ struct W4A8EpilogueSelector<false, true, false, TileShape, ClusterShape, WarpShu
   using Type = cutlass::epilogue::collective::detail::Sm90TmaWarpSpecializedAdapter<Epilogue>;
 };
 
+template <typename TileShape, typename ClusterShape>
+struct W4A8EpilogueSelector<false, true, false, TileShape, ClusterShape, RingOperandGemm2Epilogue>
+    : W4A8EpilogueSelector<false, true, false, TileShape, ClusterShape, WarpShufflePackedStoreGemm2Epilogue> {};
+
 template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
 struct W4A8EpilogueSelector<true, true, false, TileShape, ClusterShape, EpilogueSchedule> {
   using Epilogue = cutlass::epilogue::collective::SmemEpilogueArrayPerTokenScale<
@@ -243,10 +269,11 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
+  static constexpr bool UseRingOperands = std::is_same_v<EpilogueSchedule, RingOperandGemm2Epilogue>;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
-      std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreMaxRegsGemm2Epilogue>;
+      std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreMaxRegsGemm2Epilogue> || UseRingOperands;
   static constexpr auto ExpertRows = static_cast<sgl_kernel::swg_detail::ExpertRowPolicy>(ExpertRowPolicyValue);
   static constexpr bool FuseSwiGLUQuantEpilogue = FuseSwiGLUQuant;
   static constexpr int GroupSize = GroupSizeK;
@@ -285,7 +312,7 @@ struct cutlass_3x_w4a8_group_gemm {
       ClusterShape,
       EpilogueSchedule>::Type;
 
-  using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
+  using CollectiveMainloopBase = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
       ArchTag,
       OperatorClass,
       cute::tuple<QuantTypeB, ElementScalePacked>,
@@ -300,11 +327,16 @@ struct cutlass_3x_w4a8_group_gemm {
       std::conditional_t<
           UseSingleWarpgroupKernel,
           cutlass::gemm::collective::StageCount<3>,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-              sizeof(typename CollectiveEpilogue::SharedStorage))>>,
+          std::conditional_t<
+              UseRingOperands,
+              cutlass::gemm::collective::StageCount<2>,
+              cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+                  sizeof(typename CollectiveEpilogue::SharedStorage))>>>,
       KernelSchedule,
       UsePreMmaE8M0Scale ? cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0
                          : cutlass::gemm::collective::MixedInputScaleMode::kPostMma>::CollectiveOp;
+  using CollectiveMainloopScaleOnly = std::conditional_t<
+      UseRingOperands, RingOperandMainloop<CollectiveMainloopBase, true>, CollectiveMainloopBase>;
 
   // Expose the weight quant type so the caller can cast device pointers correctly.
   using ElementQuantB = QuantTypeB;
@@ -478,6 +510,8 @@ void cutlass_w4a8_group_gemm_caller(
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
+  } else if constexpr (Gemm::UseRingOperands) {
+    hw_info.sm_count *= 2;
   }
   Args arguments;
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;

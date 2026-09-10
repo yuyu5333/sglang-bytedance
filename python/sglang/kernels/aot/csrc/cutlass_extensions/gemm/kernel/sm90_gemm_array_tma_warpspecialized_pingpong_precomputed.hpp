@@ -95,6 +95,17 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
+template <class CollectiveMainloop, class = void>
+struct Mxfp4MmaRegisterBudget {
+  static constexpr int value = 0;
+};
+
+template <class CollectiveMainloop>
+struct Mxfp4MmaRegisterBudget<
+    CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::Mxfp4MmaRegisterRequirement)>> {
+  static constexpr int value = CollectiveMainloop::Mxfp4MmaRegisterRequirement;
+};
+
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -172,13 +183,15 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr uint32_t MaxThreadsPerBlock =
       CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
-  static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
+  static constexpr int ExplicitMmaRegisterBudget = Mxfp4MmaRegisterBudget<CollectiveMainloop>::value;
+  static constexpr uint32_t MinBlocksPerMultiprocessor = ExplicitMmaRegisterBudget > 0 ? 2 : 1;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
   static constexpr uint32_t LoadRegisterRequirement = UseMaxMmaRegisters ? 32 : 40;
-  static constexpr uint32_t MmaRegisterRequirement = UseMaxMmaRegisters ? 240 : 232;
+  static constexpr uint32_t MmaRegisterRequirement =
+      ExplicitMmaRegisterBudget > 0 ? ExplicitMmaRegisterBudget : (UseMaxMmaRegisters ? 240 : 232);
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
