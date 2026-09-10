@@ -58,7 +58,7 @@ struct RingOperandGemm2Epilogue {};
 
 template <class Base>
 struct RingOperandMainloop : Base {
-  static constexpr int Mxfp4MmaRegisterRequirement = 144;
+  static constexpr int Mxfp4MmaRegisterRequirement = 176;
   template <class FrgTensorC>
   CUTLASS_DEVICE void mma(
       typename Base::MainloopPipeline pipeline,
