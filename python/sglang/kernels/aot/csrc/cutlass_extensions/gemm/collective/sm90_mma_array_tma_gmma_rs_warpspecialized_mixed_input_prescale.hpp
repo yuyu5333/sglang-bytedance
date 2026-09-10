@@ -369,14 +369,9 @@ struct CollectiveMmaArrayMixedInput<
   }
 
   int current_group_idx_ = 0;
-  bool use_n16_tail_ = false;
   cute::TmaDescriptor const* current_tma_desc_b_ = nullptr;
 
  public:
-  CUTLASS_DEVICE void set_tile_rows(int rows) {
-    use_n16_tail_ = rows <= 16;
-  }
-
   static constexpr ConversionMode KernelConversionMode = get_conversion_mode();
   // MixedInputUtils consumes these traits for shared-memory sizing and layout
   // selection.  Prescale only supports the FP4->FP8 scale-table case below.
@@ -1149,44 +1144,6 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
 
-    if constexpr (size<1>(TileShape{}) == 32) {
-      clear(accum);
-    }
-    auto issue_mma = [&](auto k, int stage) {
-      if constexpr (size<1>(TileShape{}) == 32) {
-        cute::for_each(cute::make_seq<size<1>(accum)>{}, [&](auto m) {
-          auto a = recast<uint32_t>(tCrA_mma(_, m, k));
-          auto b = recast<uint64_t>(tCrB(_, Int<0>{}, k, stage));
-          auto c = accum(_, m, Int<0>{});
-          // The work tile is warpgroup-uniform. Keep its branch inside PTX
-          // so the compiler sees one async operand/accumulator contract.
-          asm volatile(
-              "{\n"
-              ".reg .pred tail, accum;\n"
-              "setp.ne.b32 tail, %22, 0;\n"
-              "setp.ne.b32 accum, %21, 0;\n"
-              "@tail bra.uni N16;\n"
-              "wgmma.mma_async.sync.aligned.m64n32k32.f32.e4m3.e4m3 "
-              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15},"
-              "{%16,%17,%18,%19},%20,accum,1,1;\n"
-              "bra.uni Done;\n"
-              "N16:\n"
-              "wgmma.mma_async.sync.aligned.m64n16k32.f32.e4m3.e4m3 "
-              "{%0,%1,%2,%3,%4,%5,%6,%7},{%16,%17,%18,%19},%20,accum,1,1;\n"
-              "Done:\n"
-              "}\n"
-              : "+f"(c(0)), "+f"(c(1)), "+f"(c(2)), "+f"(c(3)),
-                "+f"(c(4)), "+f"(c(5)), "+f"(c(6)), "+f"(c(7)),
-                "+f"(c(8)), "+f"(c(9)), "+f"(c(10)), "+f"(c(11)),
-                "+f"(c(12)), "+f"(c(13)), "+f"(c(14)), "+f"(c(15))
-              : "r"(a(0)), "r"(a(1)), "r"(a(2)), "r"(a(3)), "l"(b(0)),
-                "r"(int(tiled_mma.accumulate_)), "r"(int(use_n16_tail_)));
-        });
-      } else {
-        cute::gemm(tiled_mma, tCrA_mma(_, _, k), tCrB(_, _, k, stage), accum);
-      }
-    };
-
     // First K tile.
     {
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
@@ -1208,7 +1165,7 @@ struct CollectiveMmaArrayMixedInput<
 
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
       warpgroup_arrive();
-      issue_mma(cute::Int<0>{}, read_stage);
+      cute::gemm(tiled_mma, tCrA_mma(_, _, cute::Int<0>{}), tCrB(_, _, cute::Int<0>{}, read_stage), accum);
       maybe_commit_mma_group(cute::Int<0>{});
       tiled_mma.accumulate_ = GMMA::ScaleOut::One;
 
@@ -1219,7 +1176,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX - 1>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value + 1;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
@@ -1261,7 +1219,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
@@ -1302,7 +1261,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
