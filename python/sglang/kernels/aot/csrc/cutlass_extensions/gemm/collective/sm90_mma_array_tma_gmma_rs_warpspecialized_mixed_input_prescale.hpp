@@ -944,7 +944,7 @@ struct CollectiveMmaArrayMixedInput<
 
   // The compact single-warpgroup kernel refills a stage immediately after the
   // current tile safely releases it. Regular kernels compile the no-op callback away.
-  template <class FrgTensorC, class ReleasedStageProducer, int OperandRingSlots = 0>
+  template <class FrgTensorC, class ReleasedStageProducer>
   CUTLASS_DEVICE void mma_with_released_stage_producer(
       MainloopPipeline pipeline,
       PipelineState smem_pipe_read,
@@ -998,18 +998,11 @@ struct CollectiveMmaArrayMixedInput<
     auto mma_warpgroup_slice = tiled_mma.get_slice(warp_group_thread_layout(warp_group_idx));
 
     // Allocate fragments and descriptors
-    Tensor tCrA_mma_full = mma_thread_slice.partition_fragment_A(sA(_, _, Int<0>{}));
-    Tensor tCrA_mma = [&] {
-      if constexpr (OperandRingSlots > 0) {
-        return make_fragment_like<ElementB>(replace<2>(tCrA_mma_full.shape(), Int<OperandRingSlots>{}));
-      } else {
-        return tCrA_mma_full;
-      }
-    }();
+    Tensor tCrA_mma = mma_thread_slice.partition_fragment_A(sA(_, _, Int<0>{}));  // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCrA_load = [&] {
       if constexpr (not is_layout<InternalSwappedStrideA>::value) {
         // Make register tensor with MMA layout
-        return make_fragment_like<RealSwappedElementA>(tCrA_mma_full);
+        return make_fragment_like<RealSwappedElementA>(tCrA_mma);
       } else {
         // Make register tensor matching smem layout, converter will take care of de-swizzling
         return make_tensor_like<RealSwappedElementA>(tCsA(_, _, _, Int<0>{}));
@@ -1047,8 +1040,7 @@ struct CollectiveMmaArrayMixedInput<
     auto tCsA_LDSM = smem_thr_copy_A_LDSM.partition_S(sA_LDSM);
 
     using ABBitWidthRatio = Int<sizeof_bits_v<ElementB> / sizeof_bits_v<ElementA>>;
-    auto tCrA_load_LDSM_shape =
-        replace<2>(tCrA_mma_full.shape(), size(get<2>(tCrA_mma_full.shape())) / ABBitWidthRatio{});
+    auto tCrA_load_LDSM_shape = replace<2>(tCrA_mma.shape(), size(get<2>(tCrA_mma.shape())) / ABBitWidthRatio{});
     Tensor tCrA_load_LDSM = make_fragment_like<ElementB>(tCrA_load_LDSM_shape);
     Tensor tCrA_copy_view_LDSM = smem_thr_copy_A_LDSM.retile_D(tCrA_load_LDSM);  // (CPY,CPY_M,CPY_K)
 
@@ -1074,11 +1066,9 @@ struct CollectiveMmaArrayMixedInput<
     PipelineState smem_pipe_release = smem_pipe_read;
 
     constexpr int K_BLOCK_MAX = size<2>(tCrA_load);
-    constexpr int A_SLOTS = OperandRingSlots > 0 ? OperandRingSlots : K_BLOCK_MAX;
-    constexpr int K_COMMIT_GROUP_SIZE = OperandRingSlots > 0 ? 2 : 4;
-    constexpr int K_COMMIT_GROUPS = (A_SLOTS + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
+    constexpr int K_COMMIT_GROUP_SIZE = 4;
+    constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
-    static_assert(A_SLOTS >= 4 && K_BLOCK_MAX % A_SLOTS == 0);
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
     // the rolling copy to avoid extending scale register lifetime.
     constexpr bool PreloadAllScaleKblocks = size<1>(TileShape{}) >= 128;
@@ -1123,7 +1113,7 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
     auto convert_A_kblock_static = [&](auto k_block_c, int read_stage) {
-      auto tCrA_mma_slot = tCrA_mma(_, _, Int<decltype(k_block_c)::value % A_SLOTS>{});
+      auto tCrA_mma_slot = tCrA_mma(_, _, k_block_c);
       if constexpr (UseExpandedScaleRFForLargeM) {
         Utils::convert_A_kblock_fused_e8m0_pre_mma_raw_scale_to_slot(
             tCrA_load_4b_packed, tCrA_mma_slot, tCrA_scale, k_block_c);
@@ -1134,7 +1124,11 @@ struct CollectiveMmaArrayMixedInput<
     };
     auto commit_mma_group = [&] {
       warpgroup_commit_batch();
-      // Retire the oldest slot group before the conversion window wraps.
+      // A operand slots are reused by the next K tile.  Commit four adjacent K
+      // blocks as one group and keep only the tail groups outstanding.  The
+      // wait is FIFO: after the last group of tile T, the first group of T is
+      // retired before tile T+1 overwrites slots 0..3.  Subsequent commits in
+      // tile T+1 keep retiring older tail groups before their slots are reused.
       warpgroup_wait<K_WAIT_MAX>();
     };
     auto maybe_commit_mma_group = [&](auto k_block_c) {
@@ -1177,7 +1171,7 @@ struct CollectiveMmaArrayMixedInput<
         constexpr int k_block = decltype(i)::value + 1;
         warpgroup_arrive();
         cute::gemm(
-            tiled_mma, tCrA_mma(_, _, cute::Int<k_block % A_SLOTS>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
@@ -1220,7 +1214,7 @@ struct CollectiveMmaArrayMixedInput<
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
         cute::gemm(
-            tiled_mma, tCrA_mma(_, _, cute::Int<k_block % A_SLOTS>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
@@ -1262,7 +1256,7 @@ struct CollectiveMmaArrayMixedInput<
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
         cute::gemm(
-            tiled_mma, tCrA_mma(_, _, cute::Int<k_block % A_SLOTS>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
