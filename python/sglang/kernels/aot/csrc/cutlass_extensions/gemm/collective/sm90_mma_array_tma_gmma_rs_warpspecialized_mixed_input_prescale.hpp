@@ -861,18 +861,12 @@ struct CollectiveMmaArrayMixedInput<
       int write_stage = smem_pipe_write.index();
       if (cute::elect_one_sync()) {
         // TMA for A and B
-        constexpr auto weight_cache = size<2>(TileShape{}) >= 512
-                                          ? cute::TMA::CacheHintSm90::EVICT_LAST
-                                          : cute::TMA::CacheHintSm90::EVICT_NORMAL;
-        constexpr auto activation_cache = size<2>(TileShape{}) >= 512
-                                              ? cute::TMA::CacheHintSm90::EVICT_FIRST
-                                              : cute::TMA::CacheHintSm90::EVICT_NORMAL;
         copy(
-            mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a, weight_cache),
+            mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
             tAgA(_, _, _, *k_tile_iter),
             tAsA(_, _, _, write_stage));
         copy(
-            mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b, activation_cache),
+            mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b),
             tBgB(_, _, _, *k_tile_iter),
             tBsB(_, _, _, write_stage));
       }
