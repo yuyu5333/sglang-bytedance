@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "cutlass/cutlass.h"
+#include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_dual_warpgroup_persistent.hpp"
 #include "w4a8_grouped_mm_c3x.cuh"
 
 using namespace cute;
@@ -125,6 +126,37 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
       false,
       true,
       false>;
+};
+
+template <int M, int N, int K, int Stages>
+struct SM90_DWG_MXFP4 {
+  using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;
+  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+  using Base = typename SM90_PRECOMPUTED_MXFP4<M, N, K, 1, 1, false>::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr int PersistentCtasPerSm = 2;
+    using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
+        cutlass::arch::Sm90,
+        cutlass::arch::OpClassTensorOp,
+        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
+        sgl_kernel::w4a8_detail::LayoutB_Transpose*,
+        32,
+        cutlass::float_e4m3_t,
+        sgl_kernel::w4a8_detail::LayoutA_Transpose*,
+        16,
+        float,
+        TileShape,
+        ClusterShape,
+        cutlass::gemm::collective::StageCount<Stages>,
+        cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
+        cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0>::CollectiveOp;
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::DualWarpgroupPersistentGemm<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        CollectiveMainloopScaleOnly,
+        typename Base::CollectiveEpilogue,
+        typename Base::PrecomputedTileScheduler>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
 };
 
 template <typename Config>
@@ -528,12 +560,21 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 364:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>));
       return;
+    case 384:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_DWG_MXFP4<64, 32, 512, 3>));
+      return;
+    case 385:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_DWG_MXFP4<128, 32, 256, 3>));
+      return;
+    case 386:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_DWG_MXFP4<128, 64, 256, 2>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 384-386");
   }
 }
 
