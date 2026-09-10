@@ -302,7 +302,7 @@ struct cutlass_3x_w4a8_group_gemm {
       ClusterShape,
       std::conditional_t<
           UseSingleWarpgroupKernel || UseProducerDecode,
-          cutlass::gemm::collective::StageCount<UseProducerDecode && cute::size<2>(TileShape{}) >= 512 ? 2 : 3>,
+          cutlass::gemm::collective::StageCount<3>,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>>,
       KernelSchedule,
