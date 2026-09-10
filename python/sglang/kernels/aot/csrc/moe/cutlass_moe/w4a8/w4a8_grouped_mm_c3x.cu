@@ -1,5 +1,3 @@
-#define CUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED
-
 #include <c10/cuda/CUDAGuard.h>
 #include <cudaTypedefs.h>
 #include <torch/all.h>
@@ -114,9 +112,8 @@ struct SM90_PRECOMPUTED_MXFP4 {
 // config334: register warp-transpose GEMM2 epilogue with adjacent BF16 values
 // packed into one aligned 32-bit global store per lane. 128x32x512, cluster-1,
 // expert-major scheduler (config320 base).
-template <int C = 128, int N = 32>
 struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
-  using TileShape = cute::Shape<cute::Int<C>, cute::Int<N>, cute::Int<512>>;
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<32>, cute::Int<512>>;
   using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
   using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
       TileShape,
@@ -526,23 +523,17 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 512>));
       return;
     case 334:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2<>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2));
       return;
     case 364:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>));
-      return;
-    case 375:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2<64, 24>));
-      return;
-    case 376:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2<128, 24>));
       return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 375, 376");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364");
   }
 }
 
