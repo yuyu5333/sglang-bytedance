@@ -95,6 +95,13 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
+template <class Mainloop, class = void>
+struct HasProducerDecode : std::false_type {};
+
+template <class Mainloop>
+struct HasProducerDecode<Mainloop, std::void_t<decltype(Mainloop::ProducerDecodesA)>>
+    : std::bool_constant<Mainloop::ProducerDecodesA> {};
+
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -177,8 +184,9 @@ class GemmUniversalPrecomputedScheduler<
 
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
-  static constexpr uint32_t LoadRegisterRequirement = UseMaxMmaRegisters ? 32 : 40;
-  static constexpr uint32_t MmaRegisterRequirement = UseMaxMmaRegisters ? 240 : 232;
+  static constexpr bool ProducerDecodesA = HasProducerDecode<CollectiveMainloop>::value;
+  static constexpr uint32_t LoadRegisterRequirement = ProducerDecodesA ? 128 : (UseMaxMmaRegisters ? 32 : 40);
+  static constexpr uint32_t MmaRegisterRequirement = ProducerDecodesA ? 176 : (UseMaxMmaRegisters ? 240 : 232);
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
@@ -526,7 +534,8 @@ class GemmUniversalPrecomputedScheduler<
     // Mainloop Load pipeline
     using MainloopPipeline = typename CollectiveMainloop::MainloopPipeline;
     typename MainloopPipeline::Params mainloop_pipeline_params;
-    if (warp_group_role == WarpGroupRole::Producer && producer_warp_role == ProducerWarpRole::Mainloop) {
+    if (warp_group_role == WarpGroupRole::Producer &&
+        (ProducerDecodesA || producer_warp_role == ProducerWarpRole::Mainloop)) {
       mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::Producer;
     }
     if (warp_group_role == WarpGroupRole::Consumer0 || warp_group_role == WarpGroupRole::Consumer1) {
@@ -660,7 +669,7 @@ class GemmUniversalPrecomputedScheduler<
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       // Mainloop Producer Warp
-      if (producer_warp_role == ProducerWarpRole::Mainloop) {
+      if (ProducerDecodesA || producer_warp_role == ProducerWarpRole::Mainloop) {
         int32_t curr_batch =
             idx2crd(work_tile_info.L_idx, shape<4>(gB_nkl));  // Usually just returns work_tile_info.L_idx;
         int32_t const mock_l_coord = 0;
@@ -726,7 +735,7 @@ class GemmUniversalPrecomputedScheduler<
           mainloop_pipe_producer_state.advance(work_k_tile_count - 1);
 
           // Signal for the epilogue load warp to begin
-          if (do_load_order_arrive) {
+          if (do_load_order_arrive && producer_warp_role == ProducerWarpRole::Mainloop) {
             load_order_barrier.arrive();
             do_load_order_arrive = false;
           }
