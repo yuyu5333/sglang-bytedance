@@ -525,18 +525,12 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 334:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2));
       return;
-    case 364:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>));
-      return;
-    case 365:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 64, 1024, 1, 1, false>));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 365");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334");
   }
 }
 
