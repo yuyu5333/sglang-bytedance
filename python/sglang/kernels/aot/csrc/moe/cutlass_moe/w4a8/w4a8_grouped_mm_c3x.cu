@@ -1,3 +1,4 @@
+#define CUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED
 #include <c10/cuda/CUDAGuard.h>
 #include <cudaTypedefs.h>
 #include <torch/all.h>
@@ -525,12 +526,18 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 334:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2));
       return;
+    case 360:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 48, 512, 1, 1, false>));
+      return;
+    case 361:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 24, 512, 1, 1, false>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 360, 361");
   }
 }
 

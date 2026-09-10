@@ -121,12 +121,16 @@ template <typename TileShape, typename ClusterShape, typename EpilogueSchedule>
 struct W4A8EpilogueSelector<false, true, false, TileShape, ClusterShape, EpilogueSchedule> {
   using FusionOperation =
       cutlass::epilogue::fusion::PtrArrayPerTokenScaledAcc<ElementD, ElementAccumulator, ElementAccumulator>;
+  using EpilogueTile = std::conditional_t<
+      cute::size<1>(TileShape{}) % 32 == 0,
+      cutlass::epilogue::collective::EpilogueTileAuto,
+      cute::Shape<cute::_64, cute::Int<cute::size<1>(TileShape{}) % 16 == 0 ? 16 : 8>>>;
   using Type = typename tensorrt_llm::cutlass_extensions::epilogue::collective::MixedInputSm90TmaEpilogueBuilder<
       ArchTag,
       OperatorClass,
       TileShape,
       ClusterShape,
-      cutlass::epilogue::collective::EpilogueTileAuto,
+      EpilogueTile,
       ElementAccumulator,
       ElementAccumulator,
       ElementC,
