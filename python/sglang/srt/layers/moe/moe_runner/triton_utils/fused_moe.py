@@ -401,7 +401,7 @@ def _moe_support_tma():
     return support_tensor_descriptor()
 
 
-def _prepare_fused_moe_run(
+def _resolve_fused_moe_config(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -414,17 +414,12 @@ def _prepare_fused_moe_run(
     per_channel_quant: bool,
     block_shape: Optional[List[int]],
 ):
-    """Resolve config, down_config, TMA flag, and aligned expert routing ids.
-
-    Shared by ``fused_experts_impl`` and ``pre_permute_standard_to_triton`` so
-    both paths compute alignment from the same source.
-    """
+    """Resolve launch configuration without allocating aligned routing buffers."""
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
         padded_size = 0
 
     num_tokens = hidden_states.shape[0]
-    E = w1.shape[0]
     config_dtype = get_config_dtype_str(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
@@ -446,6 +441,7 @@ def _prepare_fused_moe_run(
     # Copy config to avoid mutating the lru_cached dict returned by
     # get_moe_configs; we pop USE_TMA below.
     config = dict(config)
+    down_config = dict(down_config) if down_config is not None else None
     # Up-projection TMA is opt-in: only enabled when the up config file
     # explicitly carries "USE_TMA": true (produced by tuning). By default the
     # existing up config files do not contain this key, so existing users are
@@ -464,8 +460,37 @@ def _prepare_fused_moe_run(
             "Down MoE TMA is enabled (USE_TMA=true in the down-projection config)."
         )
 
+    return config, down_config, down_moe_use_tma, up_moe_use_tma
+
+
+def _prepare_fused_moe_run(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    per_channel_quant: bool,
+    block_shape: Optional[List[int]],
+):
+    """Resolve launch configuration and align the complete routing input."""
+    config, down_config, down_moe_use_tma, up_moe_use_tma = _resolve_fused_moe_config(
+        hidden_states,
+        w1,
+        w2,
+        topk_ids,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        per_channel_quant=per_channel_quant,
+        block_shape=block_shape,
+    )
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, config["BLOCK_SIZE_M"], E
+        topk_ids, config["BLOCK_SIZE_M"], w1.shape[0]
     )
 
     return (
@@ -521,6 +546,8 @@ def _fused_moe_kernel_sequence(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     fuse_swiglu_interleaved: bool = False,
+    output_buffer: Optional[torch.Tensor] = None,
+    scratch: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Run the MoE kernel/activation/kernel/combine sequence in a single shot.
 
@@ -563,7 +590,51 @@ def _fused_moe_kernel_sequence(
     )
     total_tokens = num_tokens * topk + padded_tokens
 
-    if no_combine:
+    if scratch is not None:
+        if (
+            no_combine
+            or hooks is not None
+            or down_moe_use_tma
+            or up_moe_use_tma
+            or fuse_swiglu_interleaved
+            or a1_q is not None
+            or not is_gated
+            or activation not in ("silu", "gelu")
+            or apply_router_weight_on_input
+            or any((use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16, use_int4_w4a16))
+            or any(v is not None for v in (gemm1_alpha, gemm1_limit, swiglu_limit))
+            or get_exec().moe.enable_fused_moe_sum_all_reduce
+            or len(scratch) != 3
+        ):
+            raise ValueError(
+                "Triton scratch is only supported for standard gated execution"
+            )
+        expected = (
+            (total_tokens, N),
+            (total_tokens, N // 2),
+            (num_tokens, topk, w2.shape[1]),
+        )
+        for buf, shape in zip(scratch, expected):
+            if (
+                buf.ndim != len(shape)
+                or buf.shape[0] < shape[0]
+                or tuple(buf.shape[1:]) != shape[1:]
+                or not buf.is_contiguous()
+                or buf.dtype != hidden_states.dtype
+                or buf.device != hidden_states.device
+            ):
+                raise ValueError("Invalid Triton scratch shape/dtype/device")
+    if output_buffer is not None:
+        if (
+            no_combine
+            or output_buffer.shape != hidden_states.shape
+            or output_buffer.dtype != hidden_states.dtype
+            or output_buffer.device != hidden_states.device
+            or not output_buffer.is_contiguous()
+        ):
+            raise ValueError("Invalid Triton output buffer")
+        out_hidden_states = output_buffer
+    elif no_combine:
         assert not inplace
         out_hidden_states = torch.empty(
             (num_tokens, topk, w2.shape[1]),
@@ -612,10 +683,14 @@ def _fused_moe_kernel_sequence(
             dtype=hidden_states.dtype,
         )
     else:
-        gemm1_out = intermediate_cache1 = torch.empty(
-            (total_tokens, N),
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
+        gemm1_out = intermediate_cache1 = (
+            scratch[0][:total_tokens]
+            if scratch is not None
+            else torch.empty(
+                (total_tokens, N),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
         )
 
     invoke_fused_moe_kernel(
@@ -660,10 +735,14 @@ def _fused_moe_kernel_sequence(
         )
 
     if not fuse_swiglu_interleaved:
-        intermediate_cache2 = torch.empty(
-            (total_tokens, N // 2),
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
+        intermediate_cache2 = (
+            scratch[1][:total_tokens]
+            if scratch is not None
+            else torch.empty(
+                (total_tokens, N // 2),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
         )
 
     # Activation function with multiplication
@@ -806,15 +885,19 @@ def _fused_moe_kernel_sequence(
 
     del intermediate_cache1
 
-    intermediate_cache3 = torch.empty(
-        (num_tokens, topk, w2.shape[1]),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+    intermediate_cache3 = (
+        scratch[2][:num_tokens]
+        if scratch is not None
+        else torch.empty(
+            (num_tokens, topk, w2.shape[1]),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
     )
 
     # LoRA hooks force the second kernel to write to intermediate_cache3 so
     # hooks.after_down can inspect/modify it before reduction.
-    _use_intermediate = not no_combine and (topk != 1 or hooks)
+    _use_intermediate = not no_combine and (topk != 1 or hooks or scratch is not None)
 
     out_slice = None
     if use_fused_moe_sum_all_reduce:
@@ -884,6 +967,10 @@ def _fused_moe_kernel_sequence(
                 intermediate_cache3[:, 1],
                 out=out_hidden_states,
             ).squeeze(dim=1)
+        elif scratch is not None:
+            moe_sum_reduce(
+                intermediate_cache3, out_hidden_states, routed_scaling_factor
+            )
         else:
             # According to micro benchmark results, torch.compile can get better performance for small token.
             if _use_moe_sum_reduce_torch_compile(num_tokens):

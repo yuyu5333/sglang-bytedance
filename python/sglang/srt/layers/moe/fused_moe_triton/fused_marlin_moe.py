@@ -163,6 +163,7 @@ def fused_marlin_moe(
     gemm1_alpha: Optional[float] = None,
     activation: str = "silu",
     is_gated: bool = True,
+    chunk_size: Optional[int] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -236,7 +237,9 @@ def fused_marlin_moe(
     topk = topk_ids.shape[1]
     gemm1_n = 2 * N if is_gated else N
 
-    chunk_limit = envs.SGLANG_MARLIN_MOE_CHUNK_SIZE.get()
+    chunk_limit = (
+        envs.SGLANG_MARLIN_MOE_CHUNK_SIZE.get() if chunk_size is None else chunk_size
+    )
     if chunk_limit < 0:
         raise ValueError("SGLANG_MARLIN_MOE_CHUNK_SIZE must be nonnegative")
     output = zero_copy_context.get_moe_output(hidden_states)

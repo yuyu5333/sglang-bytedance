@@ -64,6 +64,8 @@ class MoeRunnerConfig:
     gate_up_interleaved: bool = True
     layer: Optional[torch.nn.Module] = None
     use_tp_all_gather_activation: bool = False
+    # None inherits the environment budget; 0 explicitly disables the policy.
+    workspace_budget_bytes: Optional[int] = None
 
 
 @dataclass

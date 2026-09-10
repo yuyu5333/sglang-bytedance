@@ -117,6 +117,8 @@ def fused_experts_none_to_marlin(
     dispatch_output: StandardDispatchOutput,
     quant_info: MarlinMoeQuantInfo,
     runner_config: MoeRunnerConfig,
+    *,
+    chunk_size: Optional[int] = None,
 ) -> StandardCombineInput:
     from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
     from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
@@ -205,6 +207,7 @@ def fused_experts_none_to_marlin(
         gemm1_alpha=runner_config.gemm1_alpha,
         activation=runner_config.activation,
         is_gated=runner_config.is_gated,
+        chunk_size=chunk_size,
     ).to(hidden_states.dtype)
 
     return StandardCombineInput(

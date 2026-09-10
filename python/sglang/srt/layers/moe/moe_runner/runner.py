@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Optional
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.moe.moe_runner.base import (
     DispatchMoeRunnerCore,
     FusedOpPool,
@@ -180,6 +181,26 @@ class MoeRunner:
     def run(
         self, dispatch_output: DispatchOutput, quant_info: MoeQuantInfo, lora_info=None
     ) -> CombineInput:
+        budget = self.config.workspace_budget_bytes
+        if budget is None:
+            budget = envs.SGLANG_MOE_WORKSPACE_BUDGET_BYTES.get()
+        if budget < 0:
+            raise ValueError("MoE workspace budget must be nonnegative")
+        if budget:
+            from sglang.srt.layers.moe.moe_runner.workspace import (
+                run_with_workspace_budget,
+            )
+
+            output = run_with_workspace_budget(
+                self,
+                dispatch_output,
+                quant_info,
+                lora_info,
+                budget,
+                custom_core=self.runner_backend.value in _CUSTOM_RUNNER_CORE_FACTORIES,
+            )
+            if output is not None:
+                return output
         if self.fused_func is not None and not self.lora_enabled:
             return self.fused_func(dispatch_output, quant_info, self.config)
 

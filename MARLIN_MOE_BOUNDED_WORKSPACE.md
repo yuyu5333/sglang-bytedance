@@ -1,5 +1,12 @@
 # Marlin MoE: Bounded Route-Expanded Scratch
 
+This is the historical Marlin-only prototype report for `0ca13a9cdf`.
+The current shared byte-budget policy and Marlin/Triton adapters are described
+in [MOE_WORKSPACE_BUDGET.md](MOE_WORKSPACE_BUDGET.md). The figures below count
+the old activation pair, not the shared policy's wider scratch estimate.
+Statements about the unchanged custom-op signature apply to that prototype;
+the shared policy adds an optional explicit `chunk_size` argument.
+
 ## Decision
 
 Retain an **opt-in local prototype** for token-chunked Marlin MoE. The
