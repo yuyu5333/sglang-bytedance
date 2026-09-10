@@ -127,25 +127,6 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
       false>;
 };
 
-template <int N>
-struct SM90_PRODUCER_DECODE_MXFP4 {
-  using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<128>>;
-  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      cutlass::float_e2m1_t,
-      32,
-      false,
-      true,
-      false,
-      0,
-      false,
-      true>;
-};
-
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -547,12 +528,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 364:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>));
       return;
-    case 366:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRODUCER_DECODE_MXFP4<32>));
-      return;
-    case 367:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRODUCER_DECODE_MXFP4<64>));
-      return;
     case 371:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8, 256>));
       return;
@@ -564,7 +539,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 366, 367, 371, 372");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 371, 372");
   }
 }
 

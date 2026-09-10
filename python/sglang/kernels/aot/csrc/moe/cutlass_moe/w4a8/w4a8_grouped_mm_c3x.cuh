@@ -41,7 +41,6 @@
 #include "cutlass_extensions/epilogue/collective/sm90_epilogue_array_tma_warpspecialized_mixed_input.hpp"
 #include "cutlass_extensions/epilogue/fusion/sm90_ptr_array_per_token_scale_callbacks_tma_warpspecialized.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder_mixed_input.hpp"
-#include "cutlass_extensions/gemm/collective/sm90_mma_array_tma_gmma_producer_decode.hpp"
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_single_warpgroup_persistent.hpp"
 #include "w4a8_get_group_starts.cuh"
 #include "w4a8_swg_precomputed_work_map.cuh"
@@ -239,8 +238,7 @@ template <
     bool UsePreMmaE8M0 = false,
     bool ChunkMajorWorkMap = true,
     int ExpertRowPolicyValue = 0,
-    bool FuseSwiGLUQuant = false,
-    bool UseProducerDecode = false>
+    bool FuseSwiGLUQuant = false>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
@@ -261,7 +259,6 @@ struct cutlass_3x_w4a8_group_gemm {
   static_assert(!UseSingleWarpgroup || std::is_same_v<QuantTypeB, cutlass::float_e2m1_t>);
   static_assert(!UseSingleWarpgroup || GroupSize == 32);
   static_assert(!UseSingleWarpgroup || UsePreMmaE8M0Scale);
-  static_assert(!UseProducerDecode || (UsePreMmaE8M0Scale && !UseSingleWarpgroup && cute::size(ClusterShape{}) == 1));
   static_assert(!FuseSwiGLUQuant || UsePreMmaE8M0);
   static_assert(!UseWarpShuffleGemm2Epilogue || UsePreMmaE8M0Scale);
   static_assert(!UseWarpShuffleGemm2Epilogue || !UseSingleWarpgroup);
@@ -288,7 +285,7 @@ struct cutlass_3x_w4a8_group_gemm {
       ClusterShape,
       EpilogueSchedule>::Type;
 
-  using RawCollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
+  using CollectiveMainloopScaleOnly = typename cutlass::gemm::collective::CollectiveBuilderMixedInput<
       ArchTag,
       OperatorClass,
       cute::tuple<QuantTypeB, ElementScalePacked>,
@@ -301,17 +298,13 @@ struct cutlass_3x_w4a8_group_gemm {
       TileShape,
       ClusterShape,
       std::conditional_t<
-          UseSingleWarpgroupKernel || UseProducerDecode,
+          UseSingleWarpgroupKernel,
           cutlass::gemm::collective::StageCount<3>,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>>,
       KernelSchedule,
       UsePreMmaE8M0Scale ? cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0
                          : cutlass::gemm::collective::MixedInputScaleMode::kPostMma>::CollectiveOp;
-  using CollectiveMainloopScaleOnly = std::conditional_t<
-      UseProducerDecode,
-      cutlass::gemm::collective::ProducerDecodeMainloop<RawCollectiveMainloop>,
-      RawCollectiveMainloop>;
 
   // Expose the weight quant type so the caller can cast device pointers correctly.
   using ElementQuantB = QuantTypeB;
