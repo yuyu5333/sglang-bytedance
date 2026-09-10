@@ -263,6 +263,7 @@ def main():
     parser.add_argument("--routing", choices=("uniform", "skewed"), default="uniform")
     parser.add_argument("--graph", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--profile-dir", type=Path)
     args = parser.parse_args()
     if args.hidden % 128 or args.inter % 128 or not 0 < args.topk <= args.experts:
         parser.error("hidden/inter must be multiples of 128; 0 < topk <= experts")
@@ -320,6 +321,19 @@ def main():
         print(json.dumps(row), flush=True)
         if args.output:
             args.output.write_text(json.dumps(report, indent=2) + "\n")
+        if args.profile_dir:
+            args.profile_dir.mkdir(parents=True, exist_ok=True)
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU,
+                            torch.profiler.ProfilerActivity.CUDA]
+            ) as profile:
+                for _ in range(10):
+                    right()
+                torch.cuda.synchronize()
+            profile.export_chrome_trace(str(args.profile_dir / f"m{m}.json"))
+            (args.profile_dir / f"m{m}.txt").write_text(
+                profile.key_averages().table(sort_by="self_cuda_time_total", row_limit=30)
+            )
         del left, right
 
 
