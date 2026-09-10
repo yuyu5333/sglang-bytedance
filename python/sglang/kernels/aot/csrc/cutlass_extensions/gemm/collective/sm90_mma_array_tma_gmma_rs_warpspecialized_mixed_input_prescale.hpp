@@ -1138,54 +1138,6 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
 
-    if constexpr (K_BLOCK_MAX >= 8) {
-      static_assert(K_BLOCK_MAX % K_COMMIT_GROUP_SIZE == 0);
-      tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (int tile = 0; tile < k_tile_count; ++tile) {
-        barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
-        pipeline.consumer_wait(smem_pipe_read, barrier_token);
-        int const read_stage = smem_pipe_read.index();
-
-        cute::for_each(cute::make_seq<K_COMMIT_GROUPS>{}, [&](auto group_c) {
-          constexpr int first_k = decltype(group_c)::value * K_COMMIT_GROUP_SIZE;
-          // Each LDSM block packs two consecutive K32 operands.
-          Utils::copy_tensors_A(
-              smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, first_k / 2, read_stage);
-          Utils::copy_tensors_A(
-              smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, first_k / 2 + 1, read_stage);
-          cute::for_each(cute::make_seq<K_COMMIT_GROUP_SIZE>{}, [&](auto offset_c) {
-            constexpr int k = first_k + decltype(offset_c)::value;
-            copy_scale_for_mma(cute::Int<k>{}, read_stage);
-          });
-          cute::for_each(cute::make_seq<K_COMMIT_GROUP_SIZE>{}, [&](auto offset_c) {
-            constexpr int k = first_k + decltype(offset_c)::value;
-            convert_A_kblock_static(cute::Int<k>{}, read_stage);
-          });
-
-          // All four A operands are ready before one register fence.
-          warpgroup_arrive();
-          cute::for_each(cute::make_seq<K_COMMIT_GROUP_SIZE>{}, [&](auto offset_c) {
-            constexpr int k = first_k + decltype(offset_c)::value;
-            cute::gemm(tiled_mma, tCrA_mma(_, _, cute::Int<k>{}), tCrB(_, _, cute::Int<k>{}, read_stage), accum);
-            tiled_mma.accumulate_ = GMMA::ScaleOut::One;
-          });
-          commit_mma_group();
-        });
-
-        // The final commit retires the previous tile's B reads. Keep the
-        // current stage alive until the next tile, or mma_tail().
-        if (tile > 0) {
-          pipeline.consumer_release(smem_pipe_release);
-          ++smem_pipe_release;
-          released_stage_producer();
-        }
-        ++smem_pipe_read;
-      }
-      warpgroup_wait<0>();
-      return;
-    }
-
     // First K tile.
     {
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
