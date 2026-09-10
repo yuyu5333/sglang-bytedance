@@ -45,11 +45,12 @@ def main():
             quant_scales=scales,
             use_w4_group_scaling=True,
             use_wfp4afp8_humming=True,
+            tune_max_num_tokens=m,
             output=output,
         )
         return output
 
-    with autotune(True, cache=args.cache):
+    with autotune(True, cache=args.cache, tuning_buckets=(m,), round_up=False):
         run()
     torch.cuda.synchronize()
     if not torch.isfinite(output).all().item():
@@ -58,6 +59,7 @@ def main():
         gpu=torch.cuda.get_device_name(), torch=torch.__version__,
         flashinfer=flashinfer_version, tokens=m, hidden=hidden, inter=inter,
         experts=experts, topk=topk, seed=args.seed, cache=args.cache,
+        tuning_buckets=[m], round_up=False,
         warmup=args.warmup, iters=args.iters,
         scope="Standalone process; diagnostic unless container isolation is verified",
         **paired_times((run,), args.warmup, args.iters)[0],
