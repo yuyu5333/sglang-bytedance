@@ -316,7 +316,7 @@ struct cutlass_3x_w4a8_group_gemm {
       !UseSingleWarpgroup || (SingleWarpgroupTileN == 8 || SingleWarpgroupTileN == 16 || SingleWarpgroupTileN == 32 ||
                               SingleWarpgroupTileN == 40));
   static constexpr int SingleWarpgroupCtasPerSm =
-      SingleWarpgroupTileN <= 32 ? 4 : 3;
+      SingleWarpgroupTileN == 8 ? 6 : (SingleWarpgroupTileN == 16 ? 5 : (SingleWarpgroupTileN == 32 ? 4 : 3));
 
   using PrecomputedTileScheduler =
       cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90GroupPrecomputed<ProblemShape, 8, UseChunkMajorWorkMap>;

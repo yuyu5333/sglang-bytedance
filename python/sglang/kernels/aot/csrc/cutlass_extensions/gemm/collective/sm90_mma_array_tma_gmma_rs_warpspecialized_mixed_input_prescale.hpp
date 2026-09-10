@@ -1138,43 +1138,6 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
 
-    if constexpr (K_BLOCK_MAX == 4 && size<0>(TileShape{}) == 128) {
-      auto second_a = make_fragment_like(tCrA_mma);
-      tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
-      auto process_stage = [&](auto& operand, int tile) {
-        pipeline.consumer_wait(smem_pipe_read);
-        int const stage = smem_pipe_read.index();
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, stage);
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, stage);
-        cute::for_each(cute::make_seq<4>{}, [&](auto k) { copy_scale_for_mma(k, stage); });
-        cute::for_each(cute::make_seq<4>{}, [&](auto k) {
-          auto slot = operand(_, _, k);
-          Utils::convert_A_kblock_fused_e8m0_pre_mma_exp_offsets_to_slot(
-              tCrA_load_4b_packed, slot, k, Int<ScalePairCount>{}, lo_exp_offsets, hi_exp_offsets);
-          warpgroup_arrive();
-          cute::gemm(tiled_mma, operand(_, _, k), tCrB(_, _, k, stage), accum);
-          tiled_mma.accumulate_ = GMMA::ScaleOut::One;
-        });
-        warpgroup_commit_batch();
-        warpgroup_wait<1>();
-        if (tile > 0) {
-          pipeline.consumer_release(smem_pipe_release);
-          ++smem_pipe_release;
-          released_stage_producer();
-        }
-        ++smem_pipe_read;
-      };
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (int tile = 0; tile < k_tile_count; tile += 2) {
-        process_stage(tCrA_mma, tile);
-        if (tile + 1 < k_tile_count) {
-          process_stage(second_a, tile + 1);
-        }
-      }
-      warpgroup_wait<0>();
-      return;
-    }
-
     // First K tile.
     {
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
