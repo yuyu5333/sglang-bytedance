@@ -127,25 +127,6 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
       false>;
 };
 
-template <int M, int N, int K, bool SingleWarpgroup = false, bool ChunkMajor = false>
-struct SM90_LUT_MXFP4 {
-  using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;
-  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      cutlass::float_e2m1_t,
-      32,
-      SingleWarpgroup,
-      true,
-      ChunkMajor,
-      0,
-      false,
-      uint64_t>;
-};
-
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -509,14 +490,8 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
 
   TORCH_CHECK(b_tensors.scalar_type() == torch::kInt8, "fused MXFP4A8 interleaved weight must be int8");
   TORCH_CHECK(b_tensors.is_contiguous(), "fused MXFP4A8 interleaved weight must be contiguous");
-  bool const use_precomputed_lut = swg_config >= 377 && swg_config <= 382;
-  TORCH_CHECK(
-      b_scales.scalar_type() == (use_precomputed_lut ? torch::kInt64 : torch::kUInt8),
-      "fused MXFP4A8 scale storage does not match the selected config");
+  TORCH_CHECK(b_scales.scalar_type() == torch::kUInt8, "fused MXFP4A8 folded offset must be uint8");
   TORCH_CHECK(b_scales.is_contiguous(), "fused MXFP4A8 folded offset must be contiguous");
-  if (use_precomputed_lut) {
-    TORCH_CHECK(b_scales.numel() == b_tensors.numel() / 16, "one uint64 LUT is required per 32 FP4 values");
-  }
   TORCH_CHECK(a_scales.scalar_type() == torch::kFloat32, "fused MXFP4A8 per-row scale must be float32");
   TORCH_CHECK(a_scales.dim() == 1, "fused MXFP4A8 per-row scale must be 1D");
   TORCH_CHECK(a_scales.is_contiguous(), "fused MXFP4A8 per-row scale must be contiguous");
@@ -553,30 +528,12 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 364:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>));
       return;
-    case 377:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_LUT_MXFP4<128, 8, 128, true, true>));
-      return;
-    case 378:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_LUT_MXFP4<128, 16, 128, true, true>));
-      return;
-    case 379:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_LUT_MXFP4<64, 32, 512>));
-      return;
-    case 380:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_LUT_MXFP4<128, 32, 512>));
-      return;
-    case 381:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_LUT_MXFP4<128, 32, 512, false, true>));
-      return;
-    case 382:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_LUT_MXFP4<64, 64, 512>));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 377-382");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364");
   }
 }
 

@@ -293,10 +293,8 @@ __global__ void build_swg_precomputed_work_map_kernel(
     output_ptrs[group] =
         reinterpret_cast<uint64_t>(output_base + token_offset * output_channels * output_element_bytes);
     activation_scale_ptrs[group] = reinterpret_cast<uint64_t>(activation_scale_base + token_offset * sizeof(float));
-    using WeightScale = std::remove_const_t<
-        std::remove_pointer_t<std::remove_pointer_t<decltype(mainloop_params.ptr_S)>>>;
-    weight_scale_ptrs[group] = reinterpret_cast<uint64_t>(
-        weight_scale_base + uint64_t(expert) * weight_channels * reduction_channels / 32 * sizeof(WeightScale));
+    weight_scale_ptrs[group] =
+        reinterpret_cast<uint64_t>(weight_scale_base + uint64_t(expert) * weight_channels * reduction_channels / 32);
 
     SwgGroupInfo const info = swg_group_info<TileM, TileN, RowPolicy>(problem_shapes[group]);
     group_info_storage[0] = static_cast<unsigned long long>(info.problem_blocks_m);

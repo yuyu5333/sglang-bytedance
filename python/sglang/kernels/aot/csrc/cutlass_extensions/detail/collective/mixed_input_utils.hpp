@@ -288,14 +288,13 @@ struct MixedGroupedGemmInputUtils {
     }
   }
 
-  template <class Offset>
   __device__ __inline__ static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
       __nv_fp4x8_storage_t fp4x8_0,
       __nv_fp4x8_storage_t fp4x8_1,
       __nv_fp8x8_storage_t& fp8x8_raw_0,
       __nv_fp8x8_storage_t& fp8x8_raw_1,
-      Offset lo_exp_offset,
-      Offset hi_exp_offset) {
+      uint32_t lo_exp_offset,
+      uint32_t hi_exp_offset) {
     // One WGMMA A operand lane contributes two fp4x8 registers whose low
     // fp8x4 chunks share one row scale, and high chunks share the other.
     __nv_fp8x4_storage_t* fp8x4_raw_0 = reinterpret_cast<__nv_fp8x4_storage_t*>(&fp8x8_raw_0);
@@ -305,19 +304,12 @@ struct MixedGroupedGemmInputUtils {
     uint32_t const fp4_raw_1 = reinterpret_cast<uint32_t const&>(fp4x8_1);
     uint32_t const em_selector_0 = fp4_raw_0 & 0x77777777U;
     uint32_t const em_selector_1 = fp4_raw_1 & 0x77777777U;
-    auto lut = [](Offset offset) {
-      if constexpr (cute::is_same_v<Offset, uint64_t>) {
-        return make_uint2(uint32_t(offset), uint32_t(offset >> 32));
-      } else {
-        return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
-      }
-    };
-    uint2 const lo_lut = lut(lo_exp_offset);
-    uint2 const hi_lut = lut(hi_exp_offset);
-    uint32_t const lo_l4b_exp_offseted_lut = lo_lut.x;
-    uint32_t const lo_h4b_exp_offseted_lut = lo_lut.y;
-    uint32_t const hi_l4b_exp_offseted_lut = hi_lut.x;
-    uint32_t const hi_h4b_exp_offseted_lut = hi_lut.y;
+    constexpr uint32_t fp4_codes_0_to_3_em_bias = 0x0c080000U;
+    constexpr uint32_t fp4_codes_4_to_7_em_bias = 0x1c181410U;
+    uint32_t const lo_l4b_exp_offseted_lut = (lo_exp_offset * 0x08080800U) + fp4_codes_0_to_3_em_bias;
+    uint32_t const lo_h4b_exp_offseted_lut = (lo_exp_offset * 0x08080808U) + fp4_codes_4_to_7_em_bias;
+    uint32_t const hi_l4b_exp_offseted_lut = (hi_exp_offset * 0x08080800U) + fp4_codes_0_to_3_em_bias;
+    uint32_t const hi_h4b_exp_offseted_lut = (hi_exp_offset * 0x08080808U) + fp4_codes_4_to_7_em_bias;
 
     uint32_t const lo_em_fp8x4_0 = prmt(lo_h4b_exp_offseted_lut, lo_l4b_exp_offseted_lut, em_selector_0);
     uint32_t const lo_em_fp8x4_1 = prmt(lo_h4b_exp_offseted_lut, lo_l4b_exp_offseted_lut, em_selector_1);
@@ -351,14 +343,14 @@ struct MixedGroupedGemmInputUtils {
 #endif
   }
 
-  template <class EngineIn, class LayoutIn, class EngineOut, class LayoutOut, class Offset>
+  template <class EngineIn, class LayoutIn, class EngineOut, class LayoutOut>
   CUTLASS_DEVICE static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
       Tensor<EngineIn, LayoutIn> const& src0,
       Tensor<EngineIn, LayoutIn> const& src1,
       Tensor<EngineOut, LayoutOut>& dst0,
       Tensor<EngineOut, LayoutOut>& dst1,
-      Offset lo_exp_offset,
-      Offset hi_exp_offset) {
+      uint32_t lo_exp_offset,
+      uint32_t hi_exp_offset) {
     auto&& src0_ = cute::recast<__nv_fp4x8_storage_t>(src0)(0);
     auto&& src1_ = cute::recast<__nv_fp4x8_storage_t>(src1)(0);
     auto&& dst0_ = cute::recast<__nv_fp8x8_storage_t>(dst0)(0);
@@ -633,13 +625,8 @@ struct MixedGroupedGemmInputUtils {
       ScaleScalar const lo_scale = row_scales(0);
       ScaleScalar const hi_scale = row_scales(HiScaleIndex);
       constexpr int cache_index = KBlock * ScalePairCount + pair;
-      if constexpr (cute::is_same_v<ScaleScalar, uint64_t>) {
-        lo_exp_offsets[cache_index] = lo_scale;
-        hi_exp_offsets[cache_index] = hi_scale;
-      } else {
-        lo_exp_offsets[cache_index] = static_cast<uint32_t>(lo_scale.storage);
-        hi_exp_offsets[cache_index] = static_cast<uint32_t>(hi_scale.storage);
-      }
+      lo_exp_offsets[cache_index] = static_cast<uint32_t>(lo_scale.storage);
+      hi_exp_offsets[cache_index] = static_cast<uint32_t>(hi_scale.storage);
     });
   }
 
@@ -690,8 +677,8 @@ struct MixedGroupedGemmInputUtils {
       auto dst_vec0 = dst_vm(_, i);
       auto dst_vec1 = dst_vm(_, i + 1);
       constexpr int cache_index = KBlock * ScalePairCount + pair;
-      auto const lo_exp_offset = lo_exp_offsets[cache_index];
-      auto const hi_exp_offset = hi_exp_offsets[cache_index];
+      uint32_t const lo_exp_offset = lo_exp_offsets[cache_index];
+      uint32_t const hi_exp_offset = hi_exp_offsets[cache_index];
       fp4tofp8_fused_e8m0_pre_mma_convert_pair(src_vec0, src_vec1, dst_vec0, dst_vec1, lo_exp_offset, hi_exp_offset);
     });
   }
