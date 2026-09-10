@@ -107,7 +107,7 @@ struct ProducerDecodeMainloop : RawMainloop {
       Utils::convert_A_kblock_fused_e8m0_pre_mma_raw_scale_to_slot(fp4, output, scale_fragment, k);
       copy(output, destination(_, _, k, stage));
     });
-    cutlass::arch::fence_view_async_shared();
+    cute::fence_view_async_shared();
   }
 
   template <class... Ts, class... TMs, class KTileIterator, class BlockCoord>
