@@ -8,6 +8,7 @@ binary is loaded or replaced. See README.md for build and run commands.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import statistics
@@ -56,6 +57,22 @@ def default_configs(m):
     if m >= 8192:
         return 322, 334
     return 101, 101
+
+
+def production_config_selector():
+    # Load only the pure selector, without importing installed sgl_kernel.
+    path = Path(__file__).resolve().parents[5] / (
+        "python/sglang/srt/layers/moe/cutlass_mxfp4a8_fused_moe.py"
+    )
+    tree = ast.parse(path.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+               and n.name == "CutlassMxfp4A8FusedMoeRunner")
+    selector = next(n for n in cls.body if isinstance(n, ast.FunctionDef)
+                    and n.name == "_fused_configs")
+    selector.decorator_list = []
+    namespace = {"Tuple": tuple}
+    exec(compile(ast.Module(body=[selector], type_ignores=[]), str(path), "exec"), namespace)
+    return namespace["_fused_configs"]
 
 
 def make_weights(experts, hidden, inter, seed):
@@ -231,6 +248,7 @@ def main():
     parser.add_argument("--candidate-namespace", default="mxfp4a8_candidate")
     parser.add_argument("--configs", type=int, nargs=2)
     parser.add_argument("--baseline-configs", type=int, nargs=2)
+    parser.add_argument("--production-configs", action="store_true")
     parser.add_argument("--tokens", type=int, nargs="+",
                         default=[4, 16, 64, 256, 1024, 2048, 4096, 8192])
     parser.add_argument("--hidden", type=int, default=4096)
@@ -259,6 +277,7 @@ def main():
         else (baseline, baseline_info)
     )
     weights = make_weights(args.experts, args.hidden, args.inter, args.seed)
+    selector = production_config_selector() if args.production_configs else None
     report = dict(
         gpu=torch.cuda.get_device_name(), torch=torch.__version__,
         cuda=torch.version.cuda, baseline=baseline_info, candidate=candidate_info,
@@ -278,8 +297,11 @@ def main():
         ids = ids.to(torch.int32).contiguous()
         left = Runner(baseline, x, ids, factors, weights, args,
                       args.baseline_configs or default_configs(m))
-        right = Runner(candidate, x, ids, factors, weights, args,
-                       args.configs or default_configs(m))
+        configs = args.configs or (
+            selector(m, args.hidden, args.inter, args.experts, args.topk)
+            if selector else default_configs(m)
+        )
+        right = Runner(candidate, x, ids, factors, weights, args, configs)
         equality = assert_equal(left, right)
         if args.graph:
             left.capture()

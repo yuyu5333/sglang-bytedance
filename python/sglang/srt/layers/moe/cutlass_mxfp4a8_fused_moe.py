@@ -195,7 +195,24 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
 
     @staticmethod
-    def _fused_configs(num_tokens: int) -> Tuple[int, int]:
+    def _fused_configs(
+        num_tokens: int,
+        hidden_size: int = 0,
+        intermediate_size: int = 0,
+        num_experts: int = 0,
+        topk: int = 0,
+    ) -> Tuple[int, int]:
+        if (hidden_size, intermediate_size, num_experts, topk) == (
+            4096,
+            2048,
+            256,
+            6,
+        ):
+            # N32 reduces repeated weight conversion once expert rows grow.
+            if 640 <= num_tokens < 2048:
+                return 204, 204
+            if 2048 < num_tokens < 8192:
+                return 320, 334
         if num_tokens <= 64:
             return 100, 100
         if num_tokens == 2048:
@@ -410,7 +427,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         c1_width = n * 2
         c1 = self._empty("c1", (m * topk, c1_width), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
-        gemm1_config, gemm2_config = self._fused_configs(m)
+        gemm1_config, gemm2_config = self._fused_configs(m, k, n, num_local_experts, topk)
 
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
