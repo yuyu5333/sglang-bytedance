@@ -207,39 +207,6 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
   };
 };
 
-template <class BaseConfig, int Depth>
-struct SM90_RAW_PREFETCH_MXFP4 {
-  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
-    using RawMainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
-        typename OldMainloop::DispatchPolicy,
-        typename OldMainloop::TileShape,
-        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
-        typename OldMainloop::StrideA,
-        cutlass::float_e4m3_t,
-        typename OldMainloop::StrideB,
-        typename OldMainloop::TiledMma,
-        typename OldMainloop::GmemTiledCopyA,
-        typename OldMainloop::SmemLayoutAtomA,
-        typename OldMainloop::SmemCopyAtomA,
-        typename OldMainloop::TransformA,
-        typename OldMainloop::GmemTiledCopyB,
-        typename OldMainloop::SmemLayoutAtomB,
-        typename OldMainloop::SmemCopyAtomB,
-        cutlass::gemm::collective::RawWeightPrefetch<Depth>>;
-    struct CollectiveMainloopScaleOnly : RawMainloop {
-      static constexpr bool UseTailMmaHandoff = true;
-    };
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
 template <int N, int Stages, int Ctas>
 struct SM90_WIDE_SWG_MXFP4 {
   using Base = typename SM90_PRECOMPUTED_MXFP4<128, N, 128>::Cutlass3xW4A8Gemm;
@@ -709,18 +676,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 405:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
-    case 430:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_RAW_PREFETCH_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>, 4>));
-      return;
-    case 431:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_RAW_PREFETCH_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>, 8>));
-      return;
-    case 432:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_RAW_PREFETCH_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2, 4>));
-      return;
-    case 433:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_RAW_PREFETCH_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2, 8>));
-      return;
     case 434:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_WIDE_SWG_MXFP4<64, 3, 3>));
       return;
@@ -739,7 +694,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "430, 431, 432, 433, 434, 435, 436, 437");
+          "434, 435, 436, 437");
   }
 }
 
