@@ -105,6 +105,16 @@ struct UseTailMmaHandoff<CollectiveMainloop, std::void_t<decltype(CollectiveMain
   static constexpr bool value = CollectiveMainloop::UseTailMmaHandoff;
 };
 
+template <class CollectiveMainloop, class = void>
+struct MmaHandoffWindow {
+  static constexpr int value = 1;
+};
+
+template <class CollectiveMainloop>
+struct MmaHandoffWindow<CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::MmaHandoffWindow)>> {
+  static constexpr int value = CollectiveMainloop::MmaHandoffWindow;
+};
+
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -938,7 +948,7 @@ class GemmUniversalPrecomputedScheduler<
           if constexpr (UseTailMmaHandoff<CollectiveMainloop>::value) {
             typename CollectiveMainloop::NoopReleasedStageProducer no_refill;
             auto handoff = [&] { math_wg_order_barrier.arrive(); };
-            collective_mainloop.mma_with_released_stage_producer(
+            collective_mainloop.template mma_with_released_stage_producer<MmaHandoffWindow<CollectiveMainloop>::value>(
                 mainloop_pipeline,
                 mainloop_pipe_consumer_state,
                 accumulators,
