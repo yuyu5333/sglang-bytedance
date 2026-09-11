@@ -7,6 +7,7 @@
 
 #include "cutlass/cutlass.h"
 #include "w4a8_grouped_mm_c3x.cuh"
+#include "mxfp4a8_staged_fp8.cuh"
 
 using namespace cute;
 using sgl_kernel::w4a8_detail::cutlass_3x_w4a8_group_gemm;
@@ -581,6 +582,16 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
   TORCH_CHECK(topk > 0, "topk must be positive");
 
   switch (swg_config) {
+    case 406:
+      TORCH_CHECK(!expert_ids.has_value(), "Staged FP8 does not support compact experts");
+      sgl_kernel::staged_fp8::run<64>(
+          d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets, problem_sizes);
+      return;
+    case 407:
+      TORCH_CHECK(!expert_ids.has_value(), "Staged FP8 does not support compact experts");
+      sgl_kernel::staged_fp8::run<128>(
+          d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets, problem_sizes);
+      return;
     case 100:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
       return;
@@ -637,7 +648,8 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
+          "406, 407");
   }
 }
 
