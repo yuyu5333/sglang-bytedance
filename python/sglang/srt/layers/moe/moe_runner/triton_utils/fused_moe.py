@@ -413,13 +413,17 @@ def _resolve_fused_moe_config(
     use_int4_w4a16: bool,
     per_channel_quant: bool,
     block_shape: Optional[List[int]],
+    num_tokens: Optional[int] = None,
 ):
-    """Resolve launch configuration without allocating aligned routing buffers."""
+    """Resolve a full-batch or candidate-chunk config without routing allocation."""
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
         padded_size = 0
 
-    num_tokens = hidden_states.shape[0]
+    if num_tokens is None:
+        num_tokens = hidden_states.shape[0]
+    elif not 0 < num_tokens <= hidden_states.shape[0]:
+        raise ValueError("Candidate token count must be within the nonempty batch")
     config_dtype = get_config_dtype_str(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,

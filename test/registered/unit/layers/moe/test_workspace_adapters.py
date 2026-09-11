@@ -231,12 +231,12 @@ def triton_runtime(monkeypatch):
     )
 
 
-def sequence_inputs(rt, topk=2, scale=1.0):
-    x = torch.randn(3, 64, generator=rt.generator).to(torch.bfloat16)
+def sequence_inputs(rt, topk=2, scale=1.0, tokens=3):
+    x = torch.randn(tokens, 64, generator=rt.generator).to(torch.bfloat16)
     w1 = torch.randn(4, 64, 64, generator=rt.generator).to(x.dtype) * 0.1
     w2 = torch.randn(4, 64, 32, generator=rt.generator).to(x.dtype) * 0.1
-    ids = (torch.arange(3 * topk).view(3, topk) % 4).to(torch.int32)
-    weights = torch.rand(3, topk, generator=rt.generator)
+    ids = (torch.arange(tokens * topk).view(tokens, topk) % 4).to(torch.int32)
+    weights = torch.rand(tokens, topk, generator=rt.generator)
     sorted_ids, expert_ids, padded = rt.ns["moe_align_block_size"](ids, 8, 4)
     return dict(
         hidden_states=x,
@@ -395,6 +395,194 @@ def test_config_resolution_preserves_prepare_and_cached_configs(triton_runtime, 
     assert "USE_TMA" not in resolved[0] and "USE_TMA" not in resolved[1]
     assert rt.launch["USE_TMA"] is tma and rt.down["USE_TMA"] is tma
     assert resolved[0] is not rt.launch and resolved[1] is not rt.down
+
+
+@pytest.mark.parametrize("tokens", [None, 1, 2, 3, 0, -1, 4])
+def test_config_candidate_token_override(triton_runtime, monkeypatch, tokens):
+    rt = triton_runtime
+    args = sequence_inputs(rt)
+    rt.aligns.clear()
+    seen = []
+
+    def select(w1, w2, topk, dtype, num_tokens, **kwargs):
+        seen.append(num_tokens)
+        return rt.launch, (rt.down, None)
+
+    monkeypatch.setitem(rt.ns, "try_get_optimal_moe_config", select)
+    keys = (
+        "hidden_states",
+        "w1",
+        "w2",
+        "topk_ids",
+        "use_fp8_w8a8",
+        "use_int8_w8a8",
+        "use_int8_w8a16",
+        "use_int4_w4a16",
+        "per_channel_quant",
+        "block_shape",
+    )
+    selected = {key: args[key] for key in keys}
+    if tokens is not None and not 0 < tokens <= 3:
+        with pytest.raises(ValueError, match="Candidate token count"):
+            rt.ns["_resolve_fused_moe_config"](**selected, num_tokens=tokens)
+        assert seen == []
+    else:
+        result = rt.ns["_resolve_fused_moe_config"](**selected, num_tokens=tokens)
+        assert seen == [3 if tokens is None else tokens]
+        assert result[:2] == (rt.launch, rt.down)
+        assert result[2:] == (False, False)
+    assert not rt.aligns and not rt.calls
+    assert args["hidden_states"].shape == (3, 64)
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize("topk,scale", [(2, 1.0), (3, 0.5)])
+def test_triton_uses_candidate_config_for_every_chunk(
+    adapters, triton_runtime, monkeypatch, inplace, topk, scale
+):
+    rt = triton_runtime
+    args = sequence_inputs(rt, topk, scale, tokens=7)
+    expected = rt.ns["_fused_moe_kernel_sequence"](**args)
+    rt.calls.clear()
+    rt.aligns.clear()
+    selected, launched = [], []
+    up_configs = {
+        tokens: dict(rt.launch, BLOCK_SIZE_M=block)
+        for tokens, block in ((7, 64), (4, 32), (2, 8), (1, 128))
+    }
+    down_configs = {
+        tokens: dict(launch, BLOCK_SIZE_N=64) for tokens, launch in up_configs.items()
+    }
+
+    def select(w1, w2, topk, dtype, num_tokens, **kwargs):
+        assert not rt.aligns and not rt.calls
+        selected.append(num_tokens)
+        return up_configs[num_tokens], (down_configs[num_tokens], None)
+
+    invoke = rt.ns["invoke_fused_moe_kernel"]
+
+    def record(*args, **kwargs):
+        launched.append(dict(args[14]))
+        return invoke(*args, **kwargs)
+
+    monkeypatch.setitem(rt.ns, "try_get_optimal_moe_config", select)
+    monkeypatch.setitem(rt.ns, "invoke_fused_moe_kernel", record)
+    quant = rt.quant_cls(args["w1"], args["w2"])
+    inp = dispatch(args["hidden_states"], args["topk_ids"], args["topk_weights"])
+    budget = TritonWorkspaceEstimate(64, 32, topk, 4, 8).peak_bytes(2)
+    result, why = adapters.TritonWorkspaceAdapter.run(
+        inp, quant, config(inplace=inplace, routed_scaling_factor=scale), budget
+    )
+    assert why is None
+    assert selected == [7, 4, 2]
+    assert [(ids.shape[0], block) for ids, block in rt.aligns] == [
+        (2, 8),
+        (2, 8),
+        (2, 8),
+        (1, 8),
+    ]
+    assert launched == [up_configs[2], down_configs[2]] * 4
+    assert len({call[2] for call in rt.calls[::2]}) == 1
+    assert len({call[2] for call in rt.calls[1::2]}) == 1
+    assert (result.hidden_states is inp.hidden_states) is inplace
+    torch.testing.assert_close(result.hidden_states, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("tma_tokens", [7, 4])
+@pytest.mark.parametrize("side", ["up", "down"])
+def test_triton_candidate_tma_falls_back_before_allocation(
+    adapters, triton_runtime, monkeypatch, tma_tokens, side
+):
+    rt = triton_runtime
+    args = sequence_inputs(rt, tokens=7)
+    inp = dispatch(args["hidden_states"], args["topk_ids"], args["topk_weights"])
+    quant = rt.quant_cls(args["w1"], args["w2"])
+    rt.aligns.clear()
+    seen = []
+    configs = {}
+
+    def select(w1, w2, topk, dtype, num_tokens, **kwargs):
+        seen.append(num_tokens)
+        up, down = dict(rt.launch), dict(rt.down)
+        if num_tokens == tma_tokens:
+            (up if side == "up" else down)["USE_TMA"] = True
+        configs[num_tokens] = up, down
+        return up, (down, None)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("unsupported candidate must fall back before scratch allocation")
+
+    monkeypatch.setitem(rt.ns, "try_get_optimal_moe_config", select)
+    monkeypatch.setattr(torch.Tensor, "new_empty", unexpected)
+    monkeypatch.setattr(torch, "empty_like", unexpected)
+    result, why = adapters.TritonWorkspaceAdapter.run(inp, quant, config(), 1)
+    assert result is None and why == f"TMA layout for {tma_tokens}-token candidate"
+    assert seen == ([7] if tma_tokens == 7 else [7, 4])
+    assert configs[tma_tokens][0 if side == "up" else 1]["USE_TMA"] is True
+    assert not rt.aligns and not rt.calls
+
+
+@pytest.mark.parametrize("failure", ["budget", "config"])
+def test_triton_candidate_errors_propagate(
+    adapters, triton_runtime, monkeypatch, failure
+):
+    rt = triton_runtime
+    args = sequence_inputs(rt, tokens=7)
+    inp = dispatch(args["hidden_states"], args["topk_ids"], args["topk_weights"])
+    quant = rt.quant_cls(args["w1"], args["w2"])
+    rt.aligns.clear()
+    seen = []
+
+    def select(w1, w2, topk, dtype, num_tokens, **kwargs):
+        seen.append(num_tokens)
+        if failure == "config" and num_tokens == 4:
+            raise ValueError("invalid launch configuration")
+        return rt.launch, (rt.down, None)
+
+    monkeypatch.setitem(rt.ns, "try_get_optimal_moe_config", select)
+    for _ in range(2):
+        seen.clear()
+        with pytest.raises(
+            ValueError, match="cannot fit" if failure == "budget" else "invalid launch"
+        ):
+            adapters.TritonWorkspaceAdapter.run(inp, quant, config(), 1)
+        # The one-token estimate appears twice in the planner but resolves once.
+        assert seen == ([7, 4, 2, 1] if failure == "budget" else [7, 4])
+    assert not rt.aligns and not rt.calls
+
+
+def test_triton_candidate_costs_can_be_nonmonotone(
+    adapters, triton_runtime, monkeypatch
+):
+    rt = triton_runtime
+    args = sequence_inputs(rt, tokens=13)
+    expected = rt.ns["_fused_moe_kernel_sequence"](**args)
+    rt.calls.clear()
+    rt.aligns.clear()
+    selected = []
+
+    def select(w1, w2, topk, dtype, num_tokens, **kwargs):
+        selected.append(num_tokens)
+        launch = dict(rt.launch, BLOCK_SIZE_M=8 if num_tokens == 4 else 1024)
+        return launch, (dict(launch), None)
+
+    monkeypatch.setitem(rt.ns, "try_get_optimal_moe_config", select)
+    budget = TritonWorkspaceEstimate(64, 32, 2, 4, 8).peak_bytes(4)
+    assert TritonWorkspaceEstimate(64, 32, 2, 4, 1024).peak_bytes(1) > budget
+    result, why = adapters.TritonWorkspaceAdapter.run(
+        dispatch(args["hidden_states"], args["topk_ids"], args["topk_weights"]),
+        rt.quant_cls(args["w1"], args["w2"]),
+        config(),
+        budget,
+    )
+    assert why is None and selected == [13, 8, 4]
+    assert [(ids.shape[0], block) for ids, block in rt.aligns] == [
+        (4, 8),
+        (4, 8),
+        (4, 8),
+        (1, 8),
+    ]
+    torch.testing.assert_close(result.hidden_states, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

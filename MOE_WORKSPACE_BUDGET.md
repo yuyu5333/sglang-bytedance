@@ -6,6 +6,11 @@ Implemented a default-off, shared **call-private scratch budget policy** with
 Marlin and Triton adapters. This is a local memory-management prototype.
 No GPU memory, speed, accuracy, CUDA Graph or concurrency claim is made.
 
+The initial implementation is `9af19d5b5d`. The subsequent
+[candidate-configuration iteration](MOE_WORKSPACE_CANDIDATE_CONFIG.md)
+selects Triton configs per candidate chunk rather than from the full batch.
+The initial fixed-config measurement tables below are retained as history.
+
 | Item | Value |
 |---|---|
 | Branch | `feat/marlin-moe-bounded-workspace` |
@@ -98,9 +103,11 @@ exact aliases retain existing semantics.
 ### Triton Adapter
 
 Configuration selection was separated from routing alignment. The adapter
-resolves the full-batch configuration once, rejects TMA, and plans before
-allocating route scratch. Every chunk, including the tail, uses that same
-configuration and independently aligned local token IDs.
+now resolves an existing configuration for each candidate token count,
+rejects TMA, and plans before allocating route scratch. The selected
+candidate's configuration determines its estimate and is reused for every
+chunk, including the tail. Routing IDs are independently aligned for each
+chunk. No GPU tuning is performed by this selection.
 
 Three call-private buffers are reused: gate/up `[C*T, 2I]`, activation
 `[C*T, I]` and down `[C, T, H]`. The full output follows the original Triton
@@ -176,7 +183,11 @@ sizes. The Marlin reduction term is a maximum across the serial GEMMs,
 not their sum. Act-order and eager modified activations are excluded by
 capability checks because their temporaries are not modeled here.
 
-## Local Measurements
+## Initial Local Measurements
+
+This section records `9af19d5b5d`, which held the full-batch Triton config.
+Current candidate-config results are in
+[MOE_WORKSPACE_CANDIDATE_CONFIG.md](MOE_WORKSPACE_CANDIDATE_CONFIG.md).
 
 These are **synthetic storage checks and routing simulations**, not model
 benchmarks. Inputs: `M=8192, T=6, H=4096, I=512, E=256`, BF16 tensor
@@ -215,7 +226,8 @@ Triton's fixed configuration gives a particularly large padding increase
 at this cap. Repeated alignment, GEMM launches and expert weight reads can
 dominate any locality benefit. Bucket selection can leave substantial
 unused budget. Neither these counts nor reduced storage predict throughput.
-A per-candidate tuned config is future work and needs fresh device tests.
+Per-candidate config selection is now implemented; device testing and
+per-chunk GPU tuning remain outstanding.
 
 ## Tests and Reproduction
 
@@ -239,6 +251,9 @@ dictionary mutation on fallback, and empty Marlin lock allocation. This
 does not establish absence of device-level defects.
 
 ### Generated Cases and Results
+
+The counts in this subsection are the initial implementation's validation.
+The candidate-config report lists its additional cases and final regression.
 
 Planner: **26 passed**. Adapters: **110 passed**. Previous Marlin:
 **150 passed**. Existing runner-extension/config tests: **11 passed**.

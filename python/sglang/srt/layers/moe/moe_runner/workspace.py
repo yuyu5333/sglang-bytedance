@@ -182,6 +182,48 @@ class MarlinWorkspaceAdapter:
         return output, None
 
 
+class _UnsupportedTritonWorkspace(ValueError):
+    pass
+
+
+class _TritonCandidateEstimate:
+    """Resolve each candidate once; retain its config for the execution plan."""
+
+    def __init__(self, x, w1, w2, topk_ids, resolve_config):
+        self.x, self.w1, self.w2, self.topk_ids = x, w1, w2, topk_ids
+        self.resolve_config = resolve_config
+        self.candidates = {}
+
+    def peak_bytes(self, tokens):
+        if tokens not in self.candidates:
+            launch, down, down_tma, up_tma = self.resolve_config(
+                self.x,
+                self.w1,
+                self.w2,
+                self.topk_ids,
+                use_fp8_w8a8=False,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                per_channel_quant=False,
+                block_shape=None,
+                num_tokens=tokens,
+            )
+            if down_tma or up_tma:
+                raise _UnsupportedTritonWorkspace(
+                    f"TMA layout for {tokens}-token candidate"
+                )
+            estimate = TritonWorkspaceEstimate(
+                self.x.shape[1],
+                self.w2.shape[2],
+                self.topk_ids.shape[1],
+                self.w1.shape[0],
+                launch["BLOCK_SIZE_M"],
+            )
+            self.candidates[tokens] = launch, down, estimate
+        return self.candidates[tokens][2].peak_bytes(tokens)
+
+
 class TritonWorkspaceAdapter:
     @staticmethod
     def run(dispatch, quant, config, budget):
@@ -243,28 +285,14 @@ class TritonWorkspaceAdapter:
             return StandardCombineInput(
                 x if config.inplace else torch.empty_like(x)
             ), None
-        launch, down, down_tma, up_tma = _resolve_fused_moe_config(
-            x,
-            w1,
-            w2,
-            topk.topk_ids,
-            use_fp8_w8a8=False,
-            use_int8_w8a8=False,
-            use_int8_w8a16=False,
-            use_int4_w4a16=False,
-            per_channel_quant=False,
-            block_shape=None,
+        candidates = _TritonCandidateEstimate(
+            x, w1, w2, topk.topk_ids, _resolve_fused_moe_config
         )
-        if down_tma or up_tma:
-            return None, "TMA layout"
-        estimate = TritonWorkspaceEstimate(
-            x.shape[1],
-            w2.shape[2],
-            topk.topk_ids.shape[1],
-            w1.shape[0],
-            launch["BLOCK_SIZE_M"],
-        )
-        plan = plan_workspace(x.shape[0], budget, estimate)
+        try:
+            plan = plan_workspace(x.shape[0], budget, candidates)
+        except _UnsupportedTritonWorkspace as error:
+            return None, str(error)
+        launch, down, estimate = candidates.candidates[plan.chunk_tokens]
         cap, routes = plan.chunk_tokens, plan.chunk_tokens * estimate.topk
         scratch = (
             x.new_empty((routes, 2 * estimate.intermediate)),
