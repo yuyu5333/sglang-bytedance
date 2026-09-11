@@ -1108,14 +1108,6 @@ struct CollectiveMmaArrayMixedInput<
             copy_scale_kblock(preload_k_block_c, read_stage);
           });
         }
-      } else if constexpr (size<2>(TileShape{}) >= 512) {
-        if constexpr (decltype(k_block_c)::value == 0) {
-          cute::for_each(cute::make_seq<3>{}, [&](auto preload_k_block_c) {
-            copy_scale_kblock(preload_k_block_c, read_stage);
-          });
-        } else {
-          copy_scale_kblock(cute::Int<decltype(k_block_c)::value + 2>{}, read_stage);
-        }
       } else {
         copy_scale_kblock(k_block_c, read_stage);
       }
