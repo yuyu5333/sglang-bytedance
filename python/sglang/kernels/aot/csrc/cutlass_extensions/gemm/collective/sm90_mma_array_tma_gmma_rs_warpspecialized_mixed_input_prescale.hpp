@@ -1068,10 +1068,8 @@ struct CollectiveMmaArrayMixedInput<
           auto d = recast<uint32_t>(tCrA_copy_view_LDSM(_, _, k_block));
           cute::for_each(cute::make_seq<size(d)>{}, [&](auto i) {
             auto rc = c(Int<4 * decltype(i)::value>{});
-            int const row = crd2idx(get<0>(rc), shape<0>(sA_LDSM));
-            int const col = crd2idx(get<1>(rc), shape<1>(sA_LDSM));
-            auto p = direct_weight_base_ + int64_t(row) * direct_weight_row_bytes_ +
-                     col + direct_k_tile * (size<2>(TileShape{}) / 2);
+            auto p = direct_weight_base_ + int64_t(get<0>(rc)) * direct_weight_row_bytes_ +
+                     int(get<1>(rc)) + direct_k_tile * (size<2>(TileShape{}) / 2);
             d(i) = __ldg(reinterpret_cast<uint32_t const*>(p));
           });
         }
