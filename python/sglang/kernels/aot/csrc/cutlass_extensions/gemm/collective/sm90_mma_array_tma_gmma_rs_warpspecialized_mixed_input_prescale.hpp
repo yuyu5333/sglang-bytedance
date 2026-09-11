@@ -37,8 +37,6 @@ using namespace cute;
 struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 struct DrainedK256StageRefill {};
-struct PostIssueK128StageRefill {};
-struct PostIssueK256StageRefill {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1076,9 +1074,8 @@ struct CollectiveMmaArrayMixedInput<
     constexpr int K_COMMIT_GROUP_SIZE = 4;
     constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
-    constexpr bool DrainK256 = cute::is_any_of_v<TransformB, DrainedK256StageRefill, PostIssueK256StageRefill>;
-    constexpr bool PostIssueRefill = cute::is_any_of_v<TransformB, PostIssueK128StageRefill, PostIssueK256StageRefill>;
-    constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill> || DrainK256 || PostIssueRefill;
+    constexpr bool DrainK256 = cute::is_same_v<TransformB, DrainedK256StageRefill>;
+    constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill> || DrainK256;
     static_assert(!EarlyStageRefill || K_BLOCK_MAX == (DrainK256 ? 8 : 4));
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
     // the rolling copy to avoid extending scale register lifetime.
@@ -1233,9 +1230,7 @@ struct CollectiveMmaArrayMixedInput<
         // scales are dead, while read_stage belongs to the next ring slot.
         pipeline.consumer_release(smem_pipe_release);
         ++smem_pipe_release;
-        if constexpr (!PostIssueRefill) {
-          released_stage_producer();
-        }
+        released_stage_producer();
       }
 
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
@@ -1245,9 +1240,6 @@ struct CollectiveMmaArrayMixedInput<
             tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
-        if constexpr (PostIssueRefill && k_block == 0) {
-          released_stage_producer();
-        }
         if constexpr (!EarlyStageRefill && k_block == K_BLOCK_MAX - 1) {
           pipeline.consumer_release(smem_pipe_release);
           ++smem_pipe_release;
@@ -1290,9 +1282,7 @@ struct CollectiveMmaArrayMixedInput<
       if constexpr (EarlyStageRefill) {
         pipeline.consumer_release(smem_pipe_release);
         ++smem_pipe_release;
-        if constexpr (!PostIssueRefill) {
-          released_stage_producer();
-        }
+        released_stage_producer();
       }
 
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
@@ -1302,9 +1292,6 @@ struct CollectiveMmaArrayMixedInput<
             tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
-        if constexpr (PostIssueRefill && k_block == 0) {
-          released_stage_producer();
-        }
         if constexpr (!EarlyStageRefill && k_block == K_BLOCK_MAX - 1) {
           pipeline.consumer_release(smem_pipe_release);
           ++smem_pipe_release;
