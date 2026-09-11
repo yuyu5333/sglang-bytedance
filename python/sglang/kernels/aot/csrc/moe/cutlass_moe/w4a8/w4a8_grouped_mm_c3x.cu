@@ -207,7 +207,7 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
   };
 };
 
-template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy = sgl_kernel::swg_detail::ExpertRowPolicy::All>
+template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
 struct SM90_N16_K256_SWG_MXFP4 {
   using Base = SM90_PRECOMPUTED_MXFP4<128, 16, 256>::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
@@ -677,9 +677,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 405:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
-    case 438:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N16_K256_SWG_MXFP4<>));
-      return;
     case 441:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>));
       INVOKE_GEMM_WITH_CONFIG_AS(
@@ -692,7 +689,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "438, 441");
+          "441");
   }
 }
 
