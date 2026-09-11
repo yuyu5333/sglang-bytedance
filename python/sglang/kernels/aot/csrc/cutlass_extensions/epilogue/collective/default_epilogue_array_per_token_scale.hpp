@@ -349,7 +349,8 @@ template <
     class ElementAccumulator_,
     class ElementScalar_,
     bool UsePackedStore_ = false,
-    bool PreferMaxMmaRegisters_ = false>
+    bool PreferMaxMmaRegisters_ = false,
+    int TokenScaleCacheMode_ = 0>
 class WarpShuffleEpilogueArrayPerTokenScale {
  public:
   using CtaTileShapeMNK = CtaTileShapeMNK_;
@@ -367,6 +368,8 @@ class WarpShuffleEpilogueArrayPerTokenScale {
   using InternalStrideD = cute::remove_pointer_t<StrideD>;
   static constexpr bool UsePackedStore = UsePackedStore_;
   static constexpr bool PreferMaxMmaRegisters = PreferMaxMmaRegisters_;
+  static constexpr int TokenScaleCacheMode = TokenScaleCacheMode_;
+  static_assert(TokenScaleCacheMode >= 0 && TokenScaleCacheMode <= 2);
   using GmemTiledCopyC = void;
   using GmemTiledCopyD = void;
 
@@ -545,6 +548,23 @@ class WarpShuffleEpilogueArrayPerTokenScale {
     int const warp = (thread_idx % NumThreadsPerWarpGroup) / NumThreadsPerWarp;
     int const lane_token_pair = lane % 4;
 
+    ElementCompute cached_scales[8];
+    ElementCompute lane_scale = static_cast<ElementCompute>(params_.thread.token_scale_default);
+    if constexpr (TokenScaleCacheMode == 1) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < 8; ++i) {
+        int const global_n = tile_n_origin + 2 * lane_token_pair + i % 2 + 8 * (i / 2);
+        cached_scales[i] = global_n < N && token_scales
+                               ? static_cast<ElementCompute>(token_scales[global_n])
+                               : static_cast<ElementCompute>(params_.thread.token_scale_default);
+      }
+    } else if constexpr (TokenScaleCacheMode == 2) {
+      int const global_n = tile_n_origin + lane;
+      if (global_n < N && token_scales) {
+        lane_scale = static_cast<ElementCompute>(token_scales[global_n]);
+      }
+    }
+
 #if !defined(NDEBUG)
     CUTLASS_ASSERT(int64_t(M) == params_.output_channel_extent);
     CUTLASS_ASSERT((int64_t(M) % RequiredChannelMultiple) == 0);
@@ -571,9 +591,17 @@ class WarpShuffleEpilogueArrayPerTokenScale {
           int const fragment_idx = parity + 4 * n_octet + 16 * m_half;
           int const source_local_n = 2 * lane_token_pair + parity + 8 * n_octet;
           int const source_global_n = tile_n_origin + source_local_n;
-          ElementCompute const token_scale = source_global_n < N && token_scales
-                                                 ? static_cast<ElementCompute>(token_scales[source_global_n])
-                                                 : static_cast<ElementCompute>(params_.thread.token_scale_default);
+          ElementCompute const token_scale = [&] {
+            if constexpr (TokenScaleCacheMode == 1) {
+              return cached_scales[2 * n_octet + parity];
+            } else if constexpr (TokenScaleCacheMode == 2) {
+              return __shfl_sync(0xffffffffu, lane_scale, source_local_n);
+            } else {
+              return source_global_n < N && token_scales
+                         ? static_cast<ElementCompute>(token_scales[source_global_n])
+                         : static_cast<ElementCompute>(params_.thread.token_scale_default);
+            }
+          }();
           cutlass::Array<ElementCompute, 2> scaled{
               static_cast<ElementCompute>(accumulators(fragment_idx)) * token_scale,
               static_cast<ElementCompute>(accumulators(fragment_idx + 2)) * token_scale};
