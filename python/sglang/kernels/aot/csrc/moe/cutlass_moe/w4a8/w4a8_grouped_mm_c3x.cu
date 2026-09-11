@@ -7,7 +7,6 @@
 
 #include "cutlass/cutlass.h"
 #include "w4a8_grouped_mm_c3x.cuh"
-#include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_deep_lanes.hpp"
 
 using namespace cute;
 using sgl_kernel::w4a8_detail::cutlass_3x_w4a8_group_gemm;
@@ -200,38 +199,6 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
       static constexpr bool UseTailMmaHandoff = true;
     };
     using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
-template <int M, int K>
-struct SM90_DEEP_LANES_MXFP4 {
-  using Base = typename SM90_PRECOMPUTED_MXFP4<M, 32, K, 1, 1, false>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
-    using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
-        3, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
-    using CollectiveMainloopScaleOnly = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
-        Policy,
-        typename OldMainloop::TileShape,
-        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
-        typename OldMainloop::StrideA,
-        cutlass::float_e4m3_t,
-        typename OldMainloop::StrideB,
-        typename OldMainloop::TiledMma,
-        typename OldMainloop::GmemTiledCopyA,
-        typename OldMainloop::SmemLayoutAtomA,
-        typename OldMainloop::SmemCopyAtomA,
-        typename OldMainloop::TransformA,
-        typename OldMainloop::GmemTiledCopyB,
-        typename OldMainloop::SmemLayoutAtomB,
-        typename OldMainloop::SmemCopyAtomB,
-        typename OldMainloop::TransformB>;
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::DeepLanePersistentGemm<
         sgl_kernel::w4a8_detail::ProblemShape,
         CollectiveMainloopScaleOnly,
         typename Base::CollectiveEpilogue,
@@ -665,19 +632,12 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 405:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
-    case 414:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_DEEP_LANES_MXFP4<64, 512>));
-      return;
-    case 415:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_DEEP_LANES_MXFP4<128, 256>));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "414, 415");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405");
   }
 }
 
