@@ -217,9 +217,7 @@ def validate(args, report):
     from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 
     dtype = getattr(torch, args.dtype)
-    set_global_server_args_for_scheduler(
-        ServerArgs(model_path="workspace-kernel-validation")
-    )
+    set_global_server_args_for_scheduler(ServerArgs(model_path="dummy"))
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(args.port))
     init_distributed_environment(world_size=1, rank=0, local_rank=0, backend="gloo")
