@@ -37,7 +37,6 @@ using namespace cute;
 struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 struct DrainedK256StageRefill {};
-struct DrainedK512StageRefill {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1076,10 +1075,8 @@ struct CollectiveMmaArrayMixedInput<
     constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
     constexpr bool DrainK256 = cute::is_same_v<TransformB, DrainedK256StageRefill>;
-    constexpr bool DrainK512 = cute::is_same_v<TransformB, DrainedK512StageRefill>;
-    constexpr bool DrainKTile = DrainK256 || DrainK512;
-    constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill> || DrainKTile;
-    static_assert(!EarlyStageRefill || K_BLOCK_MAX == (DrainK512 ? 16 : (DrainK256 ? 8 : 4)));
+    constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill> || DrainK256;
+    static_assert(!EarlyStageRefill || K_BLOCK_MAX == (DrainK256 ? 8 : 4));
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
     // the rolling copy to avoid extending scale register lifetime.
     constexpr bool PreloadAllScaleKblocks = size<1>(TileShape{}) >= 128;
@@ -1146,7 +1143,7 @@ struct CollectiveMmaArrayMixedInput<
     auto maybe_commit_mma_group = [&](auto k_block_c) {
       constexpr int k_block = decltype(k_block_c)::value;
       if constexpr (((k_block + 1) % K_COMMIT_GROUP_SIZE == 0) || (k_block == K_BLOCK_MAX - 1)) {
-        if constexpr (DrainKTile && k_block == K_BLOCK_MAX - 1) {
+        if constexpr (DrainK256 && k_block == K_BLOCK_MAX - 1) {
           warpgroup_commit_batch();
           warpgroup_wait<0>();
         } else {
