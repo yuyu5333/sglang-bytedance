@@ -947,7 +947,7 @@ struct CollectiveMmaArrayMixedInput<
 
   // The compact single-warpgroup kernel refills a stage immediately after the
   // current tile safely releases it. Regular kernels compile the no-op callback away.
-  template <int HandoffWindow = 1, class FrgTensorC, class ReleasedStageProducer, class TailHandoff = NoopReleasedStageProducer>
+  template <class FrgTensorC, class ReleasedStageProducer, class TailHandoff = NoopReleasedStageProducer>
   CUTLASS_DEVICE void mma_with_released_stage_producer(
       MainloopPipeline pipeline,
       PipelineState smem_pipe_read,
@@ -958,18 +958,6 @@ struct CollectiveMmaArrayMixedInput<
       Params const& mainloop_params,
       ReleasedStageProducer& released_stage_producer,
       TailHandoff tail_handoff = {}) {
-    static_assert(HandoffWindow > 0 && HandoffWindow <= Stages);
-    bool handoff_sent = false;
-    auto handoff_if_ready = [&] {
-      if constexpr (HandoffWindow > 1) {
-        // The current stage is ready. Within one ring revolution, the next
-        // tile cannot mistake a two-revolutions-old full-barrier phase.
-        if (!handoff_sent && k_tile_count <= HandoffWindow) {
-          tail_handoff();
-          handoff_sent = true;
-        }
-      }
-    };
     static_assert(is_rmem<FrgTensorC>::value, "C tensor must be rmem resident.");
     static_assert(cute::rank(SmemLayoutA{}) == 3, "Smem layout must be rank 3.");
     static_assert(cute::rank(SmemLayoutB{}) == 3, "Smem layout must be rank 3.");
@@ -1162,7 +1150,6 @@ struct CollectiveMmaArrayMixedInput<
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
       pipeline.consumer_wait(smem_pipe_read, barrier_token);
 
-      handoff_if_ready();
       int read_stage = smem_pipe_read.index();
 
       ++smem_pipe_read;
@@ -1222,15 +1209,12 @@ struct CollectiveMmaArrayMixedInput<
     }
 
     if (k_tile_count == 0) {
-      if (!handoff_sent) {
-        tail_handoff();
-      }
+      tail_handoff();
       return;
     }
 
     CUTLASS_PRAGMA_NO_UNROLL
     for (; k_tile_count > 1; --k_tile_count) {
-      handoff_if_ready();
       int read_stage = smem_pipe_read.index();
       ++smem_pipe_read;
 
@@ -1284,9 +1268,9 @@ struct CollectiveMmaArrayMixedInput<
     {
       int read_stage = smem_pipe_read.index();
 
-      if (!handoff_sent) {
-        tail_handoff();
-      }
+      // The last current-tile stage is ready. Only now can the next tile's
+      // consumer enter the stage ring without confusing an older parity.
+      tail_handoff();
 
       if constexpr (EarlyStageRefill) {
         pipeline.consumer_release(smem_pipe_release);
