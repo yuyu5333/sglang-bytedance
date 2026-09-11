@@ -6,6 +6,8 @@ in [MOE_WORKSPACE_BUDGET.md](MOE_WORKSPACE_BUDGET.md). The figures below count
 the old activation pair, not the shared policy's wider scratch estimate.
 Statements about the unchanged custom-op signature apply to that prototype;
 the shared policy adds an optional explicit `chunk_size` argument.
+Subsequent GPU tests, measured tradeoffs and unresolved sanitizer findings
+are recorded in [MOE_WORKSPACE_CUDA_VALIDATION.md](MOE_WORKSPACE_CUDA_VALIDATION.md).
 
 ## Decision
 
@@ -286,4 +288,4 @@ Before promoting this beyond a draft PR:
 5. Retain the feature only where memory improvement justifies the latency
    cost. Do not enable by default on the basis of the local storage model.
 
-No remote validation is performed as part of this request.
+No remote validation was performed in this initial prototype phase.

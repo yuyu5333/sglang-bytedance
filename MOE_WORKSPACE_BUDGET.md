@@ -2,9 +2,15 @@
 
 ## Status
 
+This document records the initial local-only phase at `9af19d5b5d`.
+Subsequent H20 results, two Python fixes, measured memory/latency tradeoffs,
+and unresolved sanitizer findings are in
+[MOE_WORKSPACE_CUDA_VALIDATION.md](MOE_WORKSPACE_CUDA_VALIDATION.md).
+The feature remains default-off and is not production-certified.
+
 Implemented a default-off, shared **call-private scratch budget policy** with
 Marlin and Triton adapters. This is a local memory-management prototype.
-No GPU memory, speed, accuracy, CUDA Graph or concurrency claim is made.
+No GPU claim is made by the local measurements in this document.
 
 The initial implementation is `9af19d5b5d`. The subsequent
 [candidate-configuration iteration](MOE_WORKSPACE_CANDIDATE_CONFIG.md)
@@ -21,7 +27,7 @@ The initial fixed-config measurement tables below are retained as history.
 | Execution scope | Standard local CUDA MoE, after dispatch and before pre-permute |
 | Local validation | macOS arm64, Python 3.13.14, Torch 2.14.0, CUDA unavailable |
 | Kernel changes | None |
-| Remote access / deployment / PR publication | Not performed |
+| Remote access / deployment / PR publication in the initial phase | Not performed |
 
 The earlier [Marlin token-cap report](MARLIN_MOE_BOUNDED_WORKSPACE.md) is
 historical evidence for the activation-pair prototype. Its storage figures
@@ -143,7 +149,7 @@ TMA flags, so a rejected adapter probe cannot alter fallback configuration.
 | A2A / activation all-gather / communication overlap | No | No |
 | Fused sum-all-reduce / symmetric-memory allocation | No | No |
 | torch.compile / batch-invariant mode / custom runner core | No | No |
-| CUDA Graph capture/replay | Unverified | Unverified |
+| CUDA Graph capture/replay in the initial phase | Unverified | Unverified |
 
 CUDA only is intentional for this version. HIP and CPU fall back. The
 Triton weight geometry is `[E, 2I, H]` and `[E, H, I]`. A backend not in this
@@ -318,4 +324,6 @@ Before deployment or enabling by default:
    budgets. Profile routing, padding, HBM traffic and launch overhead.
 5. Run end-to-end model accuracy and identical-configuration fresh A/B.
 
-No remote or GPU validation was performed for this change.
+No remote or GPU validation was performed in this initial phase. The
+subsequent [H20 report](MOE_WORKSPACE_CUDA_VALIDATION.md) records completed
+operator tests and the remaining acceptance failures.

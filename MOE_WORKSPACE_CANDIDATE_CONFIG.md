@@ -1,5 +1,11 @@
 # Triton Workspace: Candidate-Specific Configurations
 
+This is the historical local-only iteration at `70cf5aa406`. Subsequent
+device tests and fixes are recorded in
+[MOE_WORKSPACE_CUDA_VALIDATION.md](MOE_WORKSPACE_CUDA_VALIDATION.md).
+They show a memory/latency tradeoff and unresolved sanitizer findings,
+not a GPU speedup or production acceptance.
+
 ## Decision
 
 Continue the default-off budget prototype with **per-candidate existing
@@ -14,7 +20,7 @@ chunk could therefore retain a large block-M and process excess padding.
 | Production changes | Two Python files; Triton config resolution and budget adapter |
 | Marlin / CUDA kernels / communication | Unchanged |
 | Shared budget | Still default-off; same byte-budget contract and exclusions |
-| Remote / GPU / package changes | None |
+| Remote / GPU / package changes in this iteration | None |
 
 This change reduces **modeled padded work in some configurations**, not
 measured latency. Default heuristic results at 64 MiB remain unchanged.
@@ -213,4 +219,6 @@ configs, candidate-query sequence, code/config hashes and Git state.
 An additional `--tokens 8193 --budgets-mib 16 64 600` run covers a tail
 and a full-batch fitting budget with the non-TMA snapshot.
 
-No remote validation, push or formal PR publication is part of this iteration.
+No remote validation, push or formal PR publication was part of this local
+iteration. The subsequent H20 validation was pushed and synchronized; no
+formal PR has been published.
