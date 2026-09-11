@@ -36,7 +36,6 @@ using namespace cute;
 
 struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
-struct DrainedK256StageRefill {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1074,9 +1073,8 @@ struct CollectiveMmaArrayMixedInput<
     constexpr int K_COMMIT_GROUP_SIZE = 4;
     constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
-    constexpr bool DrainK256 = cute::is_same_v<TransformB, DrainedK256StageRefill>;
-    constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill> || DrainK256;
-    static_assert(!EarlyStageRefill || K_BLOCK_MAX == (DrainK256 ? 8 : 4));
+    constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill>;
+    static_assert(!EarlyStageRefill || K_BLOCK_MAX == 4, "Early refill requires the K128 wait<0> boundary.");
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
     // the rolling copy to avoid extending scale register lifetime.
     constexpr bool PreloadAllScaleKblocks = size<1>(TileShape{}) >= 128;
@@ -1143,12 +1141,7 @@ struct CollectiveMmaArrayMixedInput<
     auto maybe_commit_mma_group = [&](auto k_block_c) {
       constexpr int k_block = decltype(k_block_c)::value;
       if constexpr (((k_block + 1) % K_COMMIT_GROUP_SIZE == 0) || (k_block == K_BLOCK_MAX - 1)) {
-        if constexpr (DrainK256 && k_block == K_BLOCK_MAX - 1) {
-          warpgroup_commit_batch();
-          warpgroup_wait<0>();
-        } else {
-          commit_mma_group();
-        }
+        commit_mma_group();
       }
     };
 
@@ -1226,7 +1219,7 @@ struct CollectiveMmaArrayMixedInput<
       ++smem_pipe_read;
 
       if constexpr (EarlyStageRefill) {
-        // The previous tile's final commit waited for all WGMMA reads. Its A, B and
+        // The previous K128 commit waited for all WGMMA reads. Its A, B and
         // scales are dead, while read_stage belongs to the next ring slot.
         pipeline.consumer_release(smem_pipe_release);
         ++smem_pipe_release;
