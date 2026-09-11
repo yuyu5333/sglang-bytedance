@@ -95,6 +95,16 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
+template <class CollectiveMainloop, class = void>
+struct UseTailMmaHandoff {
+  static constexpr bool value = false;
+};
+
+template <class CollectiveMainloop>
+struct UseTailMmaHandoff<CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::UseTailMmaHandoff)>> {
+  static constexpr bool value = CollectiveMainloop::UseTailMmaHandoff;
+};
+
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -925,16 +935,30 @@ class GemmUniversalPrecomputedScheduler<
         if (TileScheduler::valid_warpgroup_in_work_tile(work_tile_info)) {
           math_wg_order_barrier.wait();
 
-          collective_mainloop.mma(
-              mainloop_pipeline,
-              mainloop_pipe_consumer_state,
-              accumulators,
-              work_k_tile_count,
-              mma_thread_idx,
-              shared_storage.tensors.mainloop,
-              params.mainloop);
-
-          math_wg_order_barrier.arrive();
+          if constexpr (UseTailMmaHandoff<CollectiveMainloop>::value) {
+            typename CollectiveMainloop::NoopReleasedStageProducer no_refill;
+            auto handoff = [&] { math_wg_order_barrier.arrive(); };
+            collective_mainloop.mma_with_released_stage_producer(
+                mainloop_pipeline,
+                mainloop_pipe_consumer_state,
+                accumulators,
+                work_k_tile_count,
+                mma_thread_idx,
+                shared_storage.tensors.mainloop,
+                params.mainloop,
+                no_refill,
+                handoff);
+          } else {
+            collective_mainloop.mma(
+                mainloop_pipeline,
+                mainloop_pipe_consumer_state,
+                accumulators,
+                work_k_tile_count,
+                mma_thread_idx,
+                shared_storage.tensors.mainloop,
+                params.mainloop);
+            math_wg_order_barrier.arrive();
+          }
 
           // Make sure the math instructions are done and free buffers before entering the epilogue
           collective_mainloop.mma_tail(mainloop_pipeline, mainloop_pipe_consumer_state, work_k_tile_count);

@@ -221,6 +221,22 @@ struct SM90_RETIRED_STAGE_RELEASE_MXFP4 {
   };
 };
 
+template <class BaseConfig>
+struct SM90_TAIL_HANDOFF_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    struct CollectiveMainloopScaleOnly : Base::CollectiveMainloopScaleOnly {
+      static constexpr bool UseTailMmaHandoff = true;
+    };
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        CollectiveMainloopScaleOnly,
+        typename Base::CollectiveEpilogue,
+        typename Base::PrecomputedTileScheduler>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -647,12 +663,28 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_RETIRED_STAGE_RELEASE_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
+    case 401:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>));
+      return;
+    case 402:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>>));
+      return;
+    case 403:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512, 1, 1, false>>));
+      return;
+    case 404:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>>));
+      return;
+    case 405:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 397, 398, 399, 400");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 397, 398, 399, 400, "
+          "401, 402, 403, 404, 405");
   }
 }
 
