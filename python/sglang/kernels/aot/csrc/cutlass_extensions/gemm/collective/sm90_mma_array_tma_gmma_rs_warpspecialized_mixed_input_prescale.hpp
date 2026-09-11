@@ -19,7 +19,6 @@
 #include "cute/algorithm/gemm.hpp"
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/copy_sm90.hpp"
-#include "cute/arch/mma_sm89.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cute/numeric/arithmetic_tuple.hpp"
 #include "cutlass/cuda_host_adapter.hpp"
@@ -34,8 +33,6 @@
 
 namespace cutlass::gemm::collective {
 using namespace cute;
-
-struct WarpSynchronousFp8Mma {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -207,7 +204,6 @@ struct CollectiveMmaArrayMixedInput<
 
   using TransformA = TransformA_;
   using TransformB = TransformB_;
-  static constexpr bool UseWarpMma = cute::is_same_v<TransformA, WarpSynchronousFp8Mma>;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
   using SwappedTransformB = cute::conditional_t<!SwapAB, TransformB, TransformA>;
   using ArchTag = typename DispatchPolicy::ArchTag;
@@ -1137,37 +1133,8 @@ struct CollectiveMmaArrayMixedInput<
     };
     auto maybe_commit_mma_group = [&](auto k_block_c) {
       constexpr int k_block = decltype(k_block_c)::value;
-      if constexpr (!UseWarpMma &&
-                    (((k_block + 1) % K_COMMIT_GROUP_SIZE == 0) || (k_block == K_BLOCK_MAX - 1))) {
+      if constexpr (((k_block + 1) % K_COMMIT_GROUP_SIZE == 0) || (k_block == K_BLOCK_MAX - 1)) {
         commit_mma_group();
-      }
-    };
-
-    if constexpr (UseWarpMma) {
-      clear(accum);
-    }
-    auto issue_mma = [&](auto k, int stage) {
-      if constexpr (UseWarpMma) {
-        static_assert(size<1>(TileShape{}) == 8 || size<1>(TileShape{}) == 16);
-        int const lane = thread_idx % 32;
-        cute::for_each(cute::make_seq<size<1>(accum)>{}, [&](auto m) {
-          auto a = recast<uint32_t>(tCrA_mma(_, m, k));
-          auto c = accum(_, m, Int<0>{});
-          cute::for_each(cute::make_seq<size<1>(TileShape{}) / 8>{}, [&](auto n) {
-            constexpr int ci = decltype(n)::value * 4;
-            int const row = lane / 4 + int(n) * 8;
-            int const col = (lane % 4) * 4 + int(k) * 32;
-            uint32_t const b0 = *reinterpret_cast<uint32_t const*>(&sB(row, col, stage));
-            uint32_t const b1 = *reinterpret_cast<uint32_t const*>(&sB(row, col + 16, stage));
-            cute::SM89_16x8x32_F32E4M3E4M3F32_TN::fma(
-                c(ci), c(ci + 1), c(ci + 2), c(ci + 3),
-                a(0), a(1), a(2), a(3), b0, b1,
-                c(ci), c(ci + 1), c(ci + 2), c(ci + 3));
-          });
-        });
-      } else {
-        warpgroup_arrive();
-        cute::gemm(tiled_mma, tCrA_mma(_, _, k), tCrB(_, _, k, stage), accum);
       }
     };
 
@@ -1191,7 +1158,8 @@ struct CollectiveMmaArrayMixedInput<
       convert_A_kblock_static(cute::Int<0>{}, read_stage);
 
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
-      issue_mma(cute::Int<0>{}, read_stage);
+      warpgroup_arrive();
+      cute::gemm(tiled_mma, tCrA_mma(_, _, cute::Int<0>{}), tCrB(_, _, cute::Int<0>{}, read_stage), accum);
       maybe_commit_mma_group(cute::Int<0>{});
       tiled_mma.accumulate_ = GMMA::ScaleOut::One;
 
@@ -1201,7 +1169,9 @@ struct CollectiveMmaArrayMixedInput<
 
       cute::for_each(cute::make_seq<K_BLOCK_MAX - 1>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value + 1;
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        warpgroup_arrive();
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
@@ -1227,9 +1197,7 @@ struct CollectiveMmaArrayMixedInput<
         // from the previous tile, which is the group that reads A slots 0..3.
         convert_A_kblock_static(cute::Int<0>{}, next_read_stage);
       } else {
-        if constexpr (!UseWarpMma) {
-          warpgroup_wait<0>();
-        }
+        warpgroup_wait<0>();
       }
     }
 
@@ -1244,7 +1212,9 @@ struct CollectiveMmaArrayMixedInput<
 
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        warpgroup_arrive();
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
@@ -1284,7 +1254,9 @@ struct CollectiveMmaArrayMixedInput<
 
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        warpgroup_arrive();
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block == K_BLOCK_MAX - 1) {
@@ -1302,9 +1274,7 @@ struct CollectiveMmaArrayMixedInput<
         }
       });
 
-      if constexpr (!UseWarpMma) {
-        warpgroup_wait<0>();
-      }
+      warpgroup_wait<0>();
     }
   }
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
