@@ -277,11 +277,19 @@ def sequence_inputs(rt, topk=2, scale=1.0, tokens=3):
     )
 
 
-@pytest.mark.parametrize("topk,scale", [(1, 1.0), (2, 1.0), (3, 0.5)])
+@pytest.mark.parametrize(
+    "topk,scale", [(1, 0.0), (1, 0.5), (1, 1.0), (1, 1.7), (2, 1.0), (3, 0.5)]
+)
 def test_triton_default_and_scratch_paths_agree(triton_runtime, topk, scale):
     args = sequence_inputs(triton_runtime, topk, scale)
     run = triton_runtime.ns["_fused_moe_kernel_sequence"]
     expected = run(**args)
+    assert torch.isfinite(expected).all()
+    if topk == 1:
+        unscaled = run(**dict(args, routed_scaling_factor=1.0))
+        torch.testing.assert_close(
+            expected, (unscaled.float() * scale).to(expected.dtype), atol=0, rtol=0
+        )
     x = args["hidden_states"]
     scratch = (
         x.new_empty((5 * topk, 64)),
@@ -291,6 +299,7 @@ def test_triton_default_and_scratch_paths_agree(triton_runtime, topk, scale):
     output = torch.empty_like(x)
     actual = run(**args, scratch=scratch, output_buffer=output)
     assert actual is output
+    assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
