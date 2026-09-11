@@ -105,13 +105,9 @@ class GemmUniversalPrecomputedScheduler<
     CollectiveMainloop_,
     CollectiveEpilogue_,
     TileScheduler_,
-    cute::enable_if_t<
-        cute::is_base_of_v<
-            KernelPtrArrayTmaWarpSpecializedPingpong,
-            typename CollectiveMainloop_::DispatchPolicy::Schedule> ||
-        cute::is_base_of_v<
-            KernelPtrArrayTmaWarpSpecializedCooperative,
-            typename CollectiveMainloop_::DispatchPolicy::Schedule>>> {
+    cute::enable_if_t<cute::is_base_of_v<
+        KernelPtrArrayTmaWarpSpecializedPingpong,
+        typename CollectiveMainloop_::DispatchPolicy::Schedule>>> {
  public:
   //
   // Type Aliases
@@ -121,6 +117,10 @@ class GemmUniversalPrecomputedScheduler<
       rank(typename ProblemShape::UnderlyingProblemShape{}) == 3 or
           rank(typename ProblemShape::UnderlyingProblemShape{}) == 4,
       "ProblemShape{} should be <M,N,K> or <M,N,K,L>");
+
+  static_assert(cute::is_base_of_v<
+                KernelPtrArrayTmaWarpSpecializedPingpong,
+                typename CollectiveMainloop_::DispatchPolicy::Schedule>);
 
   static constexpr bool IsGdcEnabled = false;
 
@@ -137,7 +137,6 @@ class GemmUniversalPrecomputedScheduler<
   using StrideB = typename CollectiveMainloop::StrideB;
   using DispatchPolicy = typename CollectiveMainloop::DispatchPolicy;
   using Schedule = typename DispatchPolicy::Schedule;
-  static constexpr bool IsCooperative = cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedCooperative, Schedule>;
   using ElementAccumulator = typename CollectiveMainloop::ElementAccumulator;
   using ClusterShape = typename DispatchPolicy::ClusterShape;
   using MainloopArguments = typename CollectiveMainloop::Arguments;
@@ -172,8 +171,7 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr uint32_t MaxThreadsPerBlock =
-      (NumLoadWarpGroups + NumMmaWarpGroups) * NumThreadsPerWarpGroup;
-  static constexpr uint32_t NumTileConsumerThreads = IsCooperative ? 256 : 128;
+      CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
@@ -482,7 +480,7 @@ class GemmUniversalPrecomputedScheduler<
 #else
 
     // Preconditions
-    static_assert(size(TiledMma{}) == NumTileConsumerThreads, "TiledMMA must match the tile consumer thread count.");
+    static_assert(size(TiledMma{}) == 128, "Pingpong kernel must have TiledMMA operating using 128 threads.");
     static_assert(NumMmaWarpGroups == 2, "Pingpong kernels currently only support NumMmaWarpGroups == 2");
 
     if constexpr (cutlass::epilogue::collective::detail::sm90_is_ptr_array_tma_dispatch_policy_v<
@@ -535,7 +533,7 @@ class GemmUniversalPrecomputedScheduler<
       mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::Consumer;
     }
     mainloop_pipeline_params.is_leader = warp_group_thread_idx == 0;
-    mainloop_pipeline_params.num_consumers = NumTileConsumerThreads;
+    mainloop_pipeline_params.num_consumers = NumThreadsPerWarpGroup;
     mainloop_pipeline_params.num_producers = NumProducerThreads;
     mainloop_pipeline_params.transaction_bytes = params.mainloop.tma_transaction_bytes;
     MainloopPipeline mainloop_pipeline(shared_storage.pipelines.mainloop, mainloop_pipeline_params, ClusterShape{});
@@ -551,7 +549,7 @@ class GemmUniversalPrecomputedScheduler<
     }
     epi_load_pipeline_params.dst_blockid = cute::block_rank_in_cluster();
     epi_load_pipeline_params.producer_arv_count = NumThreadsPerWarp;
-    epi_load_pipeline_params.consumer_arv_count = NumTileConsumerThreads;
+    epi_load_pipeline_params.consumer_arv_count = NumThreadsPerWarpGroup;
     if constexpr (CollectiveEpilogue::RequiresTransactionBytes) {
       epi_load_pipeline_params.transaction_bytes = params.epilogue.tma_transaction_bytes;
     }
@@ -625,7 +623,7 @@ class GemmUniversalPrecomputedScheduler<
     auto problem_shape_MNKL = append<4>(params.problem_shape.get_problem_shape(work_tile_info.L_idx), 1);
 
     // Consumer1 is not on the critical path at prologue.
-    if (!IsCooperative && warp_group_role == WarpGroupRole::Consumer1) [[unlikely]] {
+    if (warp_group_role == WarpGroupRole::Consumer1) [[unlikely]] {
       // Advance 2nd Math WG to the next work tile for the startup
       const auto k_tile_count = TileScheduler::get_work_k_tile_count(work_tile_info, problem_shape_MNKL, blk_shape);
 
@@ -925,9 +923,7 @@ class GemmUniversalPrecomputedScheduler<
         auto accumulators = partition_fragment_C(tiled_mma, take<0, 2>(blk_shape));  // (MMA,MMA_M,MMA_N)
 
         if (TileScheduler::valid_warpgroup_in_work_tile(work_tile_info)) {
-          if constexpr (!IsCooperative) {
-            math_wg_order_barrier.wait();
-          }
+          math_wg_order_barrier.wait();
 
           collective_mainloop.mma(
               mainloop_pipeline,
@@ -938,16 +934,12 @@ class GemmUniversalPrecomputedScheduler<
               shared_storage.tensors.mainloop,
               params.mainloop);
 
-          if constexpr (!IsCooperative) {
-            math_wg_order_barrier.arrive();
-          }
+          math_wg_order_barrier.arrive();
 
           // Make sure the math instructions are done and free buffers before entering the epilogue
           collective_mainloop.mma_tail(mainloop_pipeline, mainloop_pipe_consumer_state, work_k_tile_count);
 
-          if constexpr (!IsCooperative) {
-            math_wg_order_barrier.wait();
-          }
+          math_wg_order_barrier.wait();
 
           // Update starting mainloop pipeline state for the next tile
           mainloop_pipe_consumer_state.advance(work_k_tile_count);
@@ -956,7 +948,7 @@ class GemmUniversalPrecomputedScheduler<
         // Perform reduction across splits, if needed
         TileScheduler::fixup(params.scheduler, work_tile_info, accumulators, NumMmaWarpGroups, consumer_warp_group_idx);
 
-        if (did_batch_change && (IsCooperative || warp_idx_in_warp_group == 0)) {
+        if (did_batch_change && warp_idx_in_warp_group == 0) {
           collective_epilogue.template tensormaps_fence_acquire<IsEpiLoad>(epi_store_tensormap);
         }
 
@@ -988,7 +980,7 @@ class GemmUniversalPrecomputedScheduler<
         work_tile_info = next_work_tile_info;
 
         // Skip a tile for pingpong
-        if (!IsCooperative && work_tile_info.is_valid()) {
+        if (work_tile_info.is_valid()) {
           if constexpr (IsGroupedGemmKernel) {
             problem_shape_MNKL = append<4>(params.problem_shape.get_problem_shape(work_tile_info.L_idx), 1);
           }
@@ -1025,27 +1017,21 @@ class GemmUniversalPrecomputedScheduler<
         // kernels we need to wait for all TMA stores to complete before issuing consumer order
         // barrier arrives to ensure next math consumer doesn't overwrite smem of in-flight TMA
         // stores of current consumer.
-        if constexpr (!IsCooperative) {
-          auto [epi_load_pipe_consumer_state_next_, epi_store_pipe_producer_state_next_] = collective_epilogue.store_tail(
-              epi_load_pipeline, epi_load_pipe_consumer_state, epi_store_pipeline, epi_store_pipe_producer_state);
+        auto [epi_load_pipe_consumer_state_next_, epi_store_pipe_producer_state_next_] = collective_epilogue.store_tail(
+            epi_load_pipeline, epi_load_pipe_consumer_state, epi_store_pipeline, epi_store_pipe_producer_state);
 
-          // Skip the epilogue slots owned by the other ping-pong consumer.
-          epi_load_pipe_consumer_state = epi_load_pipe_consumer_state_next_;
-          epi_store_pipe_producer_state = epi_store_pipe_producer_state_next_;
-          epi_load_pipe_consumer_state.advance(c_tile_count);
-          epi_store_pipe_producer_state.advance(d_tile_count);
+        // Update starting load/store pipeline states for the next tile
+        // state has already been incremented by 1 tile in collective calls, advance once again for
+        // ping pong
+        epi_load_pipe_consumer_state = epi_load_pipe_consumer_state_next_;
+        epi_store_pipe_producer_state = epi_store_pipe_producer_state_next_;
+        epi_load_pipe_consumer_state.advance(c_tile_count);
+        epi_store_pipe_producer_state.advance(d_tile_count);
 
-          // Cue for next Math WG's Epilogue to start.
-          math_wg_order_barrier.arrive();
-        }
+        // Cue for next Math WG's Epilogue to start
+        math_wg_order_barrier.arrive();
 
       }  // Scheduler work fetch loop
-      if constexpr (IsCooperative) {
-        if (do_store_tail) {
-          collective_epilogue.store_tail(
-              epi_load_pipeline, epi_load_pipe_consumer_state, epi_store_pipeline, epi_store_pipe_producer_state);
-        }
-      }
     }  // Consumer Warp Groups End
 #endif
   }
