@@ -372,8 +372,6 @@ class SingleWarpgroupPersistentGemm
         }
       };
 
-      collective_mainloop.set_direct_weight_tile(
-          params.mainloop, work_tile_info.L_idx, int(m_coord), int(get<2>(problem_shape_MNKL)));
       collective_mainloop.mma_with_released_stage_producer(
           mainloop_pipeline,
           mainloop_pipe_consumer_state,
