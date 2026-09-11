@@ -208,14 +208,6 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
   };
 };
 
-template <int N, sgl_kernel::swg_detail::ExpertRowPolicy Rows>
-struct SM90_SWG_BUCKET_MXFP4 {
-  using Base = typename SM90_SWG_EARLY_REFILL_MXFP4<N>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    static constexpr auto ExpertRows = Rows;
-  };
-};
-
 template <int M, int K>
 struct SM90_DEEP_LANES_MXFP4 {
   using Base = typename SM90_PRECOMPUTED_MXFP4<M, 32, K, 1, 1, false>::Cutlass3xW4A8Gemm;
@@ -622,12 +614,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
   TORCH_CHECK(topk > 0, "topk must be positive");
 
   switch (swg_config) {
-    case 413:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_SWG_BUCKET_MXFP4<8, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost8>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_SWG_BUCKET_MXFP4<16, sgl_kernel::swg_detail::ExpertRowPolicy::Above8>));
-      return;
     case 100:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
       return;
@@ -691,7 +677,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "413, 414, 415");
+          "414, 415");
   }
 }
 
