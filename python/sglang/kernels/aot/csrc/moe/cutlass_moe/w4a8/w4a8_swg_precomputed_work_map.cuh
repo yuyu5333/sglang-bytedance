@@ -23,13 +23,6 @@ enum class ExpertRowPolicy {
   PreferN64,
 };
 
-template <class Gemm, class = void>
-struct SwgTokenCluster : std::integral_constant<int, 1> {};
-
-template <class Gemm>
-struct SwgTokenCluster<Gemm, std::void_t<decltype(Gemm::MulticastTokenCluster)>>
-    : std::integral_constant<int, Gemm::MulticastTokenCluster> {};
-
 template <ExpertRowPolicy Policy>
 CUTLASS_HOST_DEVICE bool swg_select_expert_rows(uint64_t rows) {
   if (rows == 0) {
@@ -68,7 +61,7 @@ swg_log_swizzle_size(uint64_t problem_blocks_m, uint64_t problem_blocks_n, int m
   return 0;
 }
 
-template <int TileM, int TileN, int TokenCluster = 1>
+template <int TileM, int TileN>
 uint64_t swg_max_work_tiles(int groups, uint64_t total_tokens, uint64_t channels) {
   if (groups <= 0 || total_tokens == 0 || channels == 0) {
     return 0;
@@ -79,12 +72,12 @@ uint64_t swg_max_work_tiles(int groups, uint64_t total_tokens, uint64_t channels
   int const swizzle_log = swg_log_swizzle_size(channel_tiles, total_token_tiles, kSwgWorkMapMaxSwizzle);
   uint64_t const swizzle = uint64_t(1) << swizzle_log;
   uint64_t const padded_channel_tiles = swg_round_up(channel_tiles, swizzle);
-  uint64_t const tokens_per_padded_group = uint64_t(TileN) * swizzle * TokenCluster;
+  uint64_t const tokens_per_padded_group = uint64_t(TileN) * swizzle;
   uint64_t const nonempty_groups = uint64_t(groups) < total_tokens ? uint64_t(groups) : total_tokens;
   uint64_t const extra_tokens = total_tokens - nonempty_groups;
   // Every non-empty group opens one swizzle-padded token-tile band. Each
-  // additional band needs tokens_per_padded_group more routed tokens.
-  uint64_t const max_token_tiles = swizzle * TokenCluster * (nonempty_groups + extra_tokens / tokens_per_padded_group);
+  // additional band needs TileN * swizzle more routed tokens in that group.
+  uint64_t const max_token_tiles = swizzle * (nonempty_groups + extra_tokens / tokens_per_padded_group);
   return padded_channel_tiles * max_token_tiles;
 }
 
@@ -220,7 +213,7 @@ struct SwgGroupInfo {
   int swizzle_log = 0;
 };
 
-template <int TileM, int TileN, ExpertRowPolicy RowPolicy, int TokenCluster = 1, class Problem>
+template <int TileM, int TileN, ExpertRowPolicy RowPolicy, class Problem>
 __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
   uint64_t const rows = uint64_t(cute::get<1>(problem));
   if (!swg_select_expert_rows<RowPolicy>(rows)) {
@@ -231,7 +224,7 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
   int const swizzle_log = swg_log_swizzle_size(channel_tiles, token_tiles, kSwgWorkMapMaxSwizzle);
   uint64_t const swizzle = uint64_t(1) << swizzle_log;
   uint64_t const problem_blocks_m = swg_round_up(channel_tiles, swizzle);
-  uint64_t const problem_blocks_n = swg_round_up(token_tiles, swizzle * TokenCluster);
+  uint64_t const problem_blocks_n = swg_round_up(token_tiles, swizzle);
 
   if (problem_blocks_m > uint64_t(SwgWorkTile::ChannelMask + 1) ||
       problem_blocks_n > uint64_t(SwgWorkTile::TokenMask + 1)) {
@@ -240,14 +233,7 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
   return {problem_blocks_m, problem_blocks_m * problem_blocks_n, swizzle_log};
 }
 
-template <
-    int TileM,
-    int TileN,
-    bool ChunkMajorWorkMap,
-    ExpertRowPolicy RowPolicy,
-    int TokenCluster,
-    class Problem,
-    class MainloopParams>
+template <int TileM, int TileN, bool ChunkMajorWorkMap, ExpertRowPolicy RowPolicy, class Problem, class MainloopParams>
 __global__ void build_swg_precomputed_work_map_kernel(
     Problem const* problem_shapes,
     int groups,
@@ -310,7 +296,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
     weight_scale_ptrs[group] =
         reinterpret_cast<uint64_t>(weight_scale_base + uint64_t(expert) * weight_channels * reduction_channels / 32);
 
-    SwgGroupInfo const info = swg_group_info<TileM, TileN, RowPolicy, TokenCluster>(problem_shapes[group]);
+    SwgGroupInfo const info = swg_group_info<TileM, TileN, RowPolicy>(problem_shapes[group]);
     group_info_storage[0] = static_cast<unsigned long long>(info.problem_blocks_m);
     group_info_storage[1] = static_cast<unsigned long long>(info.group_tiles);
     group_info_storage[2] = static_cast<unsigned long long>(info.swizzle_log);
@@ -329,7 +315,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
   uint64_t prefix_sum = 0;
   uint64_t total_sum = 0;
   for (int scan_group = tid; scan_group < groups; scan_group += blockDim.x) {
-    SwgGroupInfo const info = swg_group_info<TileM, TileN, RowPolicy, TokenCluster>(problem_shapes[scan_group]);
+    SwgGroupInfo const info = swg_group_info<TileM, TileN, RowPolicy>(problem_shapes[scan_group]);
     total_sum += info.group_tiles;
     if (scan_group < group) {
       prefix_sum += info.group_tiles;
@@ -356,19 +342,8 @@ __global__ void build_swg_precomputed_work_map_kernel(
 
   for (uint64_t local_tile = uint64_t(tid); local_tile < group_tiles; local_tile += uint64_t(blockDim.x)) {
     uint64_t const global_tile = group_start + local_tile;
-    uint64_t packed_tile;
-    if constexpr (TokenCluster > 1) {
-      static_assert(!ChunkMajorWorkMap && kSwgWorkMapMaxSwizzle == 1);
-      // Adjacent cluster CTAs must read the same expert/channel weight tile
-      // at every persistent step, including padding and the final wave.
-      uint64_t const cluster_tile = local_tile / TokenCluster;
-      uint64_t const channel_tile = cluster_tile % problem_blocks_m;
-      uint64_t const token_tile = (cluster_tile / problem_blocks_m) * TokenCluster + local_tile % TokenCluster;
-      packed_tile = SwgWorkTile::pack(channel_tile, token_tile, uint64_t(group));
-    } else {
-      packed_tile =
-          swg_make_work_tile(global_tile, local_tile, group, problem_blocks_m, swizzle_log, gemm_grid_x, gemm_grid_y);
-    }
+    uint64_t const packed_tile =
+        swg_make_work_tile(global_tile, local_tile, group, problem_blocks_m, swizzle_log, gemm_grid_x, gemm_grid_y);
     if constexpr (ChunkMajorWorkMap) {
       uint64_t const worker = global_tile / tiles_per_worker;
       uint64_t const worker_tile = global_tile % tiles_per_worker;
@@ -419,23 +394,16 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
 
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
-  constexpr int TokenCluster = SwgTokenCluster<Gemm>::value;
-  if constexpr (TokenCluster > 1) {
-    static_assert(!Gemm::UseChunkMajorWorkMap);
-    static_assert(cute::size<0>(typename Gemm::GemmKernelScaleOnly::ClusterShape{}) == 1);
-    static_assert(cute::size<1>(typename Gemm::GemmKernelScaleOnly::ClusterShape{}) == TokenCluster);
-    TORCH_CHECK(grid_shape.y == TokenCluster, "Weight multicast requires a token-cluster-aligned grid");
-  }
   uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));
   uint64_t const total_token_tiles = swg_div_up(total_tokens, uint64_t(TileN));
   uint64_t const max_swizzle = uint64_t(1)
                                << swg_log_swizzle_size(channel_tiles, total_token_tiles, kSwgWorkMapMaxSwizzle);
-  uint64_t const max_tiles = swg_max_work_tiles<TileM, TileN, TokenCluster>(groups, total_tokens, channels);
+  uint64_t const max_tiles = swg_max_work_tiles<TileM, TileN>(groups, total_tokens, channels);
   TORCH_CHECK(
       swg_round_up(channel_tiles, max_swizzle) <= SwgWorkTile::ChannelMask + 1,
       "SWG precomputed work map channel index exceeds packed limit");
   TORCH_CHECK(
-      swg_round_up(total_token_tiles, max_swizzle * TokenCluster) <= SwgWorkTile::TokenMask + 1,
+      swg_round_up(total_token_tiles, max_swizzle) <= SwgWorkTile::TokenMask + 1,
       "SWG precomputed work map token index exceeds packed limit");
 
   uint64_t const work_tiles_per_worker_u64 = swg_div_up(max_tiles, worker_count_u64) + 1;
@@ -484,12 +452,7 @@ void launch_swg_precomputed_work_map(
   size_t const scheduler_smem =
       kSwgPrebuiltTmaDescriptorScratchBytes + size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
-  build_swg_precomputed_work_map_kernel<
-      TileM,
-      TileN,
-      Gemm::UseChunkMajorWorkMap,
-      Gemm::ExpertRows,
-      SwgTokenCluster<Gemm>::value>
+  build_swg_precomputed_work_map_kernel<TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows>
       <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(
           problem_shapes,
           groups,

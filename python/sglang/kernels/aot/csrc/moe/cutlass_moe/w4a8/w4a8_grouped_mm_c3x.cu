@@ -207,15 +207,6 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
   };
 };
 
-template <int M, int K, int TokenCluster>
-struct SM90_WEIGHT_MULTICAST_MXFP4 {
-  using Base = typename SM90_TAIL_HANDOFF_MXFP4<
-      SM90_PRECOMPUTED_MXFP4<M, 32, K, 1, TokenCluster, false>>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    static constexpr int MulticastTokenCluster = TokenCluster;
-  };
-};
-
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -641,22 +632,12 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 405:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
-    case 420:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_WEIGHT_MULTICAST_MXFP4<128, 512, 2>));
-      return;
-    case 421:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_WEIGHT_MULTICAST_MXFP4<64, 512, 2>));
-      return;
-    case 422:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_WEIGHT_MULTICAST_MXFP4<128, 512, 4>));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "420, 421, 422");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405");
   }
 }
 
