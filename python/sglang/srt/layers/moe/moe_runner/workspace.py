@@ -91,13 +91,22 @@ def _common_unsupported_reason(runner, dispatch, lora_info, custom_core):
     ):
         return "top-k shape/dtype/strides/device"
     from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+    from sglang.srt.distributed.parallel_state import get_tp_group
     from sglang.srt.layers.dp_attention import is_allocation_symmetric
     from sglang.srt.layers.moe.utils import get_moe_a2a_backend
     from sglang.srt.runtime_context import get_exec
 
     if not get_moe_a2a_backend().is_none():
         return "all-to-all backend"
-    if get_exec().moe.enable_fused_moe_sum_all_reduce or is_allocation_symmetric():
+    symmetric_allocation = (
+        is_symmetric_memory_enabled()
+        and is_allocation_symmetric()
+        and get_tp_group().world_size > 1
+    )
+    if get_exec().moe.enable_fused_moe_sum_all_reduce or symmetric_allocation:
         return "fused collective or symmetric-memory allocation"
     if is_batch_invariant_mode_enabled():
         return "batch-invariant execution"

@@ -866,7 +866,24 @@ def guarded_dispatch(monkeypatch):
         down_gemm_overlap_args=None,
         meta_overlap_args=None,
     )
-    state = SimpleNamespace(a2a=False, fused=False, symmetric=False, invariant=False)
+    state = SimpleNamespace(
+        a2a=False,
+        fused=False,
+        symmetric=False,
+        invariant=False,
+        symmetric_enabled=True,
+        world_size=2,
+    )
+    install_module(
+        monkeypatch,
+        "sglang.srt.distributed.device_communicators.pynccl_allocator",
+        is_symmetric_memory_enabled=lambda: state.symmetric_enabled,
+    )
+    install_module(
+        monkeypatch,
+        "sglang.srt.distributed.parallel_state",
+        get_tp_group=lambda: SimpleNamespace(world_size=state.world_size),
+    )
     install_module(
         monkeypatch,
         "sglang.srt.layers.dp_attention",
@@ -890,6 +907,23 @@ def guarded_dispatch(monkeypatch):
         is_batch_invariant_mode_enabled=lambda: state.invariant,
     )
     return runner, inp, state
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("world_size", [1, 2])
+def test_symmetric_policy_requires_active_allocator(
+    adapters, guarded_dispatch, enabled, symmetric, world_size
+):
+    runner, inp, state = guarded_dispatch
+    state.symmetric_enabled = enabled
+    state.symmetric = symmetric
+    state.world_size = world_size
+    reason = adapters._common_unsupported_reason(runner, inp, None, False)
+    if enabled and symmetric and world_size > 1:
+        assert reason == "fused collective or symmetric-memory allocation"
+    else:
+        assert reason is None
 
 
 @pytest.mark.parametrize(
