@@ -434,7 +434,7 @@ struct CollectiveMmaArrayMixedInput<
     for (uint32_t offset = thread; offset < 256; offset += threads) {
       uint32_t const lo = offset * 0x08080800U + 0x0c080000U;
       uint32_t const hi = offset * 0x08080808U + 0x1c181410U;
-      storage.scale_lut.begin()[offset] = uint64_t(lo) | (uint64_t(hi) << 32);
+      storage.scale_lut[offset] = uint64_t(lo) | (uint64_t(hi) << 32);
     }
   }
 
