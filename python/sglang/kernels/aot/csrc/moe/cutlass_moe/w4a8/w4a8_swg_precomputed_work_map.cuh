@@ -21,6 +21,8 @@ enum class ExpertRowPolicy {
   All,
   PreferN32,
   PreferN64,
+  AtMost16,
+  Above16,
 };
 
 template <ExpertRowPolicy Policy>
@@ -34,6 +36,10 @@ CUTLASS_HOST_DEVICE bool swg_select_expert_rows(uint64_t rows) {
     return padded_n32 < padded_n64;
   } else if constexpr (Policy == ExpertRowPolicy::PreferN64) {
     return padded_n64 <= padded_n32;
+  } else if constexpr (Policy == ExpertRowPolicy::AtMost16) {
+    return rows <= 16;
+  } else if constexpr (Policy == ExpertRowPolicy::Above16) {
+    return rows > 16;
   }
   return true;
 }

@@ -207,6 +207,51 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
   };
 };
 
+template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy = sgl_kernel::swg_detail::ExpertRowPolicy::All>
+struct SM90_N16_K256_SWG_MXFP4 {
+  using Base = SM90_PRECOMPUTED_MXFP4<128, 16, 256>::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr bool UseSingleWarpgroupKernel = true;
+    static constexpr int SingleWarpgroupCtasPerSm = 3;
+    static constexpr auto ExpertRows = RowPolicy;
+    using TileShape = cute::Shape<cute::Int<128>, cute::Int<16>, cute::Int<256>>;
+    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
+    using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+        3, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
+    using CollectiveMainloopScaleOnly = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
+        Policy,
+        TileShape,
+        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
+        typename OldMainloop::StrideA,
+        cutlass::float_e4m3_t,
+        typename OldMainloop::StrideB,
+        typename OldMainloop::TiledMma,
+        typename OldMainloop::GmemTiledCopyA,
+        typename OldMainloop::SmemLayoutAtomA,
+        typename OldMainloop::SmemCopyAtomA,
+        typename OldMainloop::TransformA,
+        typename OldMainloop::GmemTiledCopyB,
+        typename OldMainloop::SmemLayoutAtomB,
+        typename OldMainloop::SmemCopyAtomB,
+        cutlass::gemm::collective::DrainedK256StageRefill>;
+    using CollectiveEpilogue = typename sgl_kernel::w4a8_detail::W4A8EpilogueSelector<
+        true,
+        true,
+        false,
+        TileShape,
+        cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>,
+        cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong>::Type;
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        CollectiveMainloopScaleOnly,
+        CollectiveEpilogue,
+        3,
+        3,
+        cutlass::gemm::kernel::SingleWarpgroupPipelineMode::RollingRefill>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -632,12 +677,22 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 405:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
+    case 438:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N16_K256_SWG_MXFP4<>));
+      return;
+    case 441:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
+          "438, 441");
   }
 }
 
