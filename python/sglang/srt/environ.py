@@ -961,6 +961,9 @@ class Envs:
     # Call-private MoE scratch budget in bytes; 0 disables shared planning.
     # Weights, caller buffers, full output and allocator reservations are excluded.
     SGLANG_MOE_WORKSPACE_BUDGET_BYTES = EnvInt(0)
+    # Experimental single-token unquantized MoE: two unsorted GEMV kernels.
+    # Changes reduction order; excludes workspace budgeting and collectives.
+    SGLANG_MOE_DIRECT_DECODE = EnvBool(False)
     SGLANG_MOE_NVFP4_DISPATCH = EnvBool(False)
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN = EnvBool(False)
     SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE = EnvBool(False)

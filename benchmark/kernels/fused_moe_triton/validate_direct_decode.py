@@ -10,6 +10,7 @@ import statistics
 import subprocess
 import traceback
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from validate_workspace_cuda import (
@@ -42,6 +43,7 @@ def validate(args, report):
         init_distributed_environment,
         initialize_model_parallel,
     )
+    from sglang.srt.environ import envs
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
     from sglang.srt.layers.moe.moe_runner.runner import MoeRunner
     from sglang.srt.layers.moe.moe_runner.triton_utils import override_config
@@ -92,11 +94,15 @@ def validate(args, report):
     def baseline():
         if args.inplace:
             x.copy_(original)
-        return runner.run(dispatch, quant).hidden_states
+        with envs.SGLANG_MOE_DIRECT_DECODE.override(False):
+            return runner.run(dispatch, quant).hidden_states
 
     def direct():
         if args.inplace:
             x.copy_(original)
+        if args.runner_direct:
+            with envs.SGLANG_MOE_DIRECT_DECODE.override(True):
+                return runner.run(dispatch, quant).hidden_states
         return direct_decode(
             x,
             quant.w13_weight,
@@ -129,7 +135,16 @@ def validate(args, report):
     with context, torch.inference_mode():
         outputs = {}
         for name, fn in functions.items():
-            output = fn()
+            if name == "direct" and args.runner_direct:
+                with patch(
+                    "sglang.kernels.ops.moe.direct_decode.direct_decode",
+                    wraps=direct_decode,
+                ) as observed:
+                    output = fn()
+                report["runner_direct_calls"] = observed.call_count
+                assert observed.call_count == (0 if args.expect_fallback else 1)
+            else:
+                output = fn()
             torch.cuda.synchronize()
             outputs[name] = output.clone()
             cases[name] = {
@@ -232,6 +247,8 @@ def main():
     parser.add_argument("--inplace", action="store_true")
     parser.add_argument("--config", choices=["runtime", "fixed"], default="runtime")
     parser.add_argument("--direct-only", action="store_true")
+    parser.add_argument("--runner-direct", action="store_true")
+    parser.add_argument("--expect-fallback", action="store_true")
     parser.add_argument("--skip-timing", action="store_true")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--warmup", type=int, default=10)

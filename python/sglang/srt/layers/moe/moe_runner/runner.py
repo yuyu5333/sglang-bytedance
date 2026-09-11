@@ -201,6 +201,20 @@ class MoeRunner:
             )
             if output is not None:
                 return output
+        if not budget and envs.SGLANG_MOE_DIRECT_DECODE.get():
+            from sglang.srt.layers.moe.moe_runner.direct_decode import (
+                try_direct_decode,
+            )
+
+            output = try_direct_decode(
+                self,
+                dispatch_output,
+                quant_info,
+                lora_info,
+                custom_core=self.runner_backend.value in _CUSTOM_RUNNER_CORE_FACTORIES,
+            )
+            if output is not None:
+                return output
         if self.fused_func is not None and not self.lora_enabled:
             return self.fused_func(dispatch_output, quant_info, self.config)
 
