@@ -34,6 +34,8 @@
 namespace cutlass::gemm::collective {
 using namespace cute;
 
+struct DirectGlobalPackedWeight {};
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // WarpSpecialized Mainloop
@@ -204,6 +206,9 @@ struct CollectiveMmaArrayMixedInput<
 
   using TransformA = TransformA_;
   using TransformB = TransformB_;
+  static constexpr bool DirectWeightLoad = cute::is_same_v<TransformA, DirectGlobalPackedWeight>;
+  uint8_t const* direct_weight_base_ = nullptr;
+  int direct_weight_row_bytes_ = 0;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
   using SwappedTransformB = cute::conditional_t<!SwapAB, TransformB, TransformA>;
   using ArchTag = typename DispatchPolicy::ArchTag;
@@ -521,6 +526,14 @@ struct CollectiveMmaArrayMixedInput<
   // Methods
   //
 
+  CUTLASS_DEVICE void set_direct_weight_tile(Params const& params, int group, int channel_tile, int k) {
+    if constexpr (DirectWeightLoad) {
+      direct_weight_row_bytes_ = k / 2;
+      direct_weight_base_ = reinterpret_cast<uint8_t const*>(params.ptr_A[group]) +
+                            int64_t(channel_tile) * size<0>(TileShape{}) * direct_weight_row_bytes_;
+    }
+  }
+
   template <class ProblemShape>
   static constexpr Params
   to_underlying_arguments(ProblemShape problem_shapes, Arguments const& args, [[maybe_unused]] void* workspace) {
@@ -732,7 +745,7 @@ struct CollectiveMmaArrayMixedInput<
 
   static constexpr int K_PIPE_MAX = DispatchPolicy::Stages;
   static constexpr int K_PIPE_MMAS = 1;
-  static constexpr uint32_t TmaTransactionBytesMK = Utils::compute_tma_transaction_bytes_mk();
+  static constexpr uint32_t TmaTransactionBytesMK = DirectWeightLoad ? 0 : Utils::compute_tma_transaction_bytes_mk();
   static constexpr uint32_t TmaTransactionBytesNK = Utils::compute_tma_transaction_bytes_nk();
   static constexpr uint32_t TmaTransactionBytesExtra = Utils::compute_tma_transaction_bytes_extra();
   static constexpr uint32_t TmaTransactionBytes =
@@ -861,10 +874,12 @@ struct CollectiveMmaArrayMixedInput<
       int write_stage = smem_pipe_write.index();
       if (cute::elect_one_sync()) {
         // TMA for A and B
-        copy(
-            mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
-            tAgA(_, _, _, *k_tile_iter),
-            tAsA(_, _, _, write_stage));
+        if constexpr (!DirectWeightLoad) {
+          copy(
+              mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
+              tAgA(_, _, _, *k_tile_iter),
+              tAsA(_, _, _, write_stage));
+        }
         copy(
             mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b),
             tBgB(_, _, _, *k_tile_iter),
@@ -1044,6 +1059,25 @@ struct CollectiveMmaArrayMixedInput<
     Tensor tCrA_load_LDSM = make_fragment_like<ElementB>(tCrA_load_LDSM_shape);
     Tensor tCrA_copy_view_LDSM = smem_thr_copy_A_LDSM.retile_D(tCrA_load_LDSM);  // (CPY,CPY_M,CPY_K)
 
+    int direct_k_tile = 0;
+    auto copy_weight = [&](int k_block, int stage) {
+      if constexpr (DirectWeightLoad) {
+        if (k_block < size<2>(tCrA_copy_view_LDSM)) {
+          auto coords = smem_thr_copy_A_LDSM.partition_D(make_identity_tensor(shape(sA_LDSM)));
+          auto c = coords(_, _, k_block, Int<0>{});
+          auto d = recast<uint32_t>(tCrA_copy_view_LDSM(_, _, k_block));
+          cute::for_each(cute::make_seq<size(d)>{}, [&](auto i) {
+            auto rc = c(Int<4 * decltype(i)::value>{});
+            auto p = direct_weight_base_ + int64_t(get<0>(rc)) * direct_weight_row_bytes_ +
+                     int(get<1>(rc)) + direct_k_tile * (size<2>(TileShape{}) / 2);
+            d(i) = __ldg(reinterpret_cast<uint32_t const*>(p));
+          });
+        }
+      } else {
+        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block, stage);
+      }
+    };
+
     auto ptr = recast_ptr<RealSwappedElementA>(tCrA_load_LDSM.data());
     auto old_shape = tCrA_load_LDSM.shape();
     // LDSM packs two 4-bit K sub-blocks before advancing to the next MMA_M
@@ -1148,10 +1182,10 @@ struct CollectiveMmaArrayMixedInput<
       ++smem_pipe_read;
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
 
-      Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, read_stage);
+      copy_weight(0, read_stage);
       copy_scale_for_mma(cute::Int<0>{}, read_stage);
       if (K_BLOCK_MAX > 1) {
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, read_stage);
+        copy_weight(1, read_stage);
         copy_scale_for_mma(cute::Int<1>{}, read_stage);
       }
 
@@ -1163,7 +1197,7 @@ struct CollectiveMmaArrayMixedInput<
       maybe_commit_mma_group(cute::Int<0>{});
       tiled_mma.accumulate_ = GMMA::ScaleOut::One;
 
-      Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 2, read_stage);
+      copy_weight(2, read_stage);
       copy_scale_for_mma(cute::Int<2>{}, read_stage);
       convert_A_kblock_static(cute::Int<1>{}, read_stage);
 
@@ -1175,7 +1209,7 @@ struct CollectiveMmaArrayMixedInput<
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block + 2, read_stage);
+          copy_weight(k_block + 2, read_stage);
           copy_scale_for_mma(cute::Int<k_block + 2>{}, read_stage);
         }
         if constexpr (k_block < K_BLOCK_MAX - 1) {
@@ -1188,9 +1222,10 @@ struct CollectiveMmaArrayMixedInput<
         pipeline.consumer_wait(smem_pipe_read, barrier_token);
 
         int const next_read_stage = smem_pipe_read.index();
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, next_read_stage);
+        ++direct_k_tile;
+        copy_weight(0, next_read_stage);
         copy_scale_for_mma(cute::Int<0>{}, next_read_stage);
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, next_read_stage);
+        copy_weight(1, next_read_stage);
         copy_scale_for_mma(cute::Int<1>{}, next_read_stage);
 
         // The rolling wait after the last commit has retired the oldest group
@@ -1230,9 +1265,10 @@ struct CollectiveMmaArrayMixedInput<
         if constexpr (k_block == K_BLOCK_MAX - 1) {
           pipeline.consumer_wait(smem_pipe_read, barrier_token);
           int const next_read_stage = smem_pipe_read.index();
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, next_read_stage);
+          ++direct_k_tile;
+          copy_weight(0, next_read_stage);
           copy_scale_for_mma(cute::Int<0>{}, next_read_stage);
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, next_read_stage);
+          copy_weight(1, next_read_stage);
           copy_scale_for_mma(cute::Int<1>{}, next_read_stage);
 
           // The rolling wait after the last commit has retired the previous
@@ -1241,7 +1277,7 @@ struct CollectiveMmaArrayMixedInput<
           convert_A_kblock_static(cute::Int<0>{}, next_read_stage);
         } else {
           if constexpr (k_block < K_BLOCK_MAX - 2) {
-            Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block + 2, read_stage);
+            copy_weight(k_block + 2, read_stage);
             copy_scale_for_mma(cute::Int<k_block + 2>{}, read_stage);
           }
           convert_A_kblock_static(cute::Int<k_block + 1>{}, read_stage);
@@ -1266,7 +1302,7 @@ struct CollectiveMmaArrayMixedInput<
         }
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block + 2, read_stage);
+          copy_weight(k_block + 2, read_stage);
           copy_scale_for_mma(cute::Int<k_block + 2>{}, read_stage);
         }
         if constexpr (k_block < K_BLOCK_MAX - 1) {
