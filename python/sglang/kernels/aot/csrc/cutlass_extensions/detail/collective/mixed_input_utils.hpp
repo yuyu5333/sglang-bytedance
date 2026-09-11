@@ -292,6 +292,15 @@ struct MixedGroupedGemmInputUtils {
     return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
   }
 
+  template <class CachedOffset>
+  CUTLASS_DEVICE static CachedOffset prepare_cached_offset(uint32_t offset) {
+    if constexpr (cute::is_same_v<CachedOffset, uint2>) {
+      return prepare_e8m0_lut(offset);
+    } else {
+      return offset;
+    }
+  }
+
   template <class Offset>
   __device__ __inline__ static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
       __nv_fp4x8_storage_t fp4x8_0,
@@ -637,13 +646,10 @@ struct MixedGroupedGemmInputUtils {
       ScaleScalar const lo_scale = row_scales(0);
       ScaleScalar const hi_scale = row_scales(HiScaleIndex);
       constexpr int cache_index = KBlock * ScalePairCount + pair;
-      if constexpr (cute::is_same_v<cute::remove_cvref_t<decltype(lo_exp_offsets[cache_index])>, uint2>) {
-        lo_exp_offsets[cache_index] = prepare_e8m0_lut(static_cast<uint32_t>(lo_scale.storage));
-        hi_exp_offsets[cache_index] = prepare_e8m0_lut(static_cast<uint32_t>(hi_scale.storage));
-      } else {
-        lo_exp_offsets[cache_index] = static_cast<uint32_t>(lo_scale.storage);
-        hi_exp_offsets[cache_index] = static_cast<uint32_t>(hi_scale.storage);
-      }
+      lo_exp_offsets[cache_index] =
+          prepare_cached_offset<typename LoOffsetArray::element_type>(static_cast<uint32_t>(lo_scale.storage));
+      hi_exp_offsets[cache_index] =
+          prepare_cached_offset<typename HiOffsetArray::element_type>(static_cast<uint32_t>(hi_scale.storage));
     });
   }
 
