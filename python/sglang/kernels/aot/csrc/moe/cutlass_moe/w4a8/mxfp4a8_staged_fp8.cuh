@@ -41,8 +41,8 @@ __global__ void decode_weights(
   uint32_t const hi0 = s0 * 0x08080808U + 0x1c181410U;
   uint32_t const lo1 = s1 * 0x08080800U + 0x0c080000U;
   uint32_t const hi1 = s1 * 0x08080808U + 0x1c181410U;
-  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(a) : "r"(hi0), "r"(lo0), "r"(selector));
-  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(b) : "r"(hi1), "r"(lo1), "r"(selector >> 16));
+  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(a) : "r"(lo0), "r"(hi0), "r"(selector));
+  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(b) : "r"(lo1), "r"(hi1), "r"(selector >> 16));
   a |= word & 0x80808080U;
   b |= (word << 4) & 0x80808080U;
   decoded[(int64_t(expert) * channels + row) * (k / 4) + k4] = a;
