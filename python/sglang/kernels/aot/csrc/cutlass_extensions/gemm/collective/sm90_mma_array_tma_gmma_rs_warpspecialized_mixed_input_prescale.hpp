@@ -37,6 +37,15 @@ using namespace cute;
 struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 
+template <int Depth>
+struct RawWeightPrefetch {};
+
+template <class Transform>
+struct RawWeightPrefetchDepth : cute::Int<1> {};
+
+template <int Depth>
+struct RawWeightPrefetchDepth<RawWeightPrefetch<Depth>> : cute::Int<Depth> {};
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // WarpSpecialized Mainloop
@@ -1074,6 +1083,22 @@ struct CollectiveMmaArrayMixedInput<
     constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
     constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill>;
+    constexpr int RawPrefetch = RawWeightPrefetchDepth<TransformB>::value;
+    auto copy_weight_for_mma = [&](auto k_block_c, int read_stage) {
+      if constexpr (decltype(k_block_c)::value == 0) {
+        cute::for_each(cute::make_seq<RawPrefetch>{}, [&](auto prefetch_k) {
+          Utils::copy_tensors_A(
+              smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, decltype(prefetch_k)::value, read_stage);
+        });
+      } else {
+        Utils::copy_tensors_A(
+            smem_tiled_copy_A_LDSM,
+            tCsA_LDSM,
+            tCrA_copy_view_LDSM,
+            decltype(k_block_c)::value + RawPrefetch - 1,
+            read_stage);
+      }
+    };
     static_assert(!EarlyStageRefill || K_BLOCK_MAX == 4, "Early refill requires the K128 wait<0> boundary.");
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
     // the rolling copy to avoid extending scale register lifetime.
@@ -1155,10 +1180,10 @@ struct CollectiveMmaArrayMixedInput<
       ++smem_pipe_read;
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
 
-      Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, read_stage);
+      copy_weight_for_mma(cute::Int<0>{}, read_stage);
       copy_scale_for_mma(cute::Int<0>{}, read_stage);
       if (K_BLOCK_MAX > 1) {
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, read_stage);
+        copy_weight_for_mma(cute::Int<1>{}, read_stage);
         copy_scale_for_mma(cute::Int<1>{}, read_stage);
       }
 
@@ -1170,7 +1195,7 @@ struct CollectiveMmaArrayMixedInput<
       maybe_commit_mma_group(cute::Int<0>{});
       tiled_mma.accumulate_ = GMMA::ScaleOut::One;
 
-      Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 2, read_stage);
+      copy_weight_for_mma(cute::Int<2>{}, read_stage);
       copy_scale_for_mma(cute::Int<2>{}, read_stage);
       convert_A_kblock_static(cute::Int<1>{}, read_stage);
 
@@ -1182,7 +1207,7 @@ struct CollectiveMmaArrayMixedInput<
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block + 2, read_stage);
+          copy_weight_for_mma(cute::Int<k_block + 2>{}, read_stage);
           copy_scale_for_mma(cute::Int<k_block + 2>{}, read_stage);
         }
         if constexpr (k_block < K_BLOCK_MAX - 1) {
@@ -1195,9 +1220,9 @@ struct CollectiveMmaArrayMixedInput<
         pipeline.consumer_wait(smem_pipe_read, barrier_token);
 
         int const next_read_stage = smem_pipe_read.index();
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, next_read_stage);
+        copy_weight_for_mma(cute::Int<0>{}, next_read_stage);
         copy_scale_for_mma(cute::Int<0>{}, next_read_stage);
-        Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, next_read_stage);
+        copy_weight_for_mma(cute::Int<1>{}, next_read_stage);
         copy_scale_for_mma(cute::Int<1>{}, next_read_stage);
 
         // The rolling wait after the last commit has retired the oldest group
@@ -1246,9 +1271,9 @@ struct CollectiveMmaArrayMixedInput<
         if constexpr (k_block == K_BLOCK_MAX - 1) {
           pipeline.consumer_wait(smem_pipe_read, barrier_token);
           int const next_read_stage = smem_pipe_read.index();
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 0, next_read_stage);
+          copy_weight_for_mma(cute::Int<0>{}, next_read_stage);
           copy_scale_for_mma(cute::Int<0>{}, next_read_stage);
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, 1, next_read_stage);
+          copy_weight_for_mma(cute::Int<1>{}, next_read_stage);
           copy_scale_for_mma(cute::Int<1>{}, next_read_stage);
 
           // The rolling wait after the last commit has retired the previous
@@ -1257,7 +1282,7 @@ struct CollectiveMmaArrayMixedInput<
           convert_A_kblock_static(cute::Int<0>{}, next_read_stage);
         } else {
           if constexpr (k_block < K_BLOCK_MAX - 2) {
-            Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block + 2, read_stage);
+            copy_weight_for_mma(cute::Int<k_block + 2>{}, read_stage);
             copy_scale_for_mma(cute::Int<k_block + 2>{}, read_stage);
           }
           convert_A_kblock_static(cute::Int<k_block + 1>{}, read_stage);
@@ -1292,7 +1317,7 @@ struct CollectiveMmaArrayMixedInput<
         }
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
-          Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, k_block + 2, read_stage);
+          copy_weight_for_mma(cute::Int<k_block + 2>{}, read_stage);
           copy_scale_for_mma(cute::Int<k_block + 2>{}, read_stage);
         }
         if constexpr (k_block < K_BLOCK_MAX - 1) {
