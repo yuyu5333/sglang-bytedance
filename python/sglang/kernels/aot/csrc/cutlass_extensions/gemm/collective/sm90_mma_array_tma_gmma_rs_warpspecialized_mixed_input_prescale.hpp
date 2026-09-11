@@ -417,6 +417,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::ArrayEngine<WeightScaleRawElement, scale_elements> smem_scale;
       cute::ArrayEngine<NonVoidElementActivationScale, activation_scale_elements> smem_activation_scale;
       cute::ArrayEngine<NonVoidElementZero, zero_elements> smem_zero;
+      CUTE_ALIGNAS(128)
+      cute::ArrayEngine<uint64_t, 256> scale_lut;
     } tensors;
 
     struct TensorMapStorage {};
@@ -427,6 +429,14 @@ struct CollectiveMmaArrayMixedInput<
   using TensorStorage = typename SharedStorage::TensorStorage;
   using TensorMapStorage = typename SharedStorage::TensorMapStorage;
   using PipelineStorage = typename SharedStorage::PipelineStorage;
+
+  CUTLASS_DEVICE static void initialize_scale_lut(TensorStorage& storage, int thread, int threads) {
+    for (uint32_t offset = thread; offset < 256; offset += threads) {
+      uint32_t const lo = offset * 0x08080800U + 0x0c080000U;
+      uint32_t const hi = offset * 0x08080808U + 0x1c181410U;
+      storage.scale_lut[offset] = uint64_t(lo) | (uint64_t(hi) << 32);
+    }
+  }
 
   static constexpr bool IsGroupedGemmKernel = !cute::is_same_v<InternalStrideA, StrideA>;
   static constexpr bool RequiresTensormapUpdateOnBatchChange = false;
@@ -1118,8 +1128,14 @@ struct CollectiveMmaArrayMixedInput<
         Utils::convert_A_kblock_fused_e8m0_pre_mma_raw_scale_to_slot(
             tCrA_load_4b_packed, tCrA_mma_slot, tCrA_scale, k_block_c);
       } else {
-        Utils::convert_A_kblock_fused_e8m0_pre_mma_exp_offsets_to_slot(
-            tCrA_load_4b_packed, tCrA_mma_slot, k_block_c, Int<ScalePairCount>{}, lo_exp_offsets, hi_exp_offsets);
+        Utils::template convert_A_kblock_fused_e8m0_pre_mma_exp_offsets_to_slot<true>(
+            tCrA_load_4b_packed,
+            tCrA_mma_slot,
+            k_block_c,
+            Int<ScalePairCount>{},
+            lo_exp_offsets,
+            hi_exp_offsets,
+            shared_tensors.scale_lut.begin());
       }
     };
     auto commit_mma_group = [&] {

@@ -127,6 +127,10 @@ class SingleWarpgroupPersistentGemm
     int const mma_thread_idx = thread_idx;
     uint32_t const block_rank_in_cluster = cute::block_rank_in_cluster();
 
+    if constexpr (HasScaleLutInitializer<CollectiveMainloop>::value) {
+      CollectiveMainloop::initialize_scale_lut(shared_storage.tensors.mainloop, thread_idx, MaxThreadsPerBlock);
+    }
+
     using MainloopPipeline = typename CollectiveMainloop::MainloopPipeline;
     typename MainloopPipeline::Params mainloop_pipeline_params;
     mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::ProducerConsumer;
