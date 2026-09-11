@@ -203,6 +203,16 @@ def assert_equal(left, right):
         result[name] = equal
         if not equal:
             diff = (a_bytes.to(torch.int16) - b_bytes.to(torch.int16)).abs()
+            if a.dtype in (torch.float32, torch.bfloat16):
+                av, bv = a_bytes.contiguous().view(a.dtype).float(), b_bytes.contiguous().view(b.dtype).float()
+                delta = (av - bv).abs()
+                print(json.dumps(dict(
+                    mismatch=name,
+                    max_abs=delta.max().item(),
+                    mean_abs=delta.mean().item(),
+                    relative_l1=(delta.sum() / av.abs().sum().clamp_min(1e-30)).item(),
+                    changed_values=(av != bv).sum().item(),
+                )), flush=True)
             raise AssertionError(
                 f"{name}: differing bytes={(diff != 0).sum().item()}"
             )
