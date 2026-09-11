@@ -34,6 +34,8 @@
 namespace cutlass::gemm::collective {
 using namespace cute;
 
+struct PreparedOffsetLut {};
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 // WarpSpecialized Mainloop
@@ -1085,8 +1087,9 @@ struct CollectiveMmaArrayMixedInput<
     // tensor in RF.  Smaller M tiles still prefer the compact offset cache.
     constexpr bool UseExpandedScaleRFForLargeM = size<0>(TileShape{}) >= 256;
     Tensor tCrA_scale = make_fragment_like<WeightScaleRawElement>(tCrA_load_4b_packed);
-    cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
-    cute::array<uint32_t, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
+    using CachedOffset = cute::conditional_t<cute::is_same_v<TransformA, PreparedOffsetLut>, uint2, uint32_t>;
+    cute::array<CachedOffset, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
+    cute::array<CachedOffset, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
 
     ConsumerToken barrier_token = {BarrierStatus::WaitAgain};
     auto copy_scale_kblock = [&](auto k_block_c, int read_stage) {
