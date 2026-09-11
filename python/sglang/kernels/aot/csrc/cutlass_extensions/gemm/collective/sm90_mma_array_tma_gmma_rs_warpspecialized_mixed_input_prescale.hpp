@@ -36,6 +36,7 @@ using namespace cute;
 
 struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
+struct RetiredStageRelease {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1074,6 +1075,11 @@ struct CollectiveMmaArrayMixedInput<
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
     constexpr bool EarlyStageRefill = cute::is_same_v<TransformB, EarlyK128StageRefill>;
     static_assert(!EarlyStageRefill || K_BLOCK_MAX == 4, "Early refill requires the K128 wait<0> boundary.");
+    constexpr bool ReleaseAtRetirement = cute::is_same_v<TransformB, RetiredStageRelease>;
+    static_assert(!ReleaseAtRetirement || K_BLOCK_MAX == 8 || K_BLOCK_MAX == 16);
+    // After K_WAIT_MAX current-tile commits, the FIFO holds only current-tile
+    // groups. The previous stage's B reads have all retired.
+    constexpr int ReleaseKblock = ReleaseAtRetirement ? K_WAIT_MAX * K_COMMIT_GROUP_SIZE - 1 : K_BLOCK_MAX - 1;
     // Large-N tiles expose scale smem->RF latency; small-N best configs keep
     // the rolling copy to avoid extending scale register lifetime.
     constexpr bool PreloadAllScaleKblocks = size<1>(TileShape{}) >= 128;
@@ -1231,7 +1237,7 @@ struct CollectiveMmaArrayMixedInput<
             tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
-        if constexpr (!EarlyStageRefill && k_block == K_BLOCK_MAX - 1) {
+        if constexpr (!EarlyStageRefill && k_block == ReleaseKblock) {
           pipeline.consumer_release(smem_pipe_release);
           ++smem_pipe_release;
           released_stage_producer();
@@ -1279,7 +1285,7 @@ struct CollectiveMmaArrayMixedInput<
             tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
-        if constexpr (!EarlyStageRefill && k_block == K_BLOCK_MAX - 1) {
+        if constexpr (!EarlyStageRefill && k_block == ReleaseKblock) {
           pipeline.consumer_release(smem_pipe_release);
           ++smem_pipe_release;
           released_stage_producer();
