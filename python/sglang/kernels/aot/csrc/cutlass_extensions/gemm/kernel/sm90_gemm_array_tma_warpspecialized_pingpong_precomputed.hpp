@@ -95,12 +95,6 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
-template <class Mainloop, class = void>
-struct HasScaleLutInitializer : std::false_type {};
-
-template <class Mainloop>
-struct HasScaleLutInitializer<Mainloop, std::void_t<decltype(Mainloop::initialize_scale_lut)>> : std::true_type {};
-
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -526,10 +520,6 @@ class GemmUniversalPrecomputedScheduler<
     auto producer_warp_role = ProducerWarpRole(warp_idx_in_warp_group);
     int lane_predicate = cute::elect_one_sync();
     uint32_t block_rank_in_cluster = cute::block_rank_in_cluster();
-
-    if constexpr (HasScaleLutInitializer<CollectiveMainloop>::value) {
-      CollectiveMainloop::initialize_scale_lut(shared_storage.tensors.mainloop, thread_idx, MaxThreadsPerBlock);
-    }
 
     // Note: Tma Descriptor Prefetch (from either const or param) is not applicable here
 

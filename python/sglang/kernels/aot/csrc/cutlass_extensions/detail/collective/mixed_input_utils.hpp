@@ -288,15 +288,13 @@ struct MixedGroupedGemmInputUtils {
     }
   }
 
-  template <bool SharedLut = false>
   __device__ __inline__ static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
       __nv_fp4x8_storage_t fp4x8_0,
       __nv_fp4x8_storage_t fp4x8_1,
       __nv_fp8x8_storage_t& fp8x8_raw_0,
       __nv_fp8x8_storage_t& fp8x8_raw_1,
       uint32_t lo_exp_offset,
-      uint32_t hi_exp_offset,
-      uint64_t const* lut_table = nullptr) {
+      uint32_t hi_exp_offset) {
     // One WGMMA A operand lane contributes two fp4x8 registers whose low
     // fp8x4 chunks share one row scale, and high chunks share the other.
     __nv_fp8x4_storage_t* fp8x4_raw_0 = reinterpret_cast<__nv_fp8x4_storage_t*>(&fp8x8_raw_0);
@@ -306,20 +304,12 @@ struct MixedGroupedGemmInputUtils {
     uint32_t const fp4_raw_1 = reinterpret_cast<uint32_t const&>(fp4x8_1);
     uint32_t const em_selector_0 = fp4_raw_0 & 0x77777777U;
     uint32_t const em_selector_1 = fp4_raw_1 & 0x77777777U;
-    auto get_lut = [&](uint32_t offset) {
-      if constexpr (SharedLut) {
-        uint64_t const packed = lut_table[offset];
-        return make_uint2(uint32_t(packed), uint32_t(packed >> 32));
-      } else {
-        return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
-      }
-    };
-    auto const lo_lut = get_lut(lo_exp_offset);
-    auto const hi_lut = get_lut(hi_exp_offset);
-    uint32_t const lo_l4b_exp_offseted_lut = lo_lut.x;
-    uint32_t const lo_h4b_exp_offseted_lut = lo_lut.y;
-    uint32_t const hi_l4b_exp_offseted_lut = hi_lut.x;
-    uint32_t const hi_h4b_exp_offseted_lut = hi_lut.y;
+    constexpr uint32_t fp4_codes_0_to_3_em_bias = 0x0c080000U;
+    constexpr uint32_t fp4_codes_4_to_7_em_bias = 0x1c181410U;
+    uint32_t const lo_l4b_exp_offseted_lut = (lo_exp_offset * 0x08080800U) + fp4_codes_0_to_3_em_bias;
+    uint32_t const lo_h4b_exp_offseted_lut = (lo_exp_offset * 0x08080808U) + fp4_codes_4_to_7_em_bias;
+    uint32_t const hi_l4b_exp_offseted_lut = (hi_exp_offset * 0x08080800U) + fp4_codes_0_to_3_em_bias;
+    uint32_t const hi_h4b_exp_offseted_lut = (hi_exp_offset * 0x08080808U) + fp4_codes_4_to_7_em_bias;
 
     uint32_t const lo_em_fp8x4_0 = prmt(lo_h4b_exp_offseted_lut, lo_l4b_exp_offseted_lut, em_selector_0);
     uint32_t const lo_em_fp8x4_1 = prmt(lo_h4b_exp_offseted_lut, lo_l4b_exp_offseted_lut, em_selector_1);
@@ -353,22 +343,20 @@ struct MixedGroupedGemmInputUtils {
 #endif
   }
 
-  template <bool SharedLut = false, class EngineIn, class LayoutIn, class EngineOut, class LayoutOut>
+  template <class EngineIn, class LayoutIn, class EngineOut, class LayoutOut>
   CUTLASS_DEVICE static void fp4tofp8_fused_e8m0_pre_mma_convert_pair(
       Tensor<EngineIn, LayoutIn> const& src0,
       Tensor<EngineIn, LayoutIn> const& src1,
       Tensor<EngineOut, LayoutOut>& dst0,
       Tensor<EngineOut, LayoutOut>& dst1,
       uint32_t lo_exp_offset,
-      uint32_t hi_exp_offset,
-      uint64_t const* lut_table = nullptr) {
+      uint32_t hi_exp_offset) {
     auto&& src0_ = cute::recast<__nv_fp4x8_storage_t>(src0)(0);
     auto&& src1_ = cute::recast<__nv_fp4x8_storage_t>(src1)(0);
     auto&& dst0_ = cute::recast<__nv_fp8x8_storage_t>(dst0)(0);
     auto&& dst1_ = cute::recast<__nv_fp8x8_storage_t>(dst1)(0);
 
-    fp4tofp8_fused_e8m0_pre_mma_convert_pair<SharedLut>(
-        src0_, src1_, dst0_, dst1_, lo_exp_offset, hi_exp_offset, lut_table);
+    fp4tofp8_fused_e8m0_pre_mma_convert_pair(src0_, src1_, dst0_, dst1_, lo_exp_offset, hi_exp_offset);
   }
 
   /// Utilities to dequantize A.
@@ -643,7 +631,6 @@ struct MixedGroupedGemmInputUtils {
   }
 
   template <
-      bool SharedLut = false,
       int KBlock,
       int ScalePairCount,
       class EngineIn,
@@ -658,8 +645,7 @@ struct MixedGroupedGemmInputUtils {
       cute::Int<KBlock>,
       cute::Int<ScalePairCount>,
       LoOffsetArray const& lo_exp_offsets,
-      HiOffsetArray const& hi_exp_offsets,
-      uint64_t const* lut_table = nullptr) {
+      HiOffsetArray const& hi_exp_offsets) {
     static_assert(FusedE8M0PreMmaScale, "This helper is only for fused e8m0 pre-MMA scale.");
     static_assert(is_rmem<EngineIn>::value, "Input tensor for A conversion must come from registers");
     static_assert(is_rmem<EngineOut>::value, "Output tensor for A conversion must come from registers");
@@ -693,8 +679,7 @@ struct MixedGroupedGemmInputUtils {
       constexpr int cache_index = KBlock * ScalePairCount + pair;
       uint32_t const lo_exp_offset = lo_exp_offsets[cache_index];
       uint32_t const hi_exp_offset = hi_exp_offsets[cache_index];
-      fp4tofp8_fused_e8m0_pre_mma_convert_pair<SharedLut>(
-          src_vec0, src_vec1, dst_vec0, dst_vec1, lo_exp_offset, hi_exp_offset, lut_table);
+      fp4tofp8_fused_e8m0_pre_mma_convert_pair(src_vec0, src_vec1, dst_vec0, dst_vec1, lo_exp_offset, hi_exp_offset);
     });
   }
 
