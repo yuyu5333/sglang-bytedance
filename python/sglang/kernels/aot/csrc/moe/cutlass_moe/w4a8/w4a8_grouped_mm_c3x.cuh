@@ -317,7 +317,6 @@ struct cutlass_3x_w4a8_group_gemm {
                               SingleWarpgroupTileN == 40));
   static constexpr int SingleWarpgroupCtasPerSm =
       SingleWarpgroupTileN == 8 ? 6 : (SingleWarpgroupTileN == 16 ? 5 : (SingleWarpgroupTileN == 32 ? 4 : 3));
-  static constexpr int PersistentCtasPerSm = UseSingleWarpgroupKernel ? SingleWarpgroupCtasPerSm : 1;
 
   using PrecomputedTileScheduler =
       cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90GroupPrecomputed<ProblemShape, 8, UseChunkMajorWorkMap>;
@@ -477,7 +476,9 @@ void cutlass_w4a8_group_gemm_caller(
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = a_tensors.device().index();
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
-  hw_info.sm_count *= Gemm::PersistentCtasPerSm;
+  if constexpr (Gemm::UseSingleWarpgroupKernel) {
+    hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
+  }
   Args arguments;
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;
 
