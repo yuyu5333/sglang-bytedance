@@ -328,24 +328,12 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
-template <class BaseTransform>
-struct SM90_WARP_LUT_TRANSFORM : BaseTransform {
-  static constexpr bool UseWarpShuffleLut = true;
-};
-
-template <class BaseConfig, int L2Distance = 0, bool WarpLut = false>
+template <class BaseConfig, int L2Distance = 0>
 struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr bool CompactPointerSetup = true;
     using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
-    using BaseTransform = std::conditional_t<
-        (L2Distance > 0),
-        cutlass::gemm::collective::WeightL2Prefetch<L2Distance>,
-        std::conditional_t<
-            std::is_base_of_v<cutlass::gemm::collective::PreparedOffsetLut, typename OldMainloop::TransformA>,
-            cutlass::gemm::collective::PreparedLutGlobalActivationTensorMap,
-            cutlass::gemm::collective::GlobalActivationTensorMap>>;
     using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
         typename OldMainloop::DispatchPolicy,
         typename OldMainloop::TileShape,
@@ -357,7 +345,13 @@ struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
         typename OldMainloop::GmemTiledCopyA,
         typename OldMainloop::SmemLayoutAtomA,
         typename OldMainloop::SmemCopyAtomA,
-        std::conditional_t<WarpLut, SM90_WARP_LUT_TRANSFORM<BaseTransform>, BaseTransform>,
+        std::conditional_t<
+            (L2Distance > 0),
+            cutlass::gemm::collective::WeightL2Prefetch<L2Distance>,
+            std::conditional_t<
+                std::is_base_of_v<cutlass::gemm::collective::PreparedOffsetLut, typename OldMainloop::TransformA>,
+                cutlass::gemm::collective::PreparedLutGlobalActivationTensorMap,
+                cutlass::gemm::collective::GlobalActivationTensorMap>>,
         typename OldMainloop::GmemTiledCopyB,
         typename OldMainloop::SmemLayoutAtomB,
         typename OldMainloop::SmemCopyAtomB,
@@ -901,18 +895,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N24_LIGHT_MXFP4<128>>));
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_HEAVY24_MXFP4>));
       return;
-    case 576:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2, true>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
-    case 577:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_MAIN_N32_MXFP4, 0, true>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 578:
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
@@ -939,7 +921,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 576, 577, 578, 579");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 578, 579");
   }
 }
 

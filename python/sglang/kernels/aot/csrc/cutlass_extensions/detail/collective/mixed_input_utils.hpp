@@ -60,16 +60,6 @@ inline __device__ unsigned prmt(unsigned hi, unsigned lo, unsigned select_code) 
 template <class...>
 using MixedInputVoid = void;
 
-template <class Transform, class = void>
-struct MixedInputWarpShuffleLut {
-  static constexpr bool value = false;
-};
-
-template <class Transform>
-struct MixedInputWarpShuffleLut<Transform, MixedInputVoid<decltype(Transform::UseWarpShuffleLut)>> {
-  static constexpr bool value = Transform::UseWarpShuffleLut;
-};
-
 template <class Collective, class = void>
 struct MixedInputFusedE8M0PreMmaScale {
   static constexpr bool value = false;
@@ -299,15 +289,7 @@ struct MixedGroupedGemmInputUtils {
   }
 
   CUTLASS_DEVICE static uint2 prepare_e8m0_lut(uint32_t offset) {
-    if constexpr (MixedInputWarpShuffleLut<typename Collective::TransformA>::value) {
-      // Folded offsets are 1..12; every consumer warp reaches this uniformly.
-      uint32_t const lane = threadIdx.x % 32;
-      uint32_t const lo = lane * 0x08080800U + 0x0c080000U;
-      uint32_t const hi = lane * 0x08080808U + 0x1c181410U;
-      return make_uint2(__shfl_sync(0xffffffffu, lo, offset), __shfl_sync(0xffffffffu, hi, offset));
-    } else {
-      return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
-    }
+    return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
   }
 
   template <class CachedOffset>
