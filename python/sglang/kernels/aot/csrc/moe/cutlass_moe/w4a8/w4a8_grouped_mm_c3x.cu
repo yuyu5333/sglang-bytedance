@@ -375,10 +375,13 @@ __global__ void pack_mxfp4a8_stage_weights_kernel(
   int const expert = blockIdx.x / (k_tiles * m_tiles);
   auto* record = packed + int64_t(blockIdx.x) * RecordBytes;
   typename Mainloop::SmemLayoutA layout;
+  static_assert(cute::is_composed_layout<decltype(layout)>::value);
   for (int i = threadIdx.x; i < ABytes; i += blockDim.x) {
     int const row = i / 256;
     int const col = i % 256;
-    int const destination = int(layout(cute::make_coord(row, col * 2, 0))) / 2;
+    // Flagged SMEM layouts swizzle byte addresses, not subbyte element indices.
+    int const byte_offset = int(layout.layout_b()(cute::make_coord(row, col * 2, 0))) / 2;
+    int const destination = int(layout.layout_a()(byte_offset));
     record[destination] =
         weight[(int64_t(expert) * channels + m_tile * 128 + row) * (reduction / 2) + k_tile * 256 + col];
   }

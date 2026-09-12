@@ -442,13 +442,14 @@ struct CollectiveMmaArrayMixedInput<
   static constexpr size_t SmemAlignmentScale = cute::max(SmemAlignmentA, SmemAlignmentB);
 
   static_assert(SmemAlignmentA >= 128 and SmemAlignmentB >= 128, "Require at least 128B alignment");
+  static_assert(!UseStagePackedWeightScale || PackedWeightStageBytes % SmemAlignmentA == 0);
 
   struct SharedStorage {
     static constexpr int scale_elements = cute::cosize_v<SmemLayoutWeightScaleRaw>;
     static constexpr int zero_elements = 0;
     static constexpr int activation_scale_elements = 0;
     struct TensorStorage
-        : PackedWeightScaleStorage<UseStagePackedWeightScale, PackedWeightStageBytes * Stages> {
+        : PackedWeightScaleStorage<UseStagePackedWeightScale, PackedWeightStageBytes * Stages, SmemAlignmentA> {
       CUTE_ALIGNAS(SmemAlignmentA)
       cute::ArrayEngine<RealSwappedElementA, UseStagePackedWeightScale ? 0 : cute::cosize_v<SmemLayoutA>> smem_A;
       CUTE_ALIGNAS(SmemAlignmentB)
