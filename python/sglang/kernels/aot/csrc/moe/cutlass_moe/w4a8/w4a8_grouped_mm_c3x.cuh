@@ -409,8 +409,7 @@ void cutlass_w4a8_group_gemm_caller(
     std::optional<torch::Tensor> fused_row_arrivals = std::nullopt,
     std::optional<torch::Tensor> fused_expert_residual = std::nullopt,
     double swiglu_limit = 0.0,
-    bool has_swiglu_limit = false,
-    cutlass::gemm::collective::Gemm1FinalizeParams finalize = {}) {
+    bool has_swiglu_limit = false) {
   //   using Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
   using Args = typename Gemm::GemmScaleOnly::Arguments;
 
@@ -616,7 +615,6 @@ void cutlass_w4a8_group_gemm_caller(
     arguments.mainloop.ptr_B_base = static_cast<MmaType const*>(a_tensors.data_ptr());
     arguments.mainloop.total_activation_rows = static_cast<int32_t>(a_tensors.size(0));
     arguments.mainloop.ptr_B_row_offsets = static_cast<int32_t const*>(expert_offsets.data_ptr());
-    arguments.mainloop.finalize = finalize;
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgSchedulerMaxSwizzle;
