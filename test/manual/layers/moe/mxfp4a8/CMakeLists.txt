@@ -31,6 +31,9 @@ set(CUDA_SOURCES
   "${MOE}/scaled_mm_entry.cu"
   "${AOT}/csrc/gemm/per_token_quant_fp8.cu"
   "${AOT}/csrc/elementwise/activation.cu")
+# Match the production PDL contract for the native INT4 CUTLASS kernels.
+set_source_files_properties("${MOE}/w4a8_grouped_mm_c3x.cu" PROPERTIES
+  COMPILE_DEFINITIONS CUTLASS_ENABLE_GDC_FOR_SM90)
 if(REUSE_CUDA_OBJECTS)
   list(LENGTH REUSE_CUDA_OBJECTS OBJECT_COUNT)
   if(NOT OBJECT_COUNT EQUAL 5)

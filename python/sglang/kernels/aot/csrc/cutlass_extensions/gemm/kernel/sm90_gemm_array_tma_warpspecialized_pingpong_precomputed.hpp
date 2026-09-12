@@ -151,7 +151,7 @@ class GemmUniversalPrecomputedScheduler<
                 KernelPtrArrayTmaWarpSpecializedPingpong,
                 typename CollectiveMainloop_::DispatchPolicy::Schedule>);
 
-  static constexpr bool IsGdcEnabled = false;
+  static constexpr bool IsGdcEnabled = true;
 
   // Mainloop derived types
   using CollectiveMainloop = CollectiveMainloop_;
@@ -652,6 +652,9 @@ class GemmUniversalPrecomputedScheduler<
 
     // Wait for all thread blocks in the Cluster
     cluster_wait_fn();
+
+    // The PDL metadata producer may have launched us before its stores are visible.
+    cudaGridDependencySynchronize();
     auto work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
 
     if (not work_tile_info.is_valid()) {

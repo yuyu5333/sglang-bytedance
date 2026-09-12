@@ -171,6 +171,8 @@ class SingleWarpgroupPersistentGemm
       return;
     }
 
+    // Acquire the PDL producer's work map, shapes, pointers and tensor maps.
+    cudaGridDependencySynchronize();
     auto work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
     if (!work_tile_info.is_valid()) {
       return;
