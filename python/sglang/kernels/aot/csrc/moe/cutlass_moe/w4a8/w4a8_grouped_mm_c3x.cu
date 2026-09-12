@@ -1006,27 +1006,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_FILTERED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above48>>));
       return;
-    case 588:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::All>));
-      return;
-    case 589:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              40, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost40>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              48, sgl_kernel::swg_detail::ExpertRowPolicy::From41To48>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              56, sgl_kernel::swg_detail::ExpertRowPolicy::From49To56>>));
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above56>));
-      return;
-    case 590:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              48, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost48>>));
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above48>));
-      return;
     case 591:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_DEEP_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::All>));
       return;
@@ -1055,7 +1034,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, "
-          "583, 584, 585, 588, 589, 590, 591, 592, 593");
+          "583, 584, 585, 591, 592, 593");
   }
 }
 
