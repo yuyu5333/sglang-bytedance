@@ -386,38 +386,6 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
-struct SM90_ROW_SIZED_N64_MXFP4 {
-  using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_INDEPENDENT_TMA_MXFP4>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
-    using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
-        typename OldMainloop::DispatchPolicy,
-        typename OldMainloop::TileShape,
-        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
-        typename OldMainloop::StrideA,
-        cutlass::float_e4m3_t,
-        typename OldMainloop::StrideB,
-        typename OldMainloop::TiledMma,
-        typename OldMainloop::GmemTiledCopyA,
-        typename OldMainloop::SmemLayoutAtomA,
-        typename OldMainloop::SmemCopyAtomA,
-        cutlass::gemm::collective::RowSizedN64Instructions,
-        typename OldMainloop::GmemTiledCopyB,
-        typename OldMainloop::SmemLayoutAtomB,
-        typename OldMainloop::SmemCopyAtomB,
-        typename OldMainloop::TransformB>;
-    struct CollectiveMainloopScaleOnly : Mainloop {
-      static constexpr bool UseTailMmaHandoff = true;
-    };
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -927,16 +895,13 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N24_LIGHT_MXFP4<128>>));
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_HEAVY24_MXFP4>));
       return;
-    case 594:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_ROW_SIZED_N64_MXFP4));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 594");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575");
   }
 }
 

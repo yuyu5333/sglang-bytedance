@@ -42,7 +42,6 @@ struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
 struct GlobalActivationTensorMap {};
 struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
-struct RowSizedN64Instructions : GlobalActivationTensorMap {};
 
 template <int Distance>
 struct WeightL2Prefetch : GlobalActivationTensorMap {
@@ -228,7 +227,6 @@ struct CollectiveMmaArrayMixedInput<
   using SwappedElementB = cute::conditional_t<!SwapAB, ConvertedElementB, ConvertedElementA>;
 
   using TransformA = TransformA_;
-  static constexpr bool UseRowSizedN64Instructions = cute::is_base_of_v<RowSizedN64Instructions, TransformA>;
   using TransformB = TransformB_;
   static constexpr bool UseGlobalActivationTma = cute::is_base_of_v<GlobalActivationTensorMap, TransformA>;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
@@ -780,14 +778,6 @@ struct CollectiveMmaArrayMixedInput<
     return implementable;
   }
 
-  int tile_rows_ = 64;
-
-  CUTLASS_DEVICE void set_tile_rows(int rows) {
-    if constexpr (UseRowSizedN64Instructions) {
-      tile_rows_ = rows;
-    }
-  }
-
   static constexpr int K_PIPE_MAX = DispatchPolicy::Stages;
   static constexpr int K_PIPE_MMAS = 1;
   static constexpr uint32_t TmaTransactionBytesMK = Utils::compute_tma_transaction_bytes_mk();
@@ -1270,65 +1260,6 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
 
-    if constexpr (UseRowSizedN64Instructions) {
-      static_assert(size<1>(TileShape{}) == 64);
-      clear(accum);
-    }
-    auto issue_mma = [&](auto k, int stage) {
-      if constexpr (UseRowSizedN64Instructions) {
-        cute::for_each(cute::make_seq<size<1>(accum)>{}, [&](auto m) {
-          auto a = recast<uint32_t>(tCrA_mma(_, m, k));
-          auto b = recast<uint64_t>(tCrB(_, Int<0>{}, k, stage));
-          auto c = accum(_, m, Int<0>{});
-          static_assert(decltype(size(c))::value == 32);
-          // One uniform branch contract keeps the compiler's async operands
-          // identical across row widths. Unused accumulator columns stay zero.
-          asm volatile(
-              "{\n"
-              ".reg .pred narrow, accum;\n"
-              "setp.ne.b32 accum, %37, 0;\n"
-              "setp.le.s32 narrow, %38, 40;\n"
-              "@narrow bra.uni N40;\n"
-              "setp.le.s32 narrow, %38, 48;\n"
-              "@narrow bra.uni N48;\n"
-              "setp.le.s32 narrow, %38, 56;\n"
-              "@narrow bra.uni N56;\n"
-              "wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3 "
-              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"
-              "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31},"
-              "{%32,%33,%34,%35},%36,accum,1,1;\n"
-              "bra.uni Done;\n"
-              "N40:\n"
-              "wgmma.mma_async.sync.aligned.m64n40k32.f32.e4m3.e4m3 "
-              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19},"
-              "{%32,%33,%34,%35},%36,accum,1,1;\n"
-              "bra.uni Done;\n"
-              "N48:\n"
-              "wgmma.mma_async.sync.aligned.m64n48k32.f32.e4m3.e4m3 "
-              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"
-              "%16,%17,%18,%19,%20,%21,%22,%23},"
-              "{%32,%33,%34,%35},%36,accum,1,1;\n"
-              "bra.uni Done;\n"
-              "N56:\n"
-              "wgmma.mma_async.sync.aligned.m64n56k32.f32.e4m3.e4m3 "
-              "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"
-              "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27},"
-              "{%32,%33,%34,%35},%36,accum,1,1;\n"
-              "Done:\n"
-              "}\n"
-              : "+f"(c(0)), "+f"(c(1)), "+f"(c(2)), "+f"(c(3)), "+f"(c(4)), "+f"(c(5)), "+f"(c(6)), "+f"(c(7)),
-                "+f"(c(8)), "+f"(c(9)), "+f"(c(10)), "+f"(c(11)), "+f"(c(12)), "+f"(c(13)), "+f"(c(14)),
-                "+f"(c(15)), "+f"(c(16)), "+f"(c(17)), "+f"(c(18)), "+f"(c(19)), "+f"(c(20)), "+f"(c(21)),
-                "+f"(c(22)), "+f"(c(23)), "+f"(c(24)), "+f"(c(25)), "+f"(c(26)), "+f"(c(27)), "+f"(c(28)),
-                "+f"(c(29)), "+f"(c(30)), "+f"(c(31))
-              : "r"(a(0)), "r"(a(1)), "r"(a(2)), "r"(a(3)), "l"(b(0)), "r"(int(tiled_mma.accumulate_)),
-                "r"(tile_rows_));
-        });
-      } else {
-        cute::gemm(tiled_mma, tCrA_mma(_, _, k), tCrB(_, _, k, stage), accum);
-      }
-    };
-
     // First K tile.
     {
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
@@ -1348,7 +1279,7 @@ struct CollectiveMmaArrayMixedInput<
 
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
       warpgroup_arrive();
-      issue_mma(cute::Int<0>{}, read_stage);
+      cute::gemm(tiled_mma, tCrA_mma(_, _, cute::Int<0>{}), tCrB(_, _, cute::Int<0>{}, read_stage), accum);
       maybe_commit_mma_group(cute::Int<0>{});
       tiled_mma.accumulate_ = GMMA::ScaleOut::One;
 
@@ -1358,7 +1289,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX - 1>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value + 1;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (k_block < K_BLOCK_MAX - 2) {
@@ -1406,7 +1338,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (!EarlyStageRefill && k_block == K_BLOCK_MAX - 1) {
@@ -1454,7 +1387,8 @@ struct CollectiveMmaArrayMixedInput<
       cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
         constexpr int k_block = decltype(i)::value;
         warpgroup_arrive();
-        issue_mma(cute::Int<k_block>{}, read_stage);
+        cute::gemm(
+            tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
         maybe_commit_mma_group(cute::Int<k_block>{});
 
         if constexpr (!EarlyStageRefill && k_block == K_BLOCK_MAX - 1) {
