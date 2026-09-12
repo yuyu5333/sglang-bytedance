@@ -119,16 +119,6 @@ void fused_swiglu_quant_fp8_packed(
     double swiglu_limit,
     bool has_swiglu_limit);
 
-void fused_swiglu_quant_fp8_warp_experiment(
-    const at::Tensor& input,
-    at::Tensor& output_q,
-    at::Tensor& output_s,
-    const at::Tensor& residual,
-    const at::Tensor& expert_offsets,
-    int64_t num_experts,
-    double swiglu_limit,
-    bool has_swiglu_limit);
-
 void get_cutlass_w4a8_moe_mm_data_with_permutation(
     const torch::Tensor& topk_ids,
     torch::Tensor& expert_offsets,
@@ -349,13 +339,7 @@ void cutlass_mxfp4a8_fused_moe_core(
       topk,
       gemm1_config,
       expert_ids);
-  if (gemm2_config >= 570 && gemm2_config <= 573) {
-    TORCH_CHECK(reuse_quantization, "Warp SwiGLU experiment requires the target BF16 geometry");
-    int64_t const configs[] = {470, 471, 473, 476};
-    gemm2_config = configs[gemm2_config - 570];
-    fused_swiglu_quant_fp8_warp_experiment(
-        c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
-  } else if (reuse_quantization) {
+  if (reuse_quantization) {
     fused_swiglu_quant_fp8_packed(
         c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
   } else {

@@ -416,19 +416,6 @@ void fused_swiglu_quant_fp8_packed(
     int64_t num_experts,
     double swiglu_limit,
     bool has_swiglu_limit) {
-  fused_swiglu_quant_fp8_impl<true>(
-      input, output_q, output_s, residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
-}
-
-void fused_swiglu_quant_fp8_warp_experiment(
-    const at::Tensor& input,
-    at::Tensor& output_q,
-    at::Tensor& output_s,
-    const at::Tensor& residual,
-    const at::Tensor& expert_offsets,
-    int64_t num_experts,
-    double swiglu_limit,
-    bool has_swiglu_limit) {
   fused_swiglu_quant_fp8_impl<true, true>(
       input, output_q, output_s, residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
 }
