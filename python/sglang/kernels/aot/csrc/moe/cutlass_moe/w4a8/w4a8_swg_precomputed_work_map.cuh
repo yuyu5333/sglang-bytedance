@@ -345,7 +345,6 @@ template <
     ExpertRowPolicy RowPolicy,
     bool CompactPointerSetup,
     bool WarpReduceMetadata,
-    bool SkipInactiveMetadata,
     class Problem,
     class MainloopParams,
     class OutputTma>
@@ -433,12 +432,6 @@ __global__ void build_swg_precomputed_work_map_kernel(
 
   if (group_info_storage[1] != 0) {
     swg_build_output_tma(output_tma, problem_shapes[group], group, smem_descs);
-  }
-
-  if constexpr (SkipInactiveMetadata && RowPolicy != ExpertRowPolicy::All) {
-    if (group_info_storage[1] == 0 && group != 0 && group != groups - 1) {
-      return;
-    }
   }
 
   uint64_t prefix_sum = 0;
@@ -627,8 +620,7 @@ void launch_swg_precomputed_work_map(
       size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
   build_swg_precomputed_work_map_kernel<
-      TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows, Gemm::CompactPointerSetup,
-      Gemm::WarpReduceMetadata, Gemm::SkipInactiveMetadata>
+      TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows, Gemm::CompactPointerSetup, Gemm::WarpReduceMetadata>
       <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(
           problem_shapes,
           groups,

@@ -348,13 +348,12 @@ struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   };
 };
 
-template <class BaseConfig, bool SkipInactive = false>
+template <class BaseConfig>
 struct SM90_WARP_METADATA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr bool CompactPointerSetup = true;
     static constexpr bool WarpReduceMetadata = true;
-    static constexpr bool SkipInactiveMetadata = SkipInactive;
   };
 };
 
@@ -863,14 +862,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_WARP_METADATA_MXFP4<
               SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>>));
       return;
-    case 495:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_WARP_METADATA_MXFP4<
-              SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>, true>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>, true>));
-      return;
     case 496:
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_PREBUILT_OUTPUT_MXFP4<
@@ -900,7 +891,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 484, 495, 496, 497, 498, 499");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 484, 496, 497, 498, 499");
   }
 }
 
