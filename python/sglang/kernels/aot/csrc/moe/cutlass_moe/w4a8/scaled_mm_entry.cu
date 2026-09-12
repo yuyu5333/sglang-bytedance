@@ -109,6 +109,16 @@ void fused_swiglu_quant_fp8(
     double swiglu_limit,
     bool has_swiglu_limit);
 
+void fused_swiglu_quant_fp8_packed_experiment(
+    const at::Tensor& input,
+    at::Tensor& output_q,
+    at::Tensor& output_s,
+    const at::Tensor& residual,
+    const at::Tensor& expert_offsets,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit);
+
 void get_cutlass_w4a8_moe_mm_data_with_permutation(
     const torch::Tensor& topk_ids,
     torch::Tensor& expert_offsets,
@@ -330,8 +340,18 @@ void cutlass_mxfp4a8_fused_moe_core(
       topk,
       gemm1_config,
       expert_ids);
-  fused_swiglu_quant_fp8(
-      c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+  if (gemm2_config >= 553 && gemm2_config <= 556) {
+    TORCH_CHECK(
+        !expert_ids.has_value() && hidden_size == 4096 && intermediate_size == 2048 && num_experts == 256 && topk == 6,
+        "Packed SwiGLU experiment requires the EP1 target geometry");
+    int64_t const configs[] = {470, 471, 473, 476};
+    gemm2_config = configs[gemm2_config - 553];
+    fused_swiglu_quant_fp8_packed_experiment(
+        c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+  } else {
+    fused_swiglu_quant_fp8(
+        c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+  }
   cutlass_mxfp4a8_fused_moe_mm(
       c2,
       intermediate_q,
