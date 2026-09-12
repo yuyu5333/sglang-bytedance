@@ -374,13 +374,6 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
-struct SM90_N64_TIGHT_MAIN_MXFP4 {
-  using Base = SM90_N64_INDEPENDENT_TMA_MXFP4::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::MainN64Tight;
-  };
-};
-
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -888,26 +881,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
               64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
       return;
-    case 531:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_TIGHT_MAIN_MXFP4>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<
-              sgl_kernel::swg_detail::ExpertRowPolicy::TailN16Of64>>));
-      return;
-    case 532:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 64, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::MainN64Tight>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<
-              sgl_kernel::swg_detail::ExpertRowPolicy::TailN16Of64>>));
-      return;
     case 533:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_C64_PACKED_MXFP4>));
       return;
@@ -917,7 +890,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 517, 518, 531, 532, 533");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 517, 518, 533");
   }
 }
 
