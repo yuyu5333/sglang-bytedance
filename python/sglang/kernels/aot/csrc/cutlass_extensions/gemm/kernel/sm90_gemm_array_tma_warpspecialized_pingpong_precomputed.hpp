@@ -96,15 +96,6 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
 };
 
 template <class CollectiveMainloop, class = void>
-struct SkipEmptyCtaInitialization : std::false_type {};
-
-template <class CollectiveMainloop>
-struct SkipEmptyCtaInitialization<
-    CollectiveMainloop,
-    std::void_t<decltype(CollectiveMainloop::SkipEmptyCtaInitialization)>>
-    : std::bool_constant<CollectiveMainloop::SkipEmptyCtaInitialization> {};
-
-template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
 };
@@ -537,18 +528,6 @@ class GemmUniversalPrecomputedScheduler<
     enum class WarpGroupRole { Producer = 0, Consumer0 = 1, Consumer1 = 2 };
     enum class ProducerWarpRole { Mainloop = 0, Warp1 = 1, Epilogue = 2, Warp3 = 3 };
 
-    TileScheduler scheduler{params.scheduler};
-    typename TileScheduler::WorkTileInfo work_tile_info;
-    constexpr bool SkipEmptyCta = SkipEmptyCtaInitialization<CollectiveMainloop>::value;
-    if constexpr (SkipEmptyCta) {
-      static_assert(size(ClusterShape{}) == 1, "Early empty-CTA exit requires a single-CTA cluster.");
-      cudaGridDependencySynchronize();
-      work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
-      if (!work_tile_info.is_valid()) {
-        return;
-      }
-    }
-
     // Kernel level shared memory storage
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
 
@@ -649,6 +628,8 @@ class GemmUniversalPrecomputedScheduler<
     const auto c_tile_count = CollectiveEpilogue::get_load_pipe_increment(blk_shape);
     const auto d_tile_count = CollectiveEpilogue::get_store_pipe_increment(blk_shape);
 
+    TileScheduler scheduler{params.scheduler};
+
     // In a warp specialized kernel, collectives expose data movement and compute operations
     // separately
     CollectiveMainloop collective_mainloop;
@@ -657,11 +638,9 @@ class GemmUniversalPrecomputedScheduler<
     // Wait for all thread blocks in the Cluster
     cluster_wait_fn();
 
-    if constexpr (!SkipEmptyCta) {
-      // The PDL metadata producer may have launched us before its stores are visible.
-      cudaGridDependencySynchronize();
-      work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
-    }
+    // The PDL metadata producer may have launched us before its stores are visible.
+    cudaGridDependencySynchronize();
+    auto work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
 
     if (not work_tile_info.is_valid()) {
       // When problem shapes are only on device, the grid launched may be larger than the total
