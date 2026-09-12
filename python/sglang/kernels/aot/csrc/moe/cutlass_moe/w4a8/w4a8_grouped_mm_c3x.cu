@@ -252,6 +252,14 @@ struct SM90_N16_K256_SWG_MXFP4 {
   };
 };
 
+template <class BaseConfig>
+struct SM90_COMPACT_METADATA_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr bool CompactPointerSetup = true;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -683,13 +691,34 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
               64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>));
       return;
+    case 448:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<
+              SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>>));
+      return;
+    case 449:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<
+              SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
+      return;
+    case 450:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>>>));
+      return;
+    case 451:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441");
+          "441, 448, 449, 450, 451");
   }
 }
 

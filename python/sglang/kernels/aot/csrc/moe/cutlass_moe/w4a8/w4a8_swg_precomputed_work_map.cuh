@@ -121,7 +121,8 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     bool weight_desc_per_group,
     cute::TmaDescriptor* smem_descs,
     cute::TmaDescriptor* prebuilt_tma_desc_a,
-    cute::TmaDescriptor* prebuilt_tma_desc_b) {
+    cute::TmaDescriptor* prebuilt_tma_desc_b,
+    bool build_activation_descriptor) {
   if (weight_desc_per_group || group == 0) {
     cute::TmaDescriptor& smem_desc = smem_descs[0];
     if (threadIdx.x == 0) {
@@ -158,7 +159,7 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     swg_publish_prebuilt_tma_descriptor(prebuilt_tma_desc_a + (weight_desc_per_group ? group : 0), smem_desc, 0);
   }
 
-  if (cute::get<1>(problem) == 0) {
+  if (!build_activation_descriptor || cute::get<1>(problem) == 0) {
     return;
   }
 
@@ -239,7 +240,14 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
   return {problem_blocks_m, problem_blocks_m * problem_blocks_n, swizzle_log};
 }
 
-template <int TileM, int TileN, bool ChunkMajorWorkMap, ExpertRowPolicy RowPolicy, class Problem, class MainloopParams>
+template <
+    int TileM,
+    int TileN,
+    bool ChunkMajorWorkMap,
+    ExpertRowPolicy RowPolicy,
+    bool CompactPointerSetup,
+    class Problem,
+    class MainloopParams>
 __global__ void build_swg_precomputed_work_map_kernel(
     Problem const* problem_shapes,
     int groups,
@@ -316,7 +324,8 @@ __global__ void build_swg_precomputed_work_map_kernel(
       weight_desc_per_group,
       smem_descs,
       prebuilt_tma_desc_a,
-      prebuilt_tma_desc_b);
+      prebuilt_tma_desc_b,
+      !CompactPointerSetup || group_info_storage[1] != 0);
 
   uint64_t prefix_sum = 0;
   uint64_t total_sum = 0;
@@ -441,11 +450,11 @@ void launch_swg_precomputed_work_map(
     MainloopParams const& mainloop_params,
     torch::Tensor const& expert_offsets,
     std::optional<torch::Tensor> const& expert_ids,
-    torch::Tensor const& activation_ptrs,
-    torch::Tensor const& weight_ptrs,
-    torch::Tensor const& output_ptrs,
-    torch::Tensor const& activation_scale_ptrs,
-    torch::Tensor const& weight_scale_ptrs,
+    void* activation_ptrs,
+    void* weight_ptrs,
+    void* output_ptrs,
+    void* activation_scale_ptrs,
+    void* weight_scale_ptrs,
     torch::Tensor const& activation,
     torch::Tensor const& weight,
     torch::Tensor const& output,
@@ -458,7 +467,8 @@ void launch_swg_precomputed_work_map(
   size_t const scheduler_smem =
       kSwgPrebuiltTmaDescriptorScratchBytes + size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
-  build_swg_precomputed_work_map_kernel<TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows>
+  build_swg_precomputed_work_map_kernel<
+      TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows, Gemm::CompactPointerSetup>
       <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(
           problem_shapes,
           groups,
@@ -469,11 +479,11 @@ void launch_swg_precomputed_work_map(
           mainloop_params,
           static_cast<int32_t const*>(expert_offsets.data_ptr()),
           expert_ids.has_value() ? static_cast<int32_t const*>(expert_ids->data_ptr()) : nullptr,
-          static_cast<uint64_t*>(activation_ptrs.data_ptr()),
-          static_cast<uint64_t*>(weight_ptrs.data_ptr()),
-          static_cast<uint64_t*>(output_ptrs.data_ptr()),
-          static_cast<uint64_t*>(activation_scale_ptrs.data_ptr()),
-          static_cast<uint64_t*>(weight_scale_ptrs.data_ptr()),
+          static_cast<uint64_t*>(activation_ptrs),
+          static_cast<uint64_t*>(weight_ptrs),
+          static_cast<uint64_t*>(output_ptrs),
+          static_cast<uint64_t*>(activation_scale_ptrs),
+          static_cast<uint64_t*>(weight_scale_ptrs),
           static_cast<uint8_t*>(activation.data_ptr()),
           static_cast<uint8_t*>(weight.data_ptr()),
           static_cast<uint8_t*>(output.data_ptr()),
