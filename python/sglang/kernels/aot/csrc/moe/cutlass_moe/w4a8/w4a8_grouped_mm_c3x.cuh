@@ -379,14 +379,8 @@ struct cutlass_3x_w4a8_group_gemm {
  * @param s_strides Stride information for scale tensors
  * @param chunk_size Size of each chunk for scales (K / number of scale chunks)
  */
-struct DefaultGroupedGemmLaunch {
-  template <class Adapter, class Arguments>
-  cutlass::Status operator()(Adapter& gemm, Arguments const&, cudaStream_t stream) const {
-    return gemm.run(stream, nullptr, true);
-  }
-};
-
-template <typename Gemm, class Launch = DefaultGroupedGemmLaunch>
+// template <typename TileShape, typename ClusterShape, typename KernelSchedule, typename EpilogueSchedule>
+template <typename Gemm>
 void cutlass_w4a8_group_gemm_caller(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -414,8 +408,7 @@ void cutlass_w4a8_group_gemm_caller(
     std::optional<torch::Tensor> fused_row_arrivals = std::nullopt,
     std::optional<torch::Tensor> fused_expert_residual = std::nullopt,
     double swiglu_limit = 0.0,
-    bool has_swiglu_limit = false,
-    Launch launch = {}) {
+    bool has_swiglu_limit = false) {
   //   using Gemm = cutlass_3x_w4a8_group_gemm<TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
   using Args = typename Gemm::GemmScaleOnly::Arguments;
 
@@ -691,7 +684,7 @@ void cutlass_w4a8_group_gemm_caller(
         stream);
   }
 
-  status = launch(gemm, arguments, stream);
+  status = gemm.run(stream, nullptr, true);
   if (status != cutlass::Status::kSuccess) {
     cudaError_t ce = cudaGetLastError();
     if constexpr (Gemm::UsePreMmaE8M0Scale) {
