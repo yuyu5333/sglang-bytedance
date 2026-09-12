@@ -95,13 +95,13 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
-template <class CollectiveMainloop, class = void>
+template <class CollectiveEpilogue, class = void>
 struct IndependentRegisterEpilogue : std::false_type {};
 
-template <class CollectiveMainloop>
+template <class CollectiveEpilogue>
 struct IndependentRegisterEpilogue<
-    CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::IndependentRegisterEpilogue)>>
-    : std::bool_constant<CollectiveMainloop::IndependentRegisterEpilogue> {};
+    CollectiveEpilogue, std::void_t<decltype(CollectiveEpilogue::IndependentRegisterEpilogue)>>
+    : std::bool_constant<CollectiveEpilogue::IndependentRegisterEpilogue> {};
 
 template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
@@ -214,7 +214,7 @@ class GemmUniversalPrecomputedScheduler<
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
 
   // Order Sequence barrier with two stages: one for Mainloop and one for Epilogue
-  static constexpr bool IndependentEpilogue = IndependentRegisterEpilogue<CollectiveMainloop>::value;
+  static constexpr bool IndependentEpilogue = IndependentRegisterEpilogue<CollectiveEpilogue>::value;
   static_assert(!IndependentEpilogue || std::is_empty_v<typename CollectiveEpilogue::TensorStorage>);
   static constexpr uint32_t StagesPerMathWarpGroup = IndependentEpilogue ? 1 : 2;
   using MathWarpGroupOrderBarrier = cutlass::OrderedSequenceBarrier<StagesPerMathWarpGroup, NumMmaWarpGroups>;

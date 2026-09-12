@@ -363,13 +363,14 @@ template <class BaseConfig>
 struct SM90_INDEPENDENT_EPILOGUE_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
-    struct CollectiveMainloopScaleOnly : Base::CollectiveMainloopScaleOnly {
+    struct CollectiveEpilogue : Base::CollectiveEpilogue {
+      using Base::CollectiveEpilogue::CollectiveEpilogue;
       static constexpr bool IndependentRegisterEpilogue = true;
     };
     using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
         sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
+        typename Base::CollectiveMainloopScaleOnly,
+        CollectiveEpilogue,
         typename Base::PrecomputedTileScheduler>;
     using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
   };
