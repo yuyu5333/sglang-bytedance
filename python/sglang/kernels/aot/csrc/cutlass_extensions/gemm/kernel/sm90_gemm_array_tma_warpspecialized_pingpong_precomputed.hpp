@@ -49,6 +49,7 @@
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/trace.h"
 #include "cutlass/workspace.h"
+#include "cutlass_extensions/gemm/collective/sm90_gemm1_finalize.hpp"
 #include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_warpspecialized_precomputed_decl.hpp"
 #include "cutlass_extensions/gemm/kernel/sm90_tile_scheduler_group_precomputed.hpp"
 
@@ -116,6 +117,13 @@ struct UseIndependentTmaProducers<
     std::void_t<decltype(CollectiveMainloop::UseIndependentTmaProducers)>> {
   static constexpr bool value = CollectiveMainloop::UseIndependentTmaProducers;
 };
+
+template <class CollectiveMainloop, class = void>
+struct FinalizeGemm1InEpilogue : std::false_type {};
+
+template <class CollectiveMainloop>
+struct FinalizeGemm1InEpilogue<CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::FinalizeGemm1)>>
+    : std::bool_constant<CollectiveMainloop::FinalizeGemm1> {};
 
 #endif
 
@@ -934,6 +942,7 @@ class GemmUniversalPrecomputedScheduler<
           problem_shape_MNKL = append<4>(params.problem_shape.get_problem_shape(work_tile_info.L_idx), 1);
         }
 
+        auto const completed_problem_shape = problem_shape_MNKL;
         int32_t curr_batch = work_tile_info.L_idx;
 
         // Compute m_coord, n_coord, l_coord with the post-tiled m-shape and n-shape
@@ -1068,8 +1077,18 @@ class GemmUniversalPrecomputedScheduler<
         epi_load_pipe_consumer_state.advance(c_tile_count);
         epi_store_pipe_producer_state.advance(d_tile_count);
 
-        // Cue for next Math WG's Epilogue to start
-        math_wg_order_barrier.arrive();
+        if constexpr (FinalizeGemm1InEpilogue<CollectiveMainloop>::value) {
+          cutlass::gemm::collective::finalize_gemm1_tile<size<0>(TileShape{}), size<1>(TileShape{})>(
+              params.mainloop.finalize,
+              completed_problem_shape,
+              blk_coord,
+              mma_thread_idx,
+              reinterpret_cast<int*>(&shared_storage.tensors.epilogue),
+              [&] { math_wg_order_barrier.arrive(); });
+        } else {
+          // Cue for next Math WG's Epilogue to start
+          math_wg_order_barrier.arrive();
+        }
 
       }  // Scheduler work fetch loop
     }  // Consumer Warp Groups End

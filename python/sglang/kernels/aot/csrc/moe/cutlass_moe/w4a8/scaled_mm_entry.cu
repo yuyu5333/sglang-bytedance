@@ -60,6 +60,26 @@ void cutlass_mxfp4a8_fused_moe_mm_sm90(
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids);
 
+void cutlass_mxfp4a8_finalize_gemm1_sm90(
+    torch::Tensor& d,
+    torch::Tensor const& a,
+    torch::Tensor const& b,
+    torch::Tensor const& a_scale,
+    torch::Tensor const& b_scale,
+    torch::Tensor const& offsets,
+    torch::Tensor const& problems,
+    torch::Tensor const& a_stride,
+    torch::Tensor const& b_stride,
+    torch::Tensor const& d_stride,
+    torch::Tensor const& s_stride,
+    torch::Tensor& output_q,
+    torch::Tensor& output_scale,
+    torch::Tensor const& residual,
+    torch::Tensor& arrivals,
+    int64_t config,
+    double limit,
+    bool has_limit);
+
 void fused_per_token_quant_fp8(
     const torch::Tensor& input,
     torch::Tensor& output_q,
@@ -298,23 +318,33 @@ void cutlass_mxfp4a8_fused_moe_core(
   } else {
     fused_per_token_quant_fp8_shuffled(input, a_map, gateup_input, a1_scale, w1_residual, expert_offsets, num_experts);
   }
-  cutlass_mxfp4a8_fused_moe_mm(
-      c1,
-      gateup_input,
-      w1,
-      a1_scale,
-      w1_scale,
-      gemm_expert_offsets,
-      problem_sizes1,
-      a_strides1,
-      b_strides1,
-      c_strides1,
-      s_strides1,
-      topk,
-      gemm1_config,
-      expert_ids);
-  fused_swiglu_quant_fp8(
-      c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+  if (gemm1_config >= 485 && gemm1_config <= 488) {
+    TORCH_CHECK(!expert_ids.has_value(), "GEMM1 finalization requires the EP=1 expert layout");
+    TORCH_CHECK(intermediate_size == 2048, "GEMM1 finalization requires I2048");
+    auto arrivals = torch::zeros({c1.size(0)}, expert_offsets.options());
+    cutlass_mxfp4a8_finalize_gemm1_sm90(
+        c1, gateup_input, w1, a1_scale, w1_scale, gemm_expert_offsets, problem_sizes1,
+        a_strides1, b_strides1, c_strides1, s_strides1, intermediate_q, a2_scale,
+        w2_residual, arrivals, gemm1_config, swiglu_limit, has_swiglu_limit);
+  } else {
+    cutlass_mxfp4a8_fused_moe_mm(
+        c1,
+        gateup_input,
+        w1,
+        a1_scale,
+        w1_scale,
+        gemm_expert_offsets,
+        problem_sizes1,
+        a_strides1,
+        b_strides1,
+        c_strides1,
+        s_strides1,
+        topk,
+        gemm1_config,
+        expert_ids);
+    fused_swiglu_quant_fp8(
+        c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+  }
   cutlass_mxfp4a8_fused_moe_mm(
       c2,
       intermediate_q,
