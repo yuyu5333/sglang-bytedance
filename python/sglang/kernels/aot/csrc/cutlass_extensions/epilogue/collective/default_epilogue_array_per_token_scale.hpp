@@ -336,7 +336,7 @@ class SmemEpilogueArrayPerTokenScale {
   Params params_;
 };
 
-// Register-to-global epilogue specialized for the SM90 64x32 and 128x32 C fragments used
+// Register-to-global epilogue specialized for the SM90 128x32 C fragment used
 // by Humming GEMM2. Each warp transposes its fragment with shuffles into
 // coalesced channel-major stores. There is no shared memory scratch and no CTA
 // or named-barrier synchronization.
@@ -386,8 +386,8 @@ class WarpShuffleEpilogueArrayPerTokenScale {
   static constexpr int kOutputAlignment = ElementsPerVector;
 
   static_assert(
-      (TileM == 64 || TileM == 128) && TileN == 32 && TileK == 512,
-      "The warp-shuffle epilogue requires a 64/128x32x512 tile.");
+      TileM == 128 && TileN == 32 && TileK == 512,
+      "The warp-shuffle epilogue is specialized for config320's 128x32x512 tile.");
   static_assert(cute::is_same_v<ElementAccumulator, float>, "The warp-shuffle epilogue requires FP32 accumulators.");
   static_assert(
       cute::is_same_v<ElementCompute, float>, "The warp-shuffle epilogue requires FP32 scale multiplication.");
@@ -516,8 +516,7 @@ class WarpShuffleEpilogueArrayPerTokenScale {
     using namespace cute;
     static_assert(is_same_v<BlockShapeMNK, CtaTileShapeMNK>);
     static_assert(
-        decltype(size(accumulators))::value == TileM * TileN / NumThreadsPerWarpGroup,
-        "The SM90 C fragment must match the channel and token tile.");
+        decltype(size(accumulators))::value == 32, "The SM90 128x32 C fragment must hold 32 FP32 values per thread.");
 
     auto M = get<0>(problem_shape_mnkl);
     auto N = get<1>(problem_shape_mnkl);
@@ -564,7 +563,7 @@ class WarpShuffleEpilogueArrayPerTokenScale {
     // two token rows and 16 consecutive channels, yielding full 32B sectors
     // without shared memory or a warpgroup barrier.
     CUTLASS_PRAGMA_UNROLL
-    for (int m_half = 0; m_half < TileM / 64; ++m_half) {
+    for (int m_half = 0; m_half < 2; ++m_half) {
       CUTLASS_PRAGMA_UNROLL
       for (int n_octet = 0; n_octet < 4; ++n_octet) {
         CUTLASS_PRAGMA_UNROLL
