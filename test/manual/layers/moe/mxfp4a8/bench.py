@@ -259,6 +259,7 @@ def main():
     parser.add_argument("--configs", type=int, nargs=2)
     parser.add_argument("--baseline-configs", type=int, nargs=2)
     parser.add_argument("--production-configs", action="store_true")
+    parser.add_argument("--stage-packed-candidate", action="store_true")
     parser.add_argument("--tokens", type=int, nargs="+",
                         default=[4, 16, 64, 256, 1024, 2048, 4096, 8192])
     parser.add_argument("--hidden", type=int, default=4096)
@@ -288,6 +289,14 @@ def main():
         else (baseline, baseline_info)
     )
     weights = make_weights(args.experts, args.hidden, args.inter, args.seed)
+    candidate_weights = weights
+    if args.stage_packed_candidate:
+        if args.configs != [514, 515]:
+            parser.error("stage-packed weights require --configs 514 515")
+        candidate_weights = list(weights)
+        candidate_weights[0] = candidate.pack_stage_weights(weights[0], weights[1])
+        candidate_weights[3] = candidate.pack_stage_weights(weights[3], weights[4])
+        torch.cuda.synchronize()
     selector = production_config_selector() if args.production_configs else None
     report = dict(
         gpu=torch.cuda.get_device_name(), torch=torch.__version__,
@@ -312,7 +321,7 @@ def main():
             selector(m, args.hidden, args.inter, args.experts, args.topk)
             if selector else default_configs(m)
         )
-        right = Runner(candidate, x, ids, factors, weights, args, configs)
+        right = Runner(candidate, x, ids, factors, candidate_weights, args, configs)
         equality = assert_equal(left, right)
         if args.graph:
             left.capture()

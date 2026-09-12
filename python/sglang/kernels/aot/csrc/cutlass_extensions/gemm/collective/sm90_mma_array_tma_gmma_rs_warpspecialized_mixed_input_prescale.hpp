@@ -29,6 +29,7 @@
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/trace.h"
 #include "cutlass_extensions/detail/collective/mixed_input_utils.hpp"
+#include "cutlass_extensions/gemm/collective/sm90_packed_weight_scale.hpp"
 #include "cutlass_extensions/gemm/collective/sm90_split_weight_pipeline.hpp"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -42,6 +43,7 @@ struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
 struct GlobalActivationTensorMap {};
 struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
+struct StagePackedWeightScale : GlobalActivationTensorMap {};
 
 template <int Distance>
 struct WeightL2Prefetch : GlobalActivationTensorMap {
@@ -227,6 +229,8 @@ struct CollectiveMmaArrayMixedInput<
   using SwappedElementB = cute::conditional_t<!SwapAB, ConvertedElementB, ConvertedElementA>;
 
   using TransformA = TransformA_;
+  static constexpr bool UseStagePackedWeightScale = cute::is_same_v<TransformA, StagePackedWeightScale>;
+  static_assert(!UseStagePackedWeightScale || (size<0>(TileShape{}) == 128 && size<2>(TileShape{}) == 512));
   using TransformB = TransformB_;
   static constexpr bool UseGlobalActivationTma = cute::is_base_of_v<GlobalActivationTensorMap, TransformA>;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
@@ -328,6 +332,9 @@ struct CollectiveMmaArrayMixedInput<
       SwappedSmemLayoutAtomA{}, select<0, 2>(TileShape{}), InternalSwappedStrideA{}));
   using SmemLayoutB = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
       SwappedSmemLayoutAtomB{}, select<1, 2>(TileShape{}), InternalSwappedStrideB{}));
+  static constexpr int PackedStageABytes = size<0>(TileShape{}) * size<2>(TileShape{}) / 2;
+  static constexpr int PackedWeightStageBytes = PackedStageABytes + WeightScaleTransactionBytes;
+  using SmemLayoutPackedA = decltype(packed_weight_stage_layout<PackedWeightStageBytes * 2>(SmemLayoutA{}));
 
   // It is assumed that weight scales and zero-points share the same smem layout.
   using SmemLayoutScale = decltype(tile_to_shape(
@@ -440,15 +447,16 @@ struct CollectiveMmaArrayMixedInput<
     static constexpr int scale_elements = cute::cosize_v<SmemLayoutWeightScaleRaw>;
     static constexpr int zero_elements = 0;
     static constexpr int activation_scale_elements = 0;
-    struct TensorStorage {
+    struct TensorStorage
+        : PackedWeightScaleStorage<UseStagePackedWeightScale, PackedWeightStageBytes * Stages> {
       CUTE_ALIGNAS(SmemAlignmentA)
-      cute::ArrayEngine<RealSwappedElementA, cute::cosize_v<SmemLayoutA>> smem_A;
+      cute::ArrayEngine<RealSwappedElementA, UseStagePackedWeightScale ? 0 : cute::cosize_v<SmemLayoutA>> smem_A;
       CUTE_ALIGNAS(SmemAlignmentB)
       cute::ArrayEngine<typename TiledMma::ValTypeB, cute::cosize_v<SmemLayoutB>> smem_B;
       // Keep the member layout aligned with mixed_input.hpp for online collective
       // switching.  Prescale only stages weight e8m0 scale; zero and activation
       // scale storage are intentionally empty.
-      cute::ArrayEngine<WeightScaleRawElement, scale_elements> smem_scale;
+      cute::ArrayEngine<WeightScaleRawElement, UseStagePackedWeightScale ? 0 : scale_elements> smem_scale;
       cute::ArrayEngine<NonVoidElementActivationScale, activation_scale_elements> smem_activation_scale;
       cute::ArrayEngine<NonVoidElementZero, zero_elements> smem_zero;
     } tensors;
@@ -461,6 +469,29 @@ struct CollectiveMmaArrayMixedInput<
   using TensorStorage = typename SharedStorage::TensorStorage;
   using TensorMapStorage = typename SharedStorage::TensorMapStorage;
   using PipelineStorage = typename SharedStorage::PipelineStorage;
+
+  CUTLASS_DEVICE static auto weight_tensor(TensorStorage& storage) {
+    if constexpr (UseStagePackedWeightScale) {
+      return make_tensor(
+          recast_ptr<RealSwappedElementA>(make_smem_ptr(storage.smem_packed_weight.begin())), SmemLayoutPackedA{});
+    } else {
+      return make_tensor(make_smem_ptr(storage.smem_A.begin()), SmemLayoutA{});
+    }
+  }
+
+  template <bool Expanded>
+  CUTLASS_DEVICE static auto scale_tensor(TensorStorage& storage) {
+    using Layout = cute::conditional_t<Expanded, SmemLayoutWeightScaleExpanded, SmemLayoutWeightScaleRaw>;
+    if constexpr (UseStagePackedWeightScale) {
+      auto layout = make_layout(
+          shape(Layout{}), replace<cute::rank(Layout{}) - 1>(stride(Layout{}), Int<PackedWeightStageBytes>{}));
+      return make_tensor(
+          make_smem_ptr(reinterpret_cast<WeightScaleRawElement*>(storage.smem_packed_weight.begin() + PackedStageABytes)),
+          layout);
+    } else {
+      return make_tensor(make_smem_ptr(reinterpret_cast<WeightScaleRawElement*>(storage.smem_scale.begin())), Layout{});
+    }
+  }
 
   static constexpr bool IsGroupedGemmKernel = !cute::is_same_v<InternalStrideA, StrideA>;
   static constexpr bool RequiresTensormapUpdateOnBatchChange = false;
@@ -487,6 +518,9 @@ struct CollectiveMmaArrayMixedInput<
     ElementB const* ptr_B_base = nullptr;
     int32_t total_activation_rows = 0;
     int32_t const* ptr_B_row_offsets = nullptr;
+    uint8_t const* packed_weight_base = nullptr;
+    int32_t packed_channel_tiles = 0;
+    int32_t packed_k_tiles = 0;
   };
 
   // Device side kernel params
@@ -556,6 +590,9 @@ struct CollectiveMmaArrayMixedInput<
     SwappedElementB const* ptr_B_base;
     int32_t total_activation_rows;
     int32_t const* ptr_B_row_offsets;
+    uint8_t const* packed_weight_base;
+    int32_t packed_channel_tiles;
+    int32_t packed_k_tiles;
   };
 
   //
@@ -689,7 +726,10 @@ struct CollectiveMmaArrayMixedInput<
           num_groups_val,
           reinterpret_cast<SwappedElementB const*>(args.ptr_B_base),
           args.total_activation_rows,
-          args.ptr_B_row_offsets};
+          args.ptr_B_row_offsets,
+          args.packed_weight_base,
+          args.packed_channel_tiles,
+          args.packed_k_tiles};
     };
 
     // Prescale keeps the historical scale_k field in Params so the argument
@@ -847,7 +887,7 @@ struct CollectiveMmaArrayMixedInput<
     static_assert(sizeof...(Ts) == 3, "Fused pre-MMA scale needs three inputs (gA, gB, total_k128_blocks)");
     static_assert(sizeof...(TMs) == 2, "Only A and B tensormaps needed");
 
-    Tensor sA_ = make_tensor(make_smem_ptr(shared_tensors.smem_A.begin()), SmemLayoutA{});  // (BLK_M,BLK_K,PIPE)
+    Tensor sA_ = weight_tensor(shared_tensors);  // (BLK_M,BLK_K,PIPE)
     Tensor sB_ = make_tensor(make_smem_ptr(shared_tensors.smem_B.begin()), SmemLayoutB{});  // (BLK_N,BLK_K,PIPE)
     Tensor sA = as_position_independent_swizzle_tensor(sA_);                                // (BLK_M,BLK_K,PIPE)
     Tensor sB = as_position_independent_swizzle_tensor(sB_);                                // (BLK_N,BLK_K,PIPE)
@@ -880,9 +920,7 @@ struct CollectiveMmaArrayMixedInput<
     Tensor tBgB = block_tma_b.partition_S(gB);  // (TMA,TMA_N,TMA_K,k)
     Tensor tBsB = block_tma_b.partition_D(sB);  // (TMA,TMA_N,TMA_K,PIPE)
 
-    Tensor sSRaw = make_tensor(
-        make_smem_ptr(reinterpret_cast<WeightScaleRawElement*>(shared_tensors.smem_scale.begin())),
-        SmemLayoutWeightScaleRaw{});
+    Tensor sSRaw = scale_tensor<false>(shared_tensors);
 
     uint16_t mcast_mask_a = 0;
     uint16_t mcast_mask_b = 0;
@@ -957,11 +995,22 @@ struct CollectiveMmaArrayMixedInput<
 
       int write_stage = smem_pipe_write.index();
       if (cute::elect_one_sync()) {
-        // TMA for A and B
-        copy(
-            mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
-            tAgA(_, _, _, *k_tile_iter),
-            tAsA(_, _, _, write_stage));
+        if constexpr (UseStagePackedWeightScale) {
+          int64_t const record =
+              (int64_t(current_group_idx_) * mainloop_params.packed_channel_tiles + int(m_coord)) *
+                  mainloop_params.packed_k_tiles +
+              int(*k_tile_iter);
+          cute::SM90_BULK_COPY_G2S::copy(
+              mainloop_params.packed_weight_base + record * PackedWeightStageBytes,
+              reinterpret_cast<uint64_t*>(tma_barrier),
+              shared_tensors.smem_packed_weight.begin() + write_stage * PackedWeightStageBytes,
+              PackedWeightStageBytes);
+        } else {
+          copy(
+              mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
+              tAgA(_, _, _, *k_tile_iter),
+              tAsA(_, _, _, write_stage));
+        }
         if constexpr (!SplitWeightLifetime) {
           copy(
               mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b),
@@ -987,10 +1036,12 @@ struct CollectiveMmaArrayMixedInput<
             scale_gmem_addr, reinterpret_cast<uint64_t*>(tma_barrier), scale_smem_addr, WeightScaleBulkCopyBytes);
       };
 
-      if (cute::elect_one_sync()) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int local_m64_block = 0; local_m64_block < WeightScaleMBlocksPerTile; ++local_m64_block) {
-          issue_scale_bulk_copy(local_m64_block);
+      if constexpr (!UseStagePackedWeightScale) {
+        if (cute::elect_one_sync()) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int local_m64_block = 0; local_m64_block < WeightScaleMBlocksPerTile; ++local_m64_block) {
+            issue_scale_bulk_copy(local_m64_block);
+          }
         }
       }
       ++k_tile_iter;
@@ -1070,7 +1121,7 @@ struct CollectiveMmaArrayMixedInput<
     int warp_idx = canonical_warp_idx_sync();
     [[maybe_unused]] int warp_group_thread_idx = thread_idx % 128;
 
-    Tensor sA_ = make_tensor(make_smem_ptr(shared_tensors.smem_A.begin()), SmemLayoutA{});  // (BLK_M,BLK_K,PIPE)
+    Tensor sA_ = weight_tensor(shared_tensors);  // (BLK_M,BLK_K,PIPE)
     Tensor sA = as_position_independent_swizzle_tensor(sA_);                                // (BLK_M,BLK_K,PIPE)
 
     Tensor sB = make_tensor(make_smem_ptr(shared_tensors.smem_B.begin()), SmemLayoutB{});  // (BLK_N,BLK_K,PIPE)
@@ -1158,9 +1209,7 @@ struct CollectiveMmaArrayMixedInput<
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    Tensor sSRaw = make_tensor(
-        make_smem_ptr(reinterpret_cast<WeightScaleRawElement*>(shared_tensors.smem_scale.begin())),
-        SmemLayoutWeightScaleExpanded{});
+    Tensor sSRaw = scale_tensor<true>(shared_tensors);
     Tensor tCsSRaw = mma_thread_slice.partition_A(sSRaw);
 
     PipelineState smem_pipe_release = smem_pipe_read;
