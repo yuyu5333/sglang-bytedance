@@ -201,7 +201,9 @@ def validate(args, report):
             ) % args.experts
             if args.routing == "uniform":
                 changed_ids[:] = changed_ids[0].clone()
-            if args.tokens > 1:
+            if args.tokens > 1 and (
+                args.masked or args.masked_token or args.all_masked
+            ):
                 changed_ids[0] = -1
             ids.copy_(changed_ids)
         else:
