@@ -120,6 +120,17 @@ class SingleWarpgroupPersistentGemm
     static_assert(rank(InternalStrideA{}) == 3 && rank(InternalStrideB{}) == 3, "Mainloop strides must be rank-3.");
     static_assert(rank(InternalStrideC{}) == 3 && rank(InternalStrideD{}) == 3, "Epilogue strides must be rank-3.");
 
+    TileScheduler scheduler{params.scheduler};
+    typename TileScheduler::WorkTileInfo work_tile_info;
+    constexpr bool SkipEmptyCta = SkipEmptyCtaInitialization<CollectiveMainloop>::value;
+    if constexpr (SkipEmptyCta) {
+      cudaGridDependencySynchronize();
+      work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
+      if (!work_tile_info.is_valid()) {
+        return;
+      }
+    }
+
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
     int const thread_idx = int(threadIdx.x);
     int const lane_idx = canonical_lane_idx();
@@ -161,7 +172,6 @@ class SingleWarpgroupPersistentGemm
 
     TiledMma tiled_mma;
     auto const blk_shape = TileShape{};
-    TileScheduler scheduler{params.scheduler};
     CollectiveMainloop collective_mainloop;
     CollectiveEpilogue collective_epilogue(params.epilogue, shared_storage.tensors.epilogue);
 
@@ -171,9 +181,11 @@ class SingleWarpgroupPersistentGemm
       return;
     }
 
-    // Acquire the PDL producer's work map, shapes, pointers and tensor maps.
-    cudaGridDependencySynchronize();
-    auto work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
+    if constexpr (!SkipEmptyCta) {
+      // Acquire the PDL producer's work map, shapes, pointers and tensor maps.
+      cudaGridDependencySynchronize();
+      work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
+    }
     if (!work_tile_info.is_valid()) {
       return;
     }

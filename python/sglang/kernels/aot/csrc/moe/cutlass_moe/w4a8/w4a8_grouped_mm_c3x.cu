@@ -363,6 +363,31 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
+template <class BaseConfig>
+struct SM90_SKIP_EMPTY_CTA_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    struct CollectiveMainloopScaleOnly : Base::CollectiveMainloopScaleOnly {
+      static constexpr bool SkipEmptyCtaInitialization = true;
+    };
+    using GemmKernelScaleOnly = std::conditional_t<
+        Base::UseSingleWarpgroupKernel,
+        cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
+            sgl_kernel::w4a8_detail::ProblemShape,
+            CollectiveMainloopScaleOnly,
+            typename Base::CollectiveEpilogue,
+            Base::SingleWarpgroupCtasPerSm,
+            3,
+            cutlass::gemm::kernel::SingleWarpgroupPipelineMode::RollingRefill>,
+        cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+            sgl_kernel::w4a8_detail::ProblemShape,
+            CollectiveMainloopScaleOnly,
+            typename Base::CollectiveEpilogue,
+            typename Base::PrecomputedTileScheduler>>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -887,13 +912,37 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 522:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SKIP_EMPTY_CTA_MXFP4<SM90_WARP_METADATA_MXFP4<
+              SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
+      return;
+    case 523:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SKIP_EMPTY_CTA_MXFP4<SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 16, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
+      return;
+    case 524:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SKIP_EMPTY_CTA_MXFP4<SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 16, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 517, 518, 519, 520, 521");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 517, 518, 519, 520, 521, 522, 523, 524");
   }
 }
 
