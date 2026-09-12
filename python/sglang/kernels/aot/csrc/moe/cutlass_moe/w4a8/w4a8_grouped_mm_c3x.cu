@@ -328,6 +328,31 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
+template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
+struct SM90_N64_FILTERED_MXFP4 {
+  using Base = SM90_N64_INDEPENDENT_TMA_MXFP4::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr auto ExpertRows = RowPolicy;
+  };
+};
+
+template <int N, sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
+struct SM90_LIGHT_K256_PACKED_MXFP4 {
+  using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<256>>;
+  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
+  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
+      TileShape,
+      ClusterShape,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
+      sgl_kernel::w4a8_detail::WarpShufflePackedStoreGemm2Epilogue,
+      typename QuantTraits<WType::MXFP4>::Element,
+      QuantTraits<WType::MXFP4>::GroupSize,
+      false,
+      true,
+      false,
+      static_cast<int>(RowPolicy)>;
+};
+
 template <class BaseConfig, int L2Distance = 0>
 struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
@@ -915,13 +940,40 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 583:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 48, 256, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost48>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_FILTERED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above48>>));
+      return;
+    case 584:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
+              40, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost40>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
+              48, sgl_kernel::swg_detail::ExpertRowPolicy::From41To48>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
+              56, sgl_kernel::swg_detail::ExpertRowPolicy::From49To56>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_FILTERED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above56>>));
+      return;
+    case 585:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
+              48, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost48>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_FILTERED_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above48>>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 581, 582");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 581, 582, 583, 584, 585");
   }
 }
 
