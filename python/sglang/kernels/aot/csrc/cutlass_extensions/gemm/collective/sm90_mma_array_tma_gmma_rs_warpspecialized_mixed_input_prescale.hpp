@@ -17,6 +17,7 @@
 
 #include "cute/algorithm/functional.hpp"
 #include "cute/algorithm/gemm.hpp"
+#include "cute/algorithm/prefetch.hpp"
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/copy_sm90.hpp"
 #include "cute/atom/mma_atom.hpp"
@@ -41,6 +42,21 @@ struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
 struct GlobalActivationTensorMap {};
 struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
+
+template <int Distance>
+struct WeightL2Prefetch : GlobalActivationTensorMap {
+  static constexpr int WeightPrefetchDistance = Distance;
+};
+
+template <class Transform, class = void>
+struct WeightL2PrefetchDistance {
+  static constexpr int value = 0;
+};
+
+template <class Transform>
+struct WeightL2PrefetchDistance<Transform, cute::void_t<decltype(Transform::WeightPrefetchDistance)>> {
+  static constexpr int value = Transform::WeightPrefetchDistance;
+};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -909,6 +925,16 @@ struct CollectiveMmaArrayMixedInput<
     // Mainloop
     CUTLASS_PRAGMA_NO_UNROLL
     for (; k_tile_count > 0; --k_tile_count) {
+      constexpr int PrefetchDistance = WeightL2PrefetchDistance<TransformA>::value;
+      if constexpr (PrefetchDistance > 0) {
+        if (k_tile_count > PrefetchDistance && cute::elect_one_sync()) {
+          auto* barrier = pipeline.producer_get_barrier(smem_pipe_write);
+          cute::prefetch(
+              mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *barrier, mcast_mask_a),
+              tAgA(_, _, _, int(*k_tile_iter) + PrefetchDistance));
+        }
+      }
+
       // LOCK smem_pipe_write for _writing_
       if constexpr (SplitWeightLifetime) {
         pipeline.weight.producer_acquire(smem_pipe_write);
