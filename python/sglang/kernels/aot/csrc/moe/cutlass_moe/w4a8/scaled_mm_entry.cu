@@ -80,13 +80,10 @@ void fused_per_token_quant_fp8_shuffled(
 void fused_per_token_quant_fp8_route_experiment(
     const torch::Tensor& input,
     const torch::Tensor& topk_ids,
-    const torch::Tensor& a_map,
     const torch::Tensor& c_map,
     torch::Tensor& output_q,
     torch::Tensor& output_s,
-    const torch::Tensor& residual,
-    const torch::Tensor& expert_offsets,
-    bool scatter);
+    const torch::Tensor& residual);
 
 bool fused_prepare_moe_input_and_quant_fp8_shuffled(
     const torch::Tensor& input,
@@ -276,17 +273,15 @@ void cutlass_mxfp4a8_fused_moe_core(
     bool has_swiglu_limit,
     bool prepare_inputs,
     std::optional<torch::Tensor> expert_ids) {
-  bool const route_quant_experiment = gemm1_config >= 545 && gemm1_config <= 552;
+  bool const route_quant_experiment = gemm1_config >= 549 && gemm1_config <= 552;
   if (route_quant_experiment) {
     TORCH_CHECK(
         !prepare_inputs && !expert_ids.has_value() && hidden_size == 4096 &&
             intermediate_size == 2048 && num_experts == 256 && topk == 6,
         "Route quantization experiment requires the EP1 target geometry and prepared metadata");
     int64_t const configs[] = {470, 471, 476, 503};
-    bool const scatter = gemm1_config >= 549;
-    gemm1_config = configs[(gemm1_config - 545) % 4];
-    fused_per_token_quant_fp8_route_experiment(
-        input, topk_ids, a_map, c_map, gateup_input, a1_scale, w1_residual, expert_offsets, scatter);
+    gemm1_config = configs[gemm1_config - 549];
+    fused_per_token_quant_fp8_route_experiment(input, topk_ids, c_map, gateup_input, a1_scale, w1_residual);
   } else if (prepare_inputs) {
     const bool fused = fused_prepare_moe_input_and_quant_fp8_shuffled(
         input,
