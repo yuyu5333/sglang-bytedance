@@ -356,23 +356,6 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
-template <class BaseConfig>
-struct SM90_FINALIZE_GEMM1_MXFP4 {
-  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    struct CollectiveMainloopScaleOnly : Base::CollectiveMainloopScaleOnly {
-      static constexpr bool UseTailMmaHandoff = true;
-      static constexpr bool FinalizeGemm1 = true;
-    };
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -976,66 +959,4 @@ void cutlass_mxfp4a8_fused_moe_mm_sm90(
       topk,
       swg_config,
       expert_ids);
-}
-
-void cutlass_mxfp4a8_finalize_gemm1_sm90(
-    torch::Tensor& d,
-    torch::Tensor const& a,
-    torch::Tensor const& b,
-    torch::Tensor const& a_scale,
-    torch::Tensor const& b_scale,
-    torch::Tensor const& offsets,
-    torch::Tensor const& problems,
-    torch::Tensor const& a_stride,
-    torch::Tensor const& b_stride,
-    torch::Tensor const& d_stride,
-    torch::Tensor const& s_stride,
-    torch::Tensor& output_q,
-    torch::Tensor& output_scale,
-    torch::Tensor const& residual,
-    torch::Tensor& arrivals,
-    int64_t config,
-    double limit,
-    bool has_limit) {
-  TORCH_CHECK(d.dim() == 2 && d.size(1) == 4096 && d.scalar_type() == torch::kBFloat16 && d.is_contiguous());
-  TORCH_CHECK(output_q.dim() == 2 && output_q.size(0) == d.size(0) && output_q.size(1) == 2048);
-  TORCH_CHECK(output_q.scalar_type() == torch::kFloat8_e4m3fn && output_q.is_contiguous());
-  TORCH_CHECK(output_scale.numel() == d.size(0) && output_scale.scalar_type() == torch::kFloat32);
-  TORCH_CHECK(arrivals.numel() == d.size(0) && arrivals.scalar_type() == torch::kInt32);
-  TORCH_CHECK(residual.numel() == offsets.numel() && residual.scalar_type() == torch::kFloat32);
-  cutlass::gemm::collective::Gemm1FinalizeParams finalize{
-      static_cast<__nv_bfloat16 const*>(d.data_ptr()),
-      static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
-      output_scale.data_ptr<float>(),
-      residual.data_ptr<float>(),
-      arrivals.data_ptr<int32_t>(),
-      offsets.data_ptr<int32_t>(),
-      static_cast<float>(limit),
-      has_limit};
-  auto invoke = [&](auto tag) {
-    using Gemm = typename decltype(tag)::Cutlass3xW4A8Gemm;
-    cutlass_w4a8_group_gemm_caller<Gemm>(
-        d, a, b, a_scale, b_scale, offsets, problems, a_stride, b_stride, d_stride, s_stride, 32,
-        std::nullopt, std::nullopt, 0, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, 0.0, false, finalize);
-  };
-  switch (config) {
-    case 479:
-      invoke(SM90_FINALIZE_GEMM1_MXFP4<
-             SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>>{});
-      return;
-    case 480:
-      invoke(SM90_FINALIZE_GEMM1_MXFP4<
-             SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>>>{});
-      return;
-    case 481:
-      invoke(SM90_FINALIZE_GEMM1_MXFP4<SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_INDEPENDENT_TMA_MXFP4>>{});
-      return;
-    case 482:
-      invoke(SM90_FINALIZE_GEMM1_MXFP4<
-             SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512, 1, 1, false>>>{});
-      return;
-    default:
-      TORCH_CHECK(false, "Unsupported GEMM1 finalization config=", config);
-  }
 }
