@@ -245,6 +245,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
   static constexpr bool CompactPointerSetup = false;
   static constexpr bool WarpReduceMetadata = false;
+  static constexpr int FixedReductionK = 0;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
@@ -418,6 +419,10 @@ void cutlass_w4a8_group_gemm_caller(
 
   // Check inputs
   TORCH_CHECK(a_tensors.dim() == 2 or a_tensors.dim() == 3, "A tensor must be 2D/3D");
+  if constexpr (Gemm::FixedReductionK > 0) {
+    TORCH_CHECK(a_tensors.dim() == 2 && a_tensors.size(1) == Gemm::FixedReductionK,
+                "Fixed-K tactic requires matching 2D activation reduction size");
+  }
   TORCH_CHECK(b_tensors.dim() == 3, "B tensor must be 3D [E, N, K/2]");
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
     TORCH_CHECK(b_scales.is_contiguous(), "prescale weight scales must be folded and contiguous");

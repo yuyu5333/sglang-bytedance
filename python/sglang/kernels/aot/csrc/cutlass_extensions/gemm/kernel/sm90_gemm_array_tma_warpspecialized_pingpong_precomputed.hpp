@@ -96,6 +96,13 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
 };
 
 template <class CollectiveMainloop, class = void>
+struct FixedKTileCount : std::integral_constant<int, 0> {};
+
+template <class CollectiveMainloop>
+struct FixedKTileCount<CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::FixedKTileCount)>>
+    : std::integral_constant<int, CollectiveMainloop::FixedKTileCount> {};
+
+template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
 };
@@ -192,6 +199,7 @@ class GemmUniversalPrecomputedScheduler<
 
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = 2;
+  static constexpr int StaticKTileCount = FixedKTileCount<CollectiveMainloop>::value;
   static constexpr uint32_t MaxThreadsPerBlock =
       CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
@@ -627,6 +635,13 @@ class GemmUniversalPrecomputedScheduler<
     const auto blk_shape = TileShape{};  // (BLK_M,BLK_N,BLK_K)
     const auto c_tile_count = CollectiveEpilogue::get_load_pipe_increment(blk_shape);
     const auto d_tile_count = CollectiveEpilogue::get_store_pipe_increment(blk_shape);
+    auto get_k_tile_count = [&](auto const& work, auto const& shape) {
+      if constexpr (StaticKTileCount > 0) {
+        return StaticKTileCount;
+      } else {
+        return TileScheduler::get_work_k_tile_count(work, shape, blk_shape);
+      }
+    };
 
     TileScheduler scheduler{params.scheduler};
 
@@ -651,7 +666,7 @@ class GemmUniversalPrecomputedScheduler<
     // Consumer1 is not on the critical path at prologue.
     if (warp_group_role == WarpGroupRole::Consumer1) [[unlikely]] {
       // Advance 2nd Math WG to the next work tile for the startup
-      const auto k_tile_count = TileScheduler::get_work_k_tile_count(work_tile_info, problem_shape_MNKL, blk_shape);
+      const auto k_tile_count = get_k_tile_count(work_tile_info, problem_shape_MNKL);
 
       auto [next_work_tile_info, increment_pipe] = scheduler.fetch_next_work(work_tile_info);
       work_tile_info = next_work_tile_info;
@@ -722,7 +737,7 @@ class GemmUniversalPrecomputedScheduler<
 
           // Get the number of K tiles to compute for this work as well as the starting K tile
           // offset of the work.
-          auto work_k_tile_count = TileScheduler::get_work_k_tile_count(work_tile_info, problem_shape_MNKL, blk_shape);
+          auto work_k_tile_count = get_k_tile_count(work_tile_info, problem_shape_MNKL);
           auto work_k_tile_start = TileScheduler::get_work_k_tile_start(work_tile_info);
           auto k_tile_iter = cute::make_coord_iterator(idx2crd(work_k_tile_start, shape<3>(gA_mkl)), shape<3>(gA_mkl));
 
@@ -941,7 +956,7 @@ class GemmUniversalPrecomputedScheduler<
         auto n_coord = idx2crd(work_tile_info.N_idx, shape<2>(gB_nkl));
         auto l_coord = idx2crd(work_tile_info.L_idx, shape<4>(gB_nkl));
         auto blk_coord = make_coord(m_coord, n_coord, _, l_coord);
-        auto work_k_tile_count = TileScheduler::get_work_k_tile_count(work_tile_info, problem_shape_MNKL, blk_shape);
+        auto work_k_tile_count = get_k_tile_count(work_tile_info, problem_shape_MNKL);
 
         // Allocate the accumulators for the (M,N) blk_shape
         //
@@ -949,6 +964,14 @@ class GemmUniversalPrecomputedScheduler<
         auto accumulators = partition_fragment_C(tiled_mma, take<0, 2>(blk_shape));  // (MMA,MMA_M,MMA_N)
 
         if (TileScheduler::valid_warpgroup_in_work_tile(work_tile_info)) {
+          if constexpr (StaticKTileCount > 0) {
+            constexpr int Stages = CollectiveMainloop::DispatchPolicy::Stages;
+            static_assert(StaticKTileCount % Stages == 0);
+            using State = typename CollectiveMainloop::PipelineState;
+            mainloop_pipe_consumer_state = State{
+                0, uint32_t((consumer_warp_group_idx * StaticKTileCount / Stages) & 1),
+                mainloop_pipe_consumer_state.count()};
+          }
           math_wg_order_barrier.wait();
 
           if constexpr (UseTailMmaHandoff<CollectiveMainloop>::value) {
@@ -1024,7 +1047,7 @@ class GemmUniversalPrecomputedScheduler<
           if constexpr (IsGroupedGemmKernel) {
             problem_shape_MNKL = append<4>(params.problem_shape.get_problem_shape(work_tile_info.L_idx), 1);
           }
-          work_k_tile_count = TileScheduler::get_work_k_tile_count(work_tile_info, problem_shape_MNKL, blk_shape);
+          work_k_tile_count = get_k_tile_count(work_tile_info, problem_shape_MNKL);
           mainloop_pipe_consumer_state.advance(work_k_tile_count);
 
           // Go to next tile
