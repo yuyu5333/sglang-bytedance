@@ -387,7 +387,7 @@ class WarpShuffleEpilogueArrayPerTokenScale {
 
   static_assert(
       TileM == 128 && (((TileN == 24 || TileN == 32) && TileK == 512) ||
-                      ((TileN == 40 || TileN == 48 || TileN == 56) && TileK == 256)),
+                      ((TileN == 40 || TileN == 48 || TileN == 56 || TileN == 64) && TileK == 256)),
       "The warp-shuffle epilogue requires C128 and a supported N/K pair.");
   static_assert(cute::is_same_v<ElementAccumulator, float>, "The warp-shuffle epilogue requires FP32 accumulators.");
   static_assert(
