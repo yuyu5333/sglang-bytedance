@@ -216,7 +216,7 @@ class CutlassMxfp4A8FusedMoeRunner:
             if 640 <= num_tokens < 2048:
                 return 448, 448
             if num_tokens == 2048:
-                return 402, 402
+                return 460, 460
             if 2048 < num_tokens < 8192:
                 return 403, 405
             if num_tokens == 8192:
