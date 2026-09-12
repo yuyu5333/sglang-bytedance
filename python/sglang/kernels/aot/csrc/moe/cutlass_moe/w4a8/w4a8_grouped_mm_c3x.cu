@@ -301,12 +301,11 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
-template <class BaseConfig, int L2Distance = 0, bool Packed = false>
+template <class BaseConfig, int L2Distance = 0>
 struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr bool CompactPointerSetup = true;
-    static constexpr bool StagePackedWeights = Packed;
     using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
     using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
         typename OldMainloop::DispatchPolicy,
@@ -320,15 +319,12 @@ struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
         typename OldMainloop::SmemLayoutAtomA,
         typename OldMainloop::SmemCopyAtomA,
         std::conditional_t<
-            Packed,
-            cutlass::gemm::collective::StagePackedWeightScale,
+            (L2Distance > 0),
+            cutlass::gemm::collective::WeightL2Prefetch<L2Distance>,
             std::conditional_t<
-                (L2Distance > 0),
-                cutlass::gemm::collective::WeightL2Prefetch<L2Distance>,
-                std::conditional_t<
-                    std::is_base_of_v<cutlass::gemm::collective::PreparedOffsetLut, typename OldMainloop::TransformA>,
-                    cutlass::gemm::collective::PreparedLutGlobalActivationTensorMap,
-                    cutlass::gemm::collective::GlobalActivationTensorMap>>>,
+                std::is_base_of_v<cutlass::gemm::collective::PreparedOffsetLut, typename OldMainloop::TransformA>,
+                cutlass::gemm::collective::PreparedLutGlobalActivationTensorMap,
+                cutlass::gemm::collective::GlobalActivationTensorMap>>,
         typename OldMainloop::GmemTiledCopyB,
         typename OldMainloop::SmemLayoutAtomB,
         typename OldMainloop::SmemCopyAtomB,
@@ -362,36 +358,6 @@ struct SM90_WARP_METADATA_MXFP4 {
     static constexpr bool WarpReduceMetadata = true;
   };
 };
-
-template <class Mainloop>
-__global__ void pack_mxfp4a8_stage_weights_kernel(
-    uint8_t const* weight, uint8_t const* scale, uint8_t* packed, int channels, int reduction) {
-  constexpr int ABytes = Mainloop::PackedStageABytes;
-  constexpr int RecordBytes = Mainloop::PackedWeightStageBytes;
-  int const k_tiles = reduction / 512;
-  int const m_tiles = channels / 128;
-  int const k_tile = blockIdx.x % k_tiles;
-  int const m_tile = blockIdx.x / k_tiles % m_tiles;
-  int const expert = blockIdx.x / (k_tiles * m_tiles);
-  auto* record = packed + int64_t(blockIdx.x) * RecordBytes;
-  typename Mainloop::SmemLayoutA layout;
-  for (int i = threadIdx.x; i < ABytes; i += blockDim.x) {
-    int const row = i / 256;
-    int const col = i % 256;
-    int const destination = int(layout(cute::make_coord(row, col * 2, 0))) / 2;
-    record[destination] =
-        weight[(int64_t(expert) * channels + m_tile * 128 + row) * (reduction / 2) + k_tile * 256 + col];
-  }
-  for (int i = threadIdx.x; i < RecordBytes - ABytes; i += blockDim.x) {
-    int const m64 = i / 1024;
-    int const k128 = i / 256 % 4;
-    int const element = i % 256;
-    int64_t const source =
-        ((int64_t(expert) * (channels / 64) + m_tile * 2 + m64) * (reduction / 128) + k_tile * 4 + k128) * 256 +
-        element;
-    record[ABytes + i] = scale[source];
-  }
-}
 
 template <typename Config>
 inline void invoke_gemm(
@@ -884,50 +850,17 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
-    case 514:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>, 0, true>));
-      return;
-    case 515:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2, 0, true>));
-      return;
-    case 516:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>>));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 514, 515, 516");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503");
   }
 }
 
 }  // namespace
-
-torch::Tensor pack_mxfp4a8_stage_weights_sm90(torch::Tensor const& weight, torch::Tensor const& scale) {
-  TORCH_CHECK(weight.is_cuda() && scale.is_cuda() && weight.device() == scale.device(), "Packing requires one CUDA device");
-  TORCH_CHECK(weight.dim() == 3 && weight.is_contiguous() && scale.is_contiguous(), "Packing requires contiguous weights");
-  TORCH_CHECK(weight.element_size() == 1 && scale.scalar_type() == torch::kUInt8, "Packing requires byte payload/offsets");
-  int64_t const experts = weight.size(0), channels = weight.size(1), reduction = weight.size(2) * 2;
-  TORCH_CHECK(experts > 0 && channels > 0 && channels % 128 == 0 && reduction > 0 && reduction % 512 == 0,
-              "Packing requires positive E and C128/K512");
-  TORCH_CHECK(channels <= INT32_MAX && reduction <= INT32_MAX, "Packing dimensions exceed int32");
-  TORCH_CHECK(scale.numel() == experts * channels * reduction / 32, "Packing requires folded E8M0 scales");
-  int64_t const records = experts * (channels / 128) * (reduction / 512);
-  TORCH_CHECK(records <= INT32_MAX, "Packing record count exceeds grid range");
-  c10::cuda::CUDAGuard guard(weight.device());
-  auto result = torch::empty({experts, channels, reduction * 17 / 32}, weight.options());
-  using Mainloop = SM90_PRECOMPUTED_MXFP4<128, 32, 512>::Cutlass3xW4A8Gemm::CollectiveMainloopScaleOnly;
-  pack_mxfp4a8_stage_weights_kernel<Mainloop><<<records, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-      static_cast<uint8_t const*>(weight.data_ptr()), static_cast<uint8_t const*>(scale.data_ptr()),
-      static_cast<uint8_t*>(result.data_ptr()), int(channels), int(reduction));
-  TORCH_CHECK(cudaPeekAtLastError() == cudaSuccess, "Stage weight packing launch failed");
-  return result;
-}
 
 void cutlass_w4a8_moe_mm_sm90(
     torch::Tensor& d_tensors,

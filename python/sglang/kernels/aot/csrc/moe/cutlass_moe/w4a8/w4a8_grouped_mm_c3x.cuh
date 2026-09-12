@@ -245,7 +245,6 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
   static constexpr bool CompactPointerSetup = false;
   static constexpr bool WarpReduceMetadata = false;
-  static constexpr bool StagePackedWeights = false;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
@@ -423,9 +422,7 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
     TORCH_CHECK(b_scales.is_contiguous(), "prescale weight scales must be folded and contiguous");
     TORCH_CHECK(
-        b_scales.numel() ==
-            b_tensors.size(0) * b_tensors.size(1) *
-                (Gemm::StagePackedWeights ? a_tensors.size(1) : b_tensors.size(2) * 2) / Gemm::GroupSize,
+        b_scales.numel() == b_tensors.size(0) * b_tensors.size(1) * b_tensors.size(2) * 2 / Gemm::GroupSize,
         "prescale weight scales must contain E*N*K/32 raw E8M0 elements");
   } else {
     TORCH_CHECK(b_scales.dim() == 3, "Scale tensor must be 3D [E, K//512, N*4]");
@@ -449,16 +446,9 @@ void cutlass_w4a8_group_gemm_caller(
       TORCH_CHECK(b_scales.size(0) == num_experts, "Scale tensor first dimension must match number of groups");
     }
   }
-  if constexpr (Gemm::StagePackedWeights) {
-    TORCH_CHECK(!expert_ids.has_value(), "Stage-packed weights require EP=1");
-    TORCH_CHECK(a_tensors.dim() == 2 && b_tensors.is_contiguous(), "Stage-packed weights require contiguous 3D B");
-    TORCH_CHECK(b_tensors.size(1) % 128 == 0 && a_tensors.size(1) % 512 == 0, "Stage-packed weights require C128/K512");
-    TORCH_CHECK(b_tensors.size(2) == a_tensors.size(1) * 17 / 32, "Stage-packed B must contain 17*K/32 bytes per row");
-  } else {
-    TORCH_CHECK(
-        b_tensors.size(2) * 2 == a_tensors.size(1) or b_tensors.size(2) * 2 == a_tensors.size(2),
-        "B tensor K/2 dimension must match A tensor K dimension");
-  }
+  TORCH_CHECK(
+      b_tensors.size(2) * 2 == a_tensors.size(1) or b_tensors.size(2) * 2 == a_tensors.size(2),
+      "B tensor K/2 dimension must match A tensor K dimension");
 
   // Check tensor types
   TORCH_CHECK(a_tensors.scalar_type() == torch::kFloat8_e4m3fn, "A tensor must be fp8 (float_e4m3_t) type");
@@ -624,11 +614,6 @@ void cutlass_w4a8_group_gemm_caller(
     arguments.mainloop.ptr_B_base = static_cast<MmaType const*>(a_tensors.data_ptr());
     arguments.mainloop.total_activation_rows = static_cast<int32_t>(a_tensors.size(0));
     arguments.mainloop.ptr_B_row_offsets = static_cast<int32_t const*>(expert_offsets.data_ptr());
-    if constexpr (Gemm::StagePackedWeights) {
-      arguments.mainloop.packed_weight_base = static_cast<uint8_t const*>(b_tensors.data_ptr());
-      arguments.mainloop.packed_channel_tiles = static_cast<int32_t>(b_tensors.size(1) / 128);
-      arguments.mainloop.packed_k_tiles = static_cast<int32_t>(a_tensors.size(1) / 512);
-    }
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgSchedulerMaxSwizzle;
