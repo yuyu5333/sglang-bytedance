@@ -386,8 +386,8 @@ class WarpShuffleEpilogueArrayPerTokenScale {
   static constexpr int kOutputAlignment = ElementsPerVector;
 
   static_assert(
-      TileM == 128 && TileN == 32 && TileK == 512,
-      "The warp-shuffle epilogue is specialized for config320's 128x32x512 tile.");
+      (TileM == 64 || TileM == 128) && (TileN == 24 || TileN == 32) && TileK == 512,
+      "The warp-shuffle epilogue requires C64/C128, N24/N32 and K512.");
   static_assert(cute::is_same_v<ElementAccumulator, float>, "The warp-shuffle epilogue requires FP32 accumulators.");
   static_assert(
       cute::is_same_v<ElementCompute, float>, "The warp-shuffle epilogue requires FP32 scale multiplication.");
@@ -516,7 +516,7 @@ class WarpShuffleEpilogueArrayPerTokenScale {
     using namespace cute;
     static_assert(is_same_v<BlockShapeMNK, CtaTileShapeMNK>);
     static_assert(
-        decltype(size(accumulators))::value == 32, "The SM90 128x32 C fragment must hold 32 FP32 values per thread.");
+        decltype(size(accumulators))::value == TileM * TileN / 128, "Unexpected SM90 accumulator fragment size.");
 
     auto M = get<0>(problem_shape_mnkl);
     auto N = get<1>(problem_shape_mnkl);
@@ -556,19 +556,19 @@ class WarpShuffleEpilogueArrayPerTokenScale {
     NumericArrayConverter<ElementD, ElementCompute, 2> convert;
 
     // SM90 GMMA CLayout_64xN maps lane=(q*4+r) to channel q in each
-    // 8-channel octet and token pair r. The tiled 128x32 MMA contributes:
-    //   i = parity + 2*m_octet + 4*n_octet + 16*m_half.
+    // 8-channel octet and token pair r. Each 64-channel MMA contributes
+    // TileN/2 accumulator values per thread.
     // Pack both channel octets before shuffling so one shuffle transports two
     // independently rounded BF16 values. Each pass remaps all 32 lanes onto
     // two token rows and 16 consecutive channels, yielding full 32B sectors
     // without shared memory or a warpgroup barrier.
     CUTLASS_PRAGMA_UNROLL
-    for (int m_half = 0; m_half < 2; ++m_half) {
+    for (int m_half = 0; m_half < TileM / 64; ++m_half) {
       CUTLASS_PRAGMA_UNROLL
-      for (int n_octet = 0; n_octet < 4; ++n_octet) {
+      for (int n_octet = 0; n_octet < TileN / 8; ++n_octet) {
         CUTLASS_PRAGMA_UNROLL
         for (int parity = 0; parity < 2; ++parity) {
-          int const fragment_idx = parity + 4 * n_octet + 16 * m_half;
+          int const fragment_idx = parity + 4 * n_octet + (TileN / 2) * m_half;
           int const source_local_n = 2 * lane_token_pair + parity + 8 * n_octet;
           int const source_global_n = tile_n_origin + source_local_n;
           ElementCompute const token_scale = source_global_n < N && token_scales
