@@ -37,6 +37,7 @@ def capture(fn):
 
 def validate(args, report):
     from sglang.kernels.ops.moe.direct_decode import direct_decode
+    from sglang.kernels.ops.moe.grouped_decode import grouped_decode
     from sglang.srt.distributed.parallel_state import (
         destroy_distributed_environment,
         destroy_model_parallel,
@@ -74,10 +75,18 @@ def validate(args, report):
     values, ids = logits.topk(args.topk, -1)
     ids = ids.to(getattr(torch, args.ids_dtype))
     weights = values.softmax(-1)
+    if args.duplicate_experts and args.topk > 1:
+        ids[:, -1] = ids[:, 0]
     if args.masked:
         ids[-1, -1] = -1
+    if args.masked_token:
+        ids[-1] = -1
+    if args.all_masked:
+        ids.fill_(-1)
+    report["initial_ids"] = ids.cpu().tolist()
     cfg = MoeRunnerConfig(
-        num_experts=args.experts * (2 if args.masked else 1),
+        num_experts=args.experts
+        * (2 if args.masked or args.masked_token or args.all_masked else 1),
         num_local_experts=args.experts,
         hidden_size=args.hidden,
         intermediate_size_per_partition=args.intermediate,
@@ -115,8 +124,27 @@ def validate(args, report):
             inplace=args.inplace,
         )
 
-    functions = {"direct": direct}
-    if not args.direct_only:
+    def grouped():
+        if args.inplace:
+            x.copy_(original)
+        return grouped_decode(
+            x,
+            quant.w13_weight,
+            quant.w2_weight,
+            ids,
+            weights,
+            b1=quant.b13,
+            b2=quant.b2,
+            scale=args.scale,
+            inplace=args.inplace,
+            block_n=args.block_n,
+            block_k=args.block_k,
+        )
+
+    functions = {} if args.grouped_only else {"direct": direct}
+    if args.grouped or args.grouped_only:
+        functions["grouped"] = grouped
+    if not args.direct_only and not args.grouped_only:
         functions["baseline"] = baseline
     context = (
         override_config(
@@ -158,11 +186,28 @@ def validate(args, report):
             report["direct_vs_baseline"] = error_metrics(
                 outputs["direct"], outputs["baseline"], args.atol, args.rtol
             )
+            if "grouped" in outputs:
+                report["grouped_vs_baseline"] = error_metrics(
+                    outputs["grouped"], outputs["baseline"], args.atol, args.rtol
+                )
 
         graphs = {name: capture(fn) for name, fn in functions.items()}
         saved_ids, saved_weights = ids.clone(), weights.clone()
-        ids.copy_(torch.where(ids < 0, ids, (ids + 1) % args.experts))
+        if args.grouped or args.grouped_only:
+            changed_ids = (
+                torch.arange(args.tokens, device="cuda")[:, None] * (args.topk + 1)
+                + torch.arange(args.topk, device="cuda")[None, :]
+                + 1
+            ) % args.experts
+            if args.routing == "uniform":
+                changed_ids[:] = changed_ids[0].clone()
+            if args.tokens > 1:
+                changed_ids[0] = -1
+            ids.copy_(changed_ids)
+        else:
+            ids.copy_(torch.where(ids < 0, ids, (ids + 1) % args.experts))
         weights.mul_(0.7)
+        report["changed_ids"] = ids.cpu().tolist()
         changed = reference(original, ids, weights, ref_weights, "silu", args.scale)
         for name, (graph, output) in graphs.items():
             for _ in range(5):
@@ -219,9 +264,10 @@ def validate(args, report):
                 target = args.output.with_name(args.output.stem + f"-{name}-trace.json")
                 prof.export_chrome_trace(str(target))
                 report.setdefault("profiles", {})[name] = str(target)
-        report["pass"] = report.get("direct_vs_baseline", {"pass": True})[
-            "pass"
-        ] and all(
+        report["pass"] = all(
+            report.get(key, {"pass": True})["pass"]
+            for key in ("direct_vs_baseline", "grouped_vs_baseline")
+        ) and all(
             case["reference"]["pass"]
             and case["changed_routing_graph"]["pass"]
             and all(item["pass"] for item in case.get("two_streams", []))
@@ -244,9 +290,16 @@ def main():
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--bias", action="store_true")
     parser.add_argument("--masked", action="store_true")
+    parser.add_argument("--masked-token", action="store_true")
+    parser.add_argument("--all-masked", action="store_true")
+    parser.add_argument("--duplicate-experts", action="store_true")
     parser.add_argument("--inplace", action="store_true")
     parser.add_argument("--config", choices=["runtime", "fixed"], default="runtime")
     parser.add_argument("--direct-only", action="store_true")
+    parser.add_argument("--grouped", action="store_true")
+    parser.add_argument("--grouped-only", action="store_true")
+    parser.add_argument("--block-n", type=int, choices=[16, 32, 64], default=32)
+    parser.add_argument("--block-k", type=int, choices=[32, 64, 128, 256], default=64)
     parser.add_argument("--runner-direct", action="store_true")
     parser.add_argument("--expect-fallback", action="store_true")
     parser.add_argument("--skip-timing", action="store_true")
@@ -279,7 +332,7 @@ def main():
     import triton
 
     import sglang
-    from sglang.kernels.ops.moe import direct_decode
+    from sglang.kernels.ops.moe import direct_decode, grouped_decode
 
     report = {
         "args": {
@@ -298,6 +351,9 @@ def main():
         "device": str(torch.cuda.get_device_properties(0)),
         "source_sha256": hashlib.sha256(
             Path(direct_decode.__file__).read_bytes()
+        ).hexdigest(),
+        "grouped_source_sha256": hashlib.sha256(
+            Path(grouped_decode.__file__).read_bytes()
         ).hexdigest(),
         "scope": "Synthetic BF16/FP16 MoE; TP/EP/PP/DP=1; no checkpoint/KV/HTTP/speculative/mem-fraction workload",
         "pass": False,
