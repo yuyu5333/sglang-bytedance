@@ -253,7 +253,73 @@ __global__ void fused_swiglu_quant_fp8_kernel(
   }
 }
 
-template <bool PackedStore>
+__global__ void fused_swiglu_quant_fp8_warp_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    __nv_fp8_e4m3* __restrict__ output_q,
+    float* __restrict__ output_s,
+    const float* __restrict__ residual,
+    const int32_t* __restrict__ expert_offsets,
+    int64_t rows,
+    int experts,
+    float limit,
+    bool has_limit) {
+  constexpr int Hidden = 2048;
+  constexpr int Vec = 8;
+  constexpr int Chunks = Hidden / (32 * Vec);
+  int const row = blockIdx.x * 4 + threadIdx.x / 32;
+  int const lane = threadIdx.x % 32;
+  if (row >= rows) {
+    return;
+  }
+  __nv_bfloat16 cached[Chunks][Vec];
+  auto gate = reinterpret_cast<uint4 const*>(input + int64_t(row) * Hidden * 2);
+  auto up = gate + Hidden / Vec;
+  float amax = 0.0f;
+#pragma unroll
+  for (int chunk = 0; chunk < Chunks; ++chunk) {
+    uint4 const g = gate[chunk * 32 + lane];
+    uint4 const u = up[chunk * 32 + lane];
+    auto gv = reinterpret_cast<__nv_bfloat16 const*>(&g);
+    auto uv = reinterpret_cast<__nv_bfloat16 const*>(&u);
+#pragma unroll
+    for (int j = 0; j < Vec; ++j) {
+      cached[chunk][j] = fused_swiglu_value(gv[j], uv[j], limit, has_limit);
+      amax = fmaxf(amax, fabsf(static_cast<float>(cached[chunk][j])));
+    }
+  }
+  float const scale = warpReduceMax(amax) / FP8_E4M3_MAX;
+  float const inverse = scale == 0.0f ? 0.0f : 1.0f / scale;
+  if (lane == 0) {
+    int lo = 0;
+    int hi = experts;
+    while (lo + 1 < hi) {
+      int const mid = (lo + hi) / 2;
+      if (row >= expert_offsets[mid]) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    output_s[row] = scale * residual[lo];
+  }
+#pragma unroll
+  for (int chunk = 0; chunk < Chunks; ++chunk) {
+    alignas(8) __nv_fp8x2_storage_t pairs[Vec / 2];
+#pragma unroll
+    for (int j = 0; j < Vec; j += 2) {
+      float2 values{
+          static_cast<float>(cached[chunk][j]) * inverse,
+          static_cast<float>(cached[chunk][j + 1]) * inverse};
+      values.x = fmaxf(fminf(values.x, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+      values.y = fmaxf(fminf(values.y, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+      pairs[j / 2] = __nv_cvt_float2_to_fp8x2(values, __NV_SATFINITE, __NV_E4M3);
+    }
+    *reinterpret_cast<uint64_t*>(output_q + int64_t(row) * Hidden + (chunk * 32 + lane) * Vec) =
+        *reinterpret_cast<uint64_t const*>(pairs);
+  }
+}
+
+template <bool PackedStore, bool WarpRows = false>
 void fused_swiglu_quant_fp8_impl(
     const at::Tensor& input,
     at::Tensor& output_q,
@@ -287,6 +353,16 @@ void fused_swiglu_quant_fp8_impl(
   if constexpr (PackedStore) {
     TORCH_CHECK(hidden_dim == 2048 && input.scalar_type() == at::kBFloat16,
                 "Packed SwiGLU requires BF16 and intermediate size 2048");
+  }
+  if constexpr (WarpRows) {
+    fused_swiglu_quant_fp8_warp_kernel<<<(num_tokens + 3) / 4, 128, 0, stream>>>(
+        static_cast<__nv_bfloat16 const*>(input.data_ptr()),
+        static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
+        static_cast<float*>(output_s.data_ptr()),
+        static_cast<float const*>(residual.data_ptr()),
+        static_cast<int32_t const*>(expert_offsets.data_ptr()),
+        num_tokens, int(num_experts), float(swiglu_limit), has_swiglu_limit);
+    return;
   }
   if (hidden_dim == 2048 && input.scalar_type() == at::kBFloat16) {
     fused_swiglu_quant_fp8_kernel<__nv_bfloat16, true, PackedStore><<<num_tokens, kThreads, 0, stream>>>(
@@ -341,6 +417,19 @@ void fused_swiglu_quant_fp8_packed(
     double swiglu_limit,
     bool has_swiglu_limit) {
   fused_swiglu_quant_fp8_impl<true>(
+      input, output_q, output_s, residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+}
+
+void fused_swiglu_quant_fp8_warp_experiment(
+    const at::Tensor& input,
+    at::Tensor& output_q,
+    at::Tensor& output_s,
+    const at::Tensor& residual,
+    const at::Tensor& expert_offsets,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit) {
+  fused_swiglu_quant_fp8_impl<true, true>(
       input, output_q, output_s, residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
 }
 #endif
