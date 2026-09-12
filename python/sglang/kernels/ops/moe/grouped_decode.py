@@ -59,10 +59,12 @@ def _grouped_gate_up(
     expert, leader, rows, first = _expert_rows(IDS, M, E, TOPK, BM, BT)
     if leader:
         n = tl.program_id(1) * BN + tl.arange(0, BN)
+        pair = tl.arange(0, 2 * BN)
+        feature = tl.program_id(1) * BN + pair // 2
+        weight_row = feature + (pair % 2) * I
         k = tl.arange(0, BK)
         active = (rows < M) & (first < TOPK)
-        gate = tl.full((BM, BN), 0, tl.float32)
-        up = tl.full((BM, BN), 0, tl.float32)
+        gate_up = tl.full((BM, 2 * BN), 0, tl.float32)
         for start in range(tl.cdiv(H, BK)):
             kk = start * BK + k
             x = tl.load(
@@ -70,17 +72,16 @@ def _grouped_gate_up(
                 mask=active[:, None] & (kk[None, :] < H),
                 other=0,
             )
-            offset = expert * (2 * I * H) + n[None, :] * H + kk[:, None]
-            mask = (n[None, :] < I) & (kk[:, None] < H)
-            wg = tl.load(W + offset, mask=mask, other=0)
-            wu = tl.load(W + offset + I * H, mask=mask, other=0)
-            gate = tl.dot(x, wg, gate)
-            up = tl.dot(x, wu, up)
+            offset = expert * (2 * I * H) + weight_row[None, :] * H + kk[:, None]
+            mask = (feature[None, :] < I) & (kk[:, None] < H)
+            w = tl.load(W + offset, mask=mask, other=0)
+            gate_up = tl.dot(x, w, gate_up)
         if HAS_BIAS:
-            gate += tl.load(B + expert * (2 * I) + n, mask=n < I, other=0)[None, :]
-            up += tl.load(B + expert * (2 * I) + I + n, mask=n < I, other=0)[None, :]
-        gate = gate.to(ACT.dtype.element_ty).to(tl.float32)
-        up = up.to(ACT.dtype.element_ty).to(tl.float32)
+            gate_up += tl.load(
+                B + expert * (2 * I) + weight_row, mask=feature < I, other=0
+            )[None, :]
+        gate_up = gate_up.to(ACT.dtype.element_ty).to(tl.float32)
+        gate, up = tl.split(tl.reshape(gate_up, (BM, BN, 2)))
         value = gate / (1.0 + tl.exp(-gate)) * up
         # Duplicate routes share the first slot's activation, but not its weight.
         tl.store(
