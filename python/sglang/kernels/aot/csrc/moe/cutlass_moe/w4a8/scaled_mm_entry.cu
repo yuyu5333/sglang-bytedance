@@ -77,7 +77,7 @@ void fused_per_token_quant_fp8_shuffled(
     const torch::Tensor& expert_offsets,
     int64_t num_experts);
 
-void fused_per_token_quant_fp8_route_experiment(
+void fused_per_token_quant_fp8_scatter6(
     const torch::Tensor& input,
     const torch::Tensor& topk_ids,
     const torch::Tensor& c_map,
@@ -109,17 +109,7 @@ void fused_swiglu_quant_fp8(
     double swiglu_limit,
     bool has_swiglu_limit);
 
-void fused_swiglu_quant_fp8_packed_experiment(
-    const at::Tensor& input,
-    at::Tensor& output_q,
-    at::Tensor& output_s,
-    const at::Tensor& residual,
-    const at::Tensor& expert_offsets,
-    int64_t num_experts,
-    double swiglu_limit,
-    bool has_swiglu_limit);
-
-void fused_swiglu_quant_fp8_pair_experiment(
+void fused_swiglu_quant_fp8_packed(
     const at::Tensor& input,
     at::Tensor& output_q,
     at::Tensor& output_s,
@@ -293,15 +283,14 @@ void cutlass_mxfp4a8_fused_moe_core(
     bool has_swiglu_limit,
     bool prepare_inputs,
     std::optional<torch::Tensor> expert_ids) {
-  bool const route_quant_experiment = gemm1_config >= 549 && gemm1_config <= 552;
-  if (route_quant_experiment) {
-    TORCH_CHECK(
-        !prepare_inputs && !expert_ids.has_value() && hidden_size == 4096 &&
-            intermediate_size == 2048 && num_experts == 256 && topk == 6,
-        "Route quantization experiment requires the EP1 target geometry and prepared metadata");
-    int64_t const configs[] = {470, 471, 476, 503};
-    gemm1_config = configs[gemm1_config - 549];
-    fused_per_token_quant_fp8_route_experiment(input, topk_ids, c_map, gateup_input, a1_scale, w1_residual);
+  int64_t const tokens = input.size(0);
+  bool const reuse_quantization =
+      !prepare_inputs && !expert_ids.has_value() && hidden_size == 4096 &&
+      intermediate_size == 2048 && num_experts == 256 && topk == 6 &&
+      input.scalar_type() == at::kBFloat16 && input.is_contiguous() &&
+      (tokens == 1024 || tokens == 2048 || tokens == 4096 || tokens == 8192);
+  if (reuse_quantization) {
+    fused_per_token_quant_fp8_scatter6(input, topk_ids, c_map, gateup_input, a1_scale, w1_residual);
   } else if (prepare_inputs) {
     const bool fused = fused_prepare_moe_input_and_quant_fp8_shuffled(
         input,
@@ -350,20 +339,9 @@ void cutlass_mxfp4a8_fused_moe_core(
       topk,
       gemm1_config,
       expert_ids);
-  if (gemm2_config >= 553 && gemm2_config <= 560) {
-    TORCH_CHECK(
-        !expert_ids.has_value() && hidden_size == 4096 && intermediate_size == 2048 && num_experts == 256 && topk == 6,
-        "Packed SwiGLU experiment requires the EP1 target geometry");
-    int64_t const configs[] = {470, 471, 473, 476};
-    bool const pair_convert = gemm2_config >= 557;
-    gemm2_config = configs[(gemm2_config - 553) % 4];
-    if (pair_convert) {
-      fused_swiglu_quant_fp8_pair_experiment(
-          c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
-    } else {
-      fused_swiglu_quant_fp8_packed_experiment(
-          c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
-    }
+  if (reuse_quantization) {
+    fused_swiglu_quant_fp8_packed(
+        c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
   } else {
     fused_swiglu_quant_fp8(
         c1, intermediate_q, a2_scale, w2_residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);

@@ -733,7 +733,7 @@ __global__ void per_token_quant_fp8_scatter6_kernel(
     output_s[destinations[tid]] = scale * residual[topk_ids[token * 6 + tid]];
   }
   float const inverse = scale == 0.0f ? 0.0f : 1.0f / scale;
-  __nv_fp8_e4m3 quantized[Vec];
+  alignas(16) __nv_fp8_e4m3 quantized[Vec];
 #pragma unroll
   for (int i = 0; i < Vec; ++i) {
     float const value = fmaxf(fminf(static_cast<float>(values[i]) * inverse, FP8_E4M3_MAX), -FP8_E4M3_MAX);
@@ -746,7 +746,7 @@ __global__ void per_token_quant_fp8_scatter6_kernel(
   }
 }
 
-void fused_per_token_quant_fp8_route_experiment(
+void fused_per_token_quant_fp8_scatter6(
     const torch::Tensor& input,
     const torch::Tensor& topk_ids,
     const torch::Tensor& c_map,
@@ -763,12 +763,12 @@ void fused_per_token_quant_fp8_route_experiment(
       input.device() == topk_ids.device() && input.device() == c_map.device() &&
           input.device() == output_q.device() && input.device() == output_s.device() &&
           input.device() == residual.device(),
-      "Route quantization experiment requires tensors on the same device");
+      "Route quantization requires tensors on the same device");
   TORCH_CHECK(
       input.dim() == 2 && input.scalar_type() == at::kBFloat16 && input.is_contiguous() && input.size(1) == 4096 &&
           topk_ids.dim() == 2 && topk_ids.scalar_type() == at::kInt && topk_ids.is_contiguous() && topk_ids.size(1) == 6 &&
           topk_ids.size(0) == input.size(0) && input.size(0) >= 640,
-      "Route quantization experiment requires contiguous BF16 [M>=640,4096], int32 [M,6]");
+      "Route quantization requires contiguous BF16 [M>=640,4096], int32 [M,6]");
   TORCH_CHECK(
       c_map.scalar_type() == at::kInt && c_map.is_contiguous() &&
           c_map.numel() == topk_ids.numel() && output_q.dim() == 2 && output_q.scalar_type() == at::kFloat8_e4m3fn &&
@@ -776,7 +776,7 @@ void fused_per_token_quant_fp8_route_experiment(
           output_s.scalar_type() == at::kFloat && output_s.is_contiguous() &&
           output_s.numel() == topk_ids.numel() && residual.scalar_type() == at::kFloat &&
           residual.is_contiguous() && residual.numel() == 256,
-      "Invalid route quantization experiment buffers");
+      "Invalid route quantization buffers");
   per_token_quant_fp8_scatter6_kernel<<<input.size(0), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       static_cast<nv_bfloat16 const*>(input.data_ptr()),
       static_cast<int32_t const*>(topk_ids.data_ptr()),
