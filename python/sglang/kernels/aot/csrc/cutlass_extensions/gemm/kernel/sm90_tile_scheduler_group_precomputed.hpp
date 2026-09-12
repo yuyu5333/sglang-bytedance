@@ -99,11 +99,7 @@ struct PrecomputedWorkMapStride<true> {
 };
 
 // Persistent Thread Block (TB) scheduler
-template <
-    class GroupProblemShape,
-    int SchedulerPipelineStageCount,
-    bool ChunkMajorWorkMap = false,
-    bool GridZSelectsPartition = false>
+template <class GroupProblemShape, int SchedulerPipelineStageCount, bool ChunkMajorWorkMap = false>
 class PersistentTileSchedulerSm90GroupPrecomputed {
   //
   // Data members
@@ -324,15 +320,13 @@ class PersistentTileSchedulerSm90GroupPrecomputed {
 #if defined(__CUDA_ARCH__)
     CUTLASS_ASSERT(scheduler_params.precomputed_work_tiles_ != nullptr);
     WorkLinearIdx const worker_idx = WorkLinearIdx(blockIdx.x) * WorkLinearIdx(gridDim.y) + WorkLinearIdx(blockIdx.y) +
-                                     WorkLinearIdx(GridZSelectsPartition ? 0 : blockIdx.z) *
-                                         WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y);
+                                     WorkLinearIdx(blockIdx.z) * WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y);
     if constexpr (ChunkMajorWorkMap) {
       current_work_linear_idx_ = worker_idx * scheduler_params.precomputed_work_tiles_per_worker;
       total_grid_size_ = 1;
     } else {
       current_work_linear_idx_ = worker_idx;
-      total_grid_size_ =
-          WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y) * WorkLinearIdx(GridZSelectsPartition ? 1 : gridDim.z);
+      total_grid_size_ = WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y) * WorkLinearIdx(gridDim.z);
     }
 
 #else
@@ -348,15 +342,13 @@ class PersistentTileSchedulerSm90GroupPrecomputed {
 #if defined(__CUDA_ARCH__)
     CUTLASS_ASSERT(scheduler_params.precomputed_work_tiles_ != nullptr);
     WorkLinearIdx const worker_idx = WorkLinearIdx(blockIdx.x) * WorkLinearIdx(gridDim.y) + WorkLinearIdx(blockIdx.y) +
-                                     WorkLinearIdx(GridZSelectsPartition ? 0 : blockIdx.z) *
-                                         WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y);
+                                     WorkLinearIdx(blockIdx.z) * WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y);
     if constexpr (ChunkMajorWorkMap) {
       current_work_linear_idx_ = worker_idx * scheduler_params.precomputed_work_tiles_per_worker;
       total_grid_size_ = 1;
     } else {
       current_work_linear_idx_ = worker_idx;
-      total_grid_size_ =
-          WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y) * WorkLinearIdx(GridZSelectsPartition ? 1 : gridDim.z);
+      total_grid_size_ = WorkLinearIdx(gridDim.x) * WorkLinearIdx(gridDim.y) * WorkLinearIdx(gridDim.z);
     }
 
 #else
