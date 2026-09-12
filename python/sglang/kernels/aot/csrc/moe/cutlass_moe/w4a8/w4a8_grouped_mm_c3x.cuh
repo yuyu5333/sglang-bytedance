@@ -243,6 +243,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
+  static constexpr bool CompactPointerSetup = false;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
@@ -460,11 +461,33 @@ void cutlass_w4a8_group_gemm_caller(
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
   auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
 
-  torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
+  torch::Tensor a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, pointer_storage;
+  void* a_ptrs_data;
+  void* b_ptrs_data;
+  void* out_ptrs_data;
+  void* a_scales_ptrs_data;
+  void* b_scales_ptrs_data;
+  if constexpr (Gemm::CompactPointerSetup) {
+    static_assert(Gemm::UsePreMmaE8M0Scale);
+    pointer_storage = torch::empty({5, num_experts}, options_int);
+    auto* base = pointer_storage.data_ptr<int64_t>();
+    a_ptrs_data = base;
+    b_ptrs_data = base + num_experts;
+    out_ptrs_data = base + 2 * num_experts;
+    a_scales_ptrs_data = base + 3 * num_experts;
+    b_scales_ptrs_data = base + 4 * num_experts;
+  } else {
+    a_ptrs = torch::empty(num_experts, options_int);
+    b_ptrs = torch::empty(num_experts, options_int);
+    out_ptrs = torch::empty(num_experts, options_int);
+    a_scales_ptrs = torch::empty(num_experts, options_int);
+    b_scales_ptrs = torch::empty(num_experts, options_int);
+    a_ptrs_data = a_ptrs.data_ptr();
+    b_ptrs_data = b_ptrs.data_ptr();
+    out_ptrs_data = out_ptrs.data_ptr();
+    a_scales_ptrs_data = a_scales_ptrs.data_ptr();
+    b_scales_ptrs_data = b_scales_ptrs.data_ptr();
+  }
   // MXFP4A8: per-expert activation block-scale pointer array (only used when
   // act_block_scales is provided; int4a8 leaves this empty).
   torch::Tensor as_scales_ptrs;
@@ -485,7 +508,7 @@ void cutlass_w4a8_group_gemm_caller(
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr());
 
-  if constexpr (!Gemm::UseSingleWarpgroupKernel) {
+  if constexpr (!Gemm::UseSingleWarpgroupKernel && !Gemm::CompactPointerSetup) {
     run_int4_fp8_get_group_gemm_starts<typename Gemm::ElementScale>(
         expert_offsets,
         a_ptrs,
@@ -514,7 +537,7 @@ void cutlass_w4a8_group_gemm_caller(
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
     fusion_args.token_scale_default = ElementAccumulator(1);
     fusion_args.token_scale_ptr_array =
-        per_act_token ? static_cast<float const* const*>(a_scales_ptrs.data_ptr()) : nullptr;
+        per_act_token ? static_cast<float const* const*>(a_scales_ptrs_data) : nullptr;
     if constexpr (Gemm::FuseSwiGLUQuantEpilogue) {
       TORCH_CHECK(fused_output_q.has_value(), "fused GEMM1 requires output_q");
       TORCH_CHECK(fused_output_s.has_value(), "fused GEMM1 requires output_s");
@@ -550,17 +573,17 @@ void cutlass_w4a8_group_gemm_caller(
     arguments = Args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {num_experts, problem_sizes_as_shapes, nullptr},
-        {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs.data_ptr()),
+        {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs_data),
          static_cast<typename Gemm::StrideB*>(b_strides.data_ptr()),
-         static_cast<const MmaType**>(a_ptrs.data_ptr()),
+         static_cast<const MmaType**>(a_ptrs_data),
          static_cast<typename Gemm::StrideA*>(a_strides.data_ptr()),
-         static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs.data_ptr()),
+         static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs_data),
          static_cast<typename Gemm::StrideS*>(s_strides.data_ptr()),
          static_cast<int>(chunk_size)},
         {fusion_args,
          nullptr,
          nullptr,
-         static_cast<ElementD**>(out_ptrs.data_ptr()),
+         static_cast<ElementD**>(out_ptrs_data),
          static_cast<typename Gemm::StrideD*>(d_strides.data_ptr()),
          static_cast<ElementD*>(d_tensors.data_ptr()),
          d_tensors.size(1),
@@ -571,17 +594,17 @@ void cutlass_w4a8_group_gemm_caller(
     arguments = Args{
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {num_experts, problem_sizes_as_shapes, nullptr},
-        {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs.data_ptr()),
+        {static_cast<const typename Gemm::ElementQuantB**>(b_ptrs_data),
          static_cast<typename Gemm::StrideB*>(b_strides.data_ptr()),
-         static_cast<const MmaType**>(a_ptrs.data_ptr()),
+         static_cast<const MmaType**>(a_ptrs_data),
          static_cast<typename Gemm::StrideA*>(a_strides.data_ptr()),
-         static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs.data_ptr()),
+         static_cast<const typename Gemm::ElementScalePacked**>(b_scales_ptrs_data),
          static_cast<typename Gemm::StrideS*>(s_strides.data_ptr()),
          static_cast<int>(chunk_size)},
         {fusion_args,
          nullptr,
          nullptr,
-         static_cast<ElementD**>(out_ptrs.data_ptr()),
+         static_cast<ElementD**>(out_ptrs_data),
          static_cast<typename Gemm::StrideD*>(d_strides.data_ptr())},
         hw_info};
   }
@@ -642,11 +665,11 @@ void cutlass_w4a8_group_gemm_caller(
         gemm.params().mainloop,
         expert_offsets,
         expert_ids,
-        a_ptrs,
-        b_ptrs,
-        out_ptrs,
-        a_scales_ptrs,
-        b_scales_ptrs,
+        a_ptrs_data,
+        b_ptrs_data,
+        out_ptrs_data,
+        a_scales_ptrs_data,
+        b_scales_ptrs_data,
         a_tensors,
         b_tensors,
         d_tensors,
