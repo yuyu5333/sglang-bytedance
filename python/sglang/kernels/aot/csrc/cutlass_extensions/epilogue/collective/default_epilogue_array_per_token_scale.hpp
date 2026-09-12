@@ -386,8 +386,8 @@ class WarpShuffleEpilogueArrayPerTokenScale {
   static constexpr int kOutputAlignment = ElementsPerVector;
 
   static_assert(
-      (TileM == 64 || TileM == 128) && (TileN == 24 || TileN == 32) && TileK == 512,
-      "The warp-shuffle epilogue requires C64/C128, N24/N32 and K512.");
+      TileM == 128 && (TileN == 24 || TileN == 32) && TileK == 512,
+      "The warp-shuffle epilogue requires C128, N24/N32 and K512.");
   static_assert(cute::is_same_v<ElementAccumulator, float>, "The warp-shuffle epilogue requires FP32 accumulators.");
   static_assert(
       cute::is_same_v<ElementCompute, float>, "The warp-shuffle epilogue requires FP32 scale multiplication.");
@@ -563,7 +563,7 @@ class WarpShuffleEpilogueArrayPerTokenScale {
     // two token rows and 16 consecutive channels, yielding full 32B sectors
     // without shared memory or a warpgroup barrier.
     CUTLASS_PRAGMA_UNROLL
-    for (int m_half = 0; m_half < TileM / 64; ++m_half) {
+    for (int m_half = 0; m_half < 2; ++m_half) {
       CUTLASS_PRAGMA_UNROLL
       for (int n_octet = 0; n_octet < TileN / 8; ++n_octet) {
         CUTLASS_PRAGMA_UNROLL

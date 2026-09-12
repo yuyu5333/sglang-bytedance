@@ -195,6 +195,7 @@ struct SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2 {
 
 template <int C>
 struct SM90_N24_LIGHT_MXFP4 {
+  static_assert(C == 128);
   using TileShape = cute::Shape<cute::Int<C>, cute::Int<24>, cute::Int<512>>;
   using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
   using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
@@ -884,18 +885,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
               64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
       return;
-    case 566:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N24_LIGHT_MXFP4<64>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above24>>));
-      return;
-    case 567:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N24_LIGHT_MXFP4<128>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above24>>));
-      return;
     case 568:
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
@@ -932,7 +921,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 566, 567, 568, 569, 574, 575");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 568, 569, 574, 575");
   }
 }
 
