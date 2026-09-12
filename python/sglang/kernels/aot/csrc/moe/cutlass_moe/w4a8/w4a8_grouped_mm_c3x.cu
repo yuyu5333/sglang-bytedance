@@ -347,6 +347,42 @@ struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   };
 };
 
+template <int N, int PipelineStages>
+struct SM90_FULL_K_WEIGHT_CACHE_MXFP4 {
+  using Base = typename SM90_PRECOMPUTED_MXFP4<64, N, 256>::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr bool CompactPointerSetup = true;
+    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
+    using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+        PipelineStages, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
+    using CacheMainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
+        Policy,
+        typename OldMainloop::TileShape,
+        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
+        typename OldMainloop::StrideA,
+        cutlass::float_e4m3_t,
+        typename OldMainloop::StrideB,
+        typename OldMainloop::TiledMma,
+        typename OldMainloop::GmemTiledCopyA,
+        typename OldMainloop::SmemLayoutAtomA,
+        typename OldMainloop::SmemCopyAtomA,
+        typename OldMainloop::TransformA,
+        typename OldMainloop::GmemTiledCopyB,
+        typename OldMainloop::SmemLayoutAtomB,
+        typename OldMainloop::SmemCopyAtomB,
+        cutlass::gemm::collective::FullKWeightCache>;
+    struct CollectiveMainloopScaleOnly : CacheMainloop {
+      static constexpr bool UseTailMmaHandoff = true;
+    };
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        CollectiveMainloopScaleOnly,
+        typename Base::CollectiveEpilogue,
+        typename Base::PrecomputedTileScheduler>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -858,13 +894,21 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 477:
+      TORCH_CHECK(a_tensors.size(1) >= 1024 && a_tensors.size(1) <= 4096 && a_tensors.size(1) % 256 == 0);
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_FULL_K_WEIGHT_CACHE_MXFP4<32, 4>));
+      return;
+    case 478:
+      TORCH_CHECK(a_tensors.size(1) >= 1024 && a_tensors.size(1) <= 4096 && a_tensors.size(1) % 256 == 0);
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_FULL_K_WEIGHT_CACHE_MXFP4<64, 3>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 476");
+          "441, 448, 449, 460, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477, 478");
   }
 }
 

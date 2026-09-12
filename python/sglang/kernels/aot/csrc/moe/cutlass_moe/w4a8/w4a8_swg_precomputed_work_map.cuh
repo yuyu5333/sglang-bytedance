@@ -126,6 +126,13 @@ template <class Params>
 struct SwgGlobalActivationTma<Params, std::void_t<decltype(Params::GlobalActivationTma)>>
     : std::bool_constant<Params::GlobalActivationTma> {};
 
+template <class Params, class = void>
+struct SwgFullWeightKCache : std::false_type {};
+
+template <class Params>
+struct SwgFullWeightKCache<Params, std::void_t<decltype(Params::FullWeightKCache)>>
+    : std::bool_constant<Params::FullWeightKCache> {};
+
 template <class MainloopParams, class Problem>
 __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     MainloopParams const& mainloop_params,
@@ -402,6 +409,11 @@ __global__ void build_swg_precomputed_work_map_kernel(
     uint64_t const global_tile = group_start + local_tile;
     uint64_t packed_tile =
         swg_make_work_tile(global_tile, local_tile, group, problem_blocks_m, swizzle_log, gemm_grid_x, gemm_grid_y);
+    if constexpr (SwgFullWeightKCache<MainloopParams>::value) {
+      static_assert(ChunkMajorWorkMap && RowPolicy == ExpertRowPolicy::All && kSwgWorkMapMaxSwizzle == 1);
+      uint64_t const token_tiles = group_tiles / problem_blocks_m;
+      packed_tile = SwgWorkTile::pack(local_tile / token_tiles, local_tile % token_tiles, group);
+    }
     if constexpr (RowPolicy == ExpertRowPolicy::TailN16) {
       uint64_t const first_tail_tile = uint64_t(cute::get<1>(problem_shapes[group])) / 32 * 2;
       packed_tile = SwgWorkTile::pack(
@@ -459,6 +471,9 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
   if constexpr (Gemm::ExpertRows == ExpertRowPolicy::MainN32 || Gemm::ExpertRows == ExpertRowPolicy::TailN16) {
     TORCH_CHECK(grid_shape.y == 1, "Split N16 tails require an unswizzled token grid");
+  }
+  if constexpr (SwgFullWeightKCache<typename Gemm::CollectiveMainloopScaleOnly::Params>::value) {
+    TORCH_CHECK(grid_shape.y == 1, "Full-K weight cache requires an unswizzled token grid");
   }
   uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));
   uint64_t const total_token_tiles = swg_div_up(total_tokens, uint64_t(TileN));
