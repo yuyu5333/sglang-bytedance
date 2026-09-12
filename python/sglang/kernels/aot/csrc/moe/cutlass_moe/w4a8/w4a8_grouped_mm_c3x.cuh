@@ -502,8 +502,6 @@ void cutlass_w4a8_group_gemm_caller(
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
-  } else if constexpr (Gemm::UsePreMmaE8M0Scale) {
-    hw_info.sm_count *= Gemm::GemmKernelScaleOnly::MinBlocksPerMultiprocessor;
   }
   Args arguments;
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;

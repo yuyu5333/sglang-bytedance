@@ -96,13 +96,6 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
 };
 
 template <class CollectiveMainloop, class = void>
-struct TwoResidentC64 : std::false_type {};
-
-template <class CollectiveMainloop>
-struct TwoResidentC64<CollectiveMainloop, std::void_t<decltype(CollectiveMainloop::TwoResidentC64)>>
-    : std::bool_constant<CollectiveMainloop::TwoResidentC64> {};
-
-template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
 };
@@ -201,14 +194,13 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr uint32_t MaxThreadsPerBlock =
       CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
-  static constexpr bool UseTwoResidentC64 = TwoResidentC64<CollectiveMainloop>::value;
-  static constexpr uint32_t MinBlocksPerMultiprocessor = UseTwoResidentC64 ? 2 : 1;
+  static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
-  static constexpr uint32_t LoadRegisterRequirement = UseTwoResidentC64 || UseMaxMmaRegisters ? 32 : 40;
-  static constexpr uint32_t MmaRegisterRequirement = UseTwoResidentC64 ? 104 : (UseMaxMmaRegisters ? 240 : 232);
+  static constexpr uint32_t LoadRegisterRequirement = UseMaxMmaRegisters ? 32 : 40;
+  static constexpr uint32_t MmaRegisterRequirement = UseMaxMmaRegisters ? 240 : 232;
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
