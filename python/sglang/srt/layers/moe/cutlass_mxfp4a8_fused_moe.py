@@ -212,15 +212,19 @@ class CutlassMxfp4A8FusedMoeRunner:
                 return 392, 392
             if 65 <= num_tokens < 640:
                 return 449, 449
+            if num_tokens == 1024:
+                return 470, 470
             # N32 reduces repeated weight conversion once expert rows grow.
             if 640 <= num_tokens < 2048:
                 return 448, 448
             if num_tokens == 2048:
-                return 460, 460
+                return 471, 471
+            if num_tokens == 4096:
+                return 474, 473
             if 2048 < num_tokens < 8192:
                 return 403, 405
             if num_tokens == 8192:
-                return 404, 405
+                return 475, 476
         if num_tokens <= 64:
             return 100, 100
         if num_tokens == 2048:
