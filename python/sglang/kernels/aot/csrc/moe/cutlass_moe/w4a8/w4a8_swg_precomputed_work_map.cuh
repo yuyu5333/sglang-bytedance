@@ -27,12 +27,6 @@ enum class ExpertRowPolicy {
   TailN16,
   AtMost24,
   Above24,
-  AtMost48,
-  Above48,
-  AtMost40,
-  From41To48,
-  From49To56,
-  Above56,
 };
 
 template <ExpertRowPolicy Policy>
@@ -58,18 +52,6 @@ CUTLASS_HOST_DEVICE bool swg_select_expert_rows(uint64_t rows) {
     return rows <= 24;
   } else if constexpr (Policy == ExpertRowPolicy::Above24) {
     return rows > 24;
-  } else if constexpr (Policy == ExpertRowPolicy::AtMost48) {
-    return rows <= 48;
-  } else if constexpr (Policy == ExpertRowPolicy::Above48) {
-    return rows > 48;
-  } else if constexpr (Policy == ExpertRowPolicy::AtMost40) {
-    return rows <= 40;
-  } else if constexpr (Policy == ExpertRowPolicy::From41To48) {
-    return rows > 40 && rows <= 48;
-  } else if constexpr (Policy == ExpertRowPolicy::From49To56) {
-    return rows > 48 && rows <= 56;
-  } else if constexpr (Policy == ExpertRowPolicy::Above56) {
-    return rows > 56;
   }
   return true;
 }

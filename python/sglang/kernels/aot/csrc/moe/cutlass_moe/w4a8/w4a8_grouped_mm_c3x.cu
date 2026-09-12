@@ -328,23 +328,6 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
-template <int N, sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
-struct SM90_LIGHT_K256_PACKED_MXFP4 {
-  using TileShape = cute::Shape<cute::Int<128>, cute::Int<N>, cute::Int<256>>;
-  using ClusterShape = cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>;
-  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      TileShape,
-      ClusterShape,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
-      sgl_kernel::w4a8_detail::WarpShufflePackedStoreGemm2Epilogue,
-      typename QuantTraits<WType::MXFP4>::Element,
-      QuantTraits<WType::MXFP4>::GroupSize,
-      false,
-      true,
-      false,
-      static_cast<int>(RowPolicy)>;
-};
-
 template <class BaseConfig, int L2Distance = 0>
 struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
@@ -390,65 +373,6 @@ struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
             CollectiveMainloopScaleOnly,
             typename Base::CollectiveEpilogue,
             typename Base::PrecomputedTileScheduler>>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
-template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
-struct SM90_N64_PACKED_MXFP4 {
-  using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_INDEPENDENT_TMA_MXFP4>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    static constexpr bool UseWarpShuffleGemm2Epilogue = true;
-    static constexpr auto ExpertRows = RowPolicy;
-    using CollectiveEpilogue = typename sgl_kernel::w4a8_detail::W4A8EpilogueSelector<
-        false,
-        true,
-        false,
-        cute::Shape<cute::Int<128>, cute::Int<64>, cute::Int<256>>,
-        cute::Shape<cute::Int<1>, cute::Int<1>, cute::Int<1>>,
-        sgl_kernel::w4a8_detail::WarpShufflePackedStoreGemm2Epilogue>::Type;
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        typename Base::CollectiveMainloopScaleOnly,
-        CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
-template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
-struct SM90_N64_PACKED_DEEP_MXFP4 {
-  using Base = typename SM90_N64_PACKED_MXFP4<RowPolicy>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
-    using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
-        6, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
-    static_assert(OldMainloop::DispatchPolicy::Stages < Policy::Stages);
-    using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
-        Policy,
-        typename OldMainloop::TileShape,
-        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
-        typename OldMainloop::StrideA,
-        cutlass::float_e4m3_t,
-        typename OldMainloop::StrideB,
-        typename OldMainloop::TiledMma,
-        typename OldMainloop::GmemTiledCopyA,
-        typename OldMainloop::SmemLayoutAtomA,
-        typename OldMainloop::SmemCopyAtomA,
-        typename OldMainloop::TransformA,
-        typename OldMainloop::GmemTiledCopyB,
-        typename OldMainloop::SmemLayoutAtomB,
-        typename OldMainloop::SmemCopyAtomB,
-        typename OldMainloop::TransformB>;
-    struct CollectiveMainloopScaleOnly : Mainloop {
-      static constexpr bool UseTailMmaHandoff = true;
-    };
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    static_assert(sizeof(typename GemmKernelScaleOnly::SharedStorage) <= 227 * 1024);
     using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
   };
 };
@@ -971,35 +895,13 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N24_LIGHT_MXFP4<128>>));
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_HEAVY24_MXFP4>));
       return;
-    case 591:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_DEEP_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::All>));
-      return;
-    case 592:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              40, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost40>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              48, sgl_kernel::swg_detail::ExpertRowPolicy::From41To48>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              56, sgl_kernel::swg_detail::ExpertRowPolicy::From49To56>>));
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_DEEP_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above56>));
-      return;
-    case 593:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_LIGHT_K256_PACKED_MXFP4<
-              48, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost48>>));
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_PACKED_DEEP_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::Above48>));
-      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, "
-          "591, 592, 593");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575");
   }
 }
 
