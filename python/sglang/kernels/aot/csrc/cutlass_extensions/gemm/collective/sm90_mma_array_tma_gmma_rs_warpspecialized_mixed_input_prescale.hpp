@@ -48,21 +48,6 @@ struct WeightL2Prefetch : GlobalActivationTensorMap {
   static constexpr int WeightPrefetchDistance = Distance;
 };
 
-template <int K, int PrefetchDistance>
-struct FixedReduction : WeightL2Prefetch<PrefetchDistance> {
-  static constexpr int ReductionSize = K;
-};
-
-template <class Transform, class = void>
-struct FixedReductionSize {
-  static constexpr int value = 0;
-};
-
-template <class Transform>
-struct FixedReductionSize<Transform, cute::void_t<decltype(Transform::ReductionSize)>> {
-  static constexpr int value = Transform::ReductionSize;
-};
-
 template <class Transform, class = void>
 struct WeightL2PrefetchDistance {
   static constexpr int value = 0;
@@ -243,8 +228,6 @@ struct CollectiveMmaArrayMixedInput<
 
   using TransformA = TransformA_;
   using TransformB = TransformB_;
-  static constexpr int FixedKTileCount = FixedReductionSize<TransformA>::value / size<2>(TileShape{});
-  static_assert(FixedKTileCount == 0 || (FixedKTileCount >= 2 && FixedKTileCount % Stages == 0));
   static constexpr bool UseGlobalActivationTma = cute::is_base_of_v<GlobalActivationTensorMap, TransformA>;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
   using SwappedTransformB = cute::conditional_t<!SwapAB, TransformB, TransformA>;
@@ -863,11 +846,6 @@ struct CollectiveMmaArrayMixedInput<
       TensorStorage& shared_tensors) {
     static_assert(sizeof...(Ts) == 3, "Fused pre-MMA scale needs three inputs (gA, gB, total_k128_blocks)");
     static_assert(sizeof...(TMs) == 2, "Only A and B tensormaps needed");
-    if constexpr (FixedKTileCount > 0) {
-      k_tile_count = FixedKTileCount;
-      smem_pipe_write = PipelineState{
-          0, FixedKTileCount % (2 * Stages) == 0 ? 1 : smem_pipe_write.phase(), smem_pipe_write.count()};
-    }
 
     Tensor sA_ = make_tensor(make_smem_ptr(shared_tensors.smem_A.begin()), SmemLayoutA{});  // (BLK_M,BLK_K,PIPE)
     Tensor sB_ = make_tensor(make_smem_ptr(shared_tensors.smem_B.begin()), SmemLayoutB{});  // (BLK_N,BLK_K,PIPE)
@@ -1076,9 +1054,6 @@ struct CollectiveMmaArrayMixedInput<
       Params const& mainloop_params,
       ReleasedStageProducer& released_stage_producer,
       TailHandoff tail_handoff = {}) {
-    if constexpr (FixedKTileCount > 0) {
-      k_tile_count = FixedKTileCount;
-    }
     static_assert(is_rmem<FrgTensorC>::value, "C tensor must be rmem resident.");
     static_assert(cute::rank(SmemLayoutA{}) == 3, "Smem layout must be rank 3.");
     static_assert(cute::rank(SmemLayoutB{}) == 3, "Smem layout must be rank 3.");
@@ -1347,7 +1322,8 @@ struct CollectiveMmaArrayMixedInput<
       return;
     }
 
-    auto middle_k_tile = [&] {
+    CUTLASS_PRAGMA_NO_UNROLL
+    for (; k_tile_count > 1; --k_tile_count) {
       int read_stage = smem_pipe_read.index();
       ++smem_pipe_read;
 
@@ -1393,15 +1369,6 @@ struct CollectiveMmaArrayMixedInput<
           convert_A_kblock_static(cute::Int<k_block + 1>{}, read_stage);
         }
       });
-    };
-
-    if constexpr (FixedKTileCount > 0) {
-      cute::for_each(cute::make_seq<FixedKTileCount - 2>{}, [&](auto) { middle_k_tile(); });
-    } else {
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (; k_tile_count > 1; --k_tile_count) {
-        middle_k_tile();
-      }
     }
 
     {
