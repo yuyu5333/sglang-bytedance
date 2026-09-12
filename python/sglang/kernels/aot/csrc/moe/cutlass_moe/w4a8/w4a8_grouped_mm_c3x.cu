@@ -780,13 +780,34 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2, true>));
       return;
+    case 464:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 465:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 466:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_COMPACT_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 454, 455, 456, 457, 458, 459, 460, 461, 462, 463");
+          "441, 448, 449, 454, 455, 456, 457, 458, 459, 460, 461, 462, 463, 464, 465, 466");
   }
 }
 
