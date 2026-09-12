@@ -117,7 +117,7 @@ fused_swiglu_value(T gate_value, T up_value, const float swiglu_limit, const boo
   return static_cast<T>(silu(static_cast<float>(gate_value)) * static_cast<float>(up_value));
 }
 
-template <typename T, bool CacheBf16Row = false, bool PackedStore = false>
+template <typename T, bool CacheBf16Row = false, bool PackedStore = false, bool PairConvert = false>
 __global__ void fused_swiglu_quant_fp8_kernel(
     const T* __restrict__ input,
     __nv_fp8_e4m3* __restrict__ output_q,
@@ -204,14 +204,28 @@ __global__ void fused_swiglu_quant_fp8_kernel(
   if constexpr (CacheBf16Row) {
     // Keep the BF16 rounding boundary while avoiding the second SiLU pass.
     alignas(8) __nv_fp8_e4m3 packed_values[kVecSize];
+    if constexpr (PairConvert) {
+      static_assert(PackedStore && kVecSize == 8);
 #pragma unroll
-    for (int j = 0; j < kVecSize; ++j) {
-      float quant_value = static_cast<float>(cached_values[j]) * scale_inv;
-      quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
-      if constexpr (PackedStore) {
-        packed_values[j] = static_cast<__nv_fp8_e4m3>(quant_value);
-      } else {
-        output_q[token * hidden_dim + threadIdx.x * kVecSize + j] = static_cast<__nv_fp8_e4m3>(quant_value);
+      for (int j = 0; j < kVecSize; j += 2) {
+        float2 values{
+            static_cast<float>(cached_values[j]) * scale_inv,
+            static_cast<float>(cached_values[j + 1]) * scale_inv};
+        values.x = fmaxf(fminf(values.x, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+        values.y = fmaxf(fminf(values.y, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+        reinterpret_cast<__nv_fp8x2_storage_t*>(packed_values)[j / 2] =
+            __nv_cvt_float2_to_fp8x2(values, __NV_SATFINITE, __NV_E4M3);
+      }
+    } else {
+#pragma unroll
+      for (int j = 0; j < kVecSize; ++j) {
+        float quant_value = static_cast<float>(cached_values[j]) * scale_inv;
+        quant_value = fmaxf(fminf(quant_value, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+        if constexpr (PackedStore) {
+          packed_values[j] = static_cast<__nv_fp8_e4m3>(quant_value);
+        } else {
+          output_q[token * hidden_dim + threadIdx.x * kVecSize + j] = static_cast<__nv_fp8_e4m3>(quant_value);
+        }
       }
     }
     if constexpr (PackedStore) {
@@ -243,7 +257,7 @@ __global__ void fused_swiglu_quant_fp8_kernel(
   }
 }
 
-template <bool PackedStore>
+template <bool PackedStore, bool PairConvert = false>
 void fused_swiglu_quant_fp8_impl(
     const at::Tensor& input,
     at::Tensor& output_q,
@@ -279,7 +293,7 @@ void fused_swiglu_quant_fp8_impl(
                 "Packed SwiGLU experiment requires BF16 and intermediate size 2048");
   }
   if (hidden_dim == 2048 && input.scalar_type() == at::kBFloat16) {
-    fused_swiglu_quant_fp8_kernel<__nv_bfloat16, true, PackedStore><<<num_tokens, kThreads, 0, stream>>>(
+    fused_swiglu_quant_fp8_kernel<__nv_bfloat16, true, PackedStore, PairConvert><<<num_tokens, kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(input.data_ptr()),
         static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
         static_cast<float*>(output_s.data_ptr()),
@@ -331,6 +345,19 @@ void fused_swiglu_quant_fp8_packed_experiment(
     double swiglu_limit,
     bool has_swiglu_limit) {
   fused_swiglu_quant_fp8_impl<true>(
+      input, output_q, output_s, residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
+}
+
+void fused_swiglu_quant_fp8_pair_experiment(
+    const at::Tensor& input,
+    at::Tensor& output_q,
+    at::Tensor& output_s,
+    const at::Tensor& residual,
+    const at::Tensor& expert_offsets,
+    int64_t num_experts,
+    double swiglu_limit,
+    bool has_swiglu_limit) {
+  fused_swiglu_quant_fp8_impl<true, true>(
       input, output_q, output_s, residual, expert_offsets, num_experts, swiglu_limit, has_swiglu_limit);
 }
 #endif
