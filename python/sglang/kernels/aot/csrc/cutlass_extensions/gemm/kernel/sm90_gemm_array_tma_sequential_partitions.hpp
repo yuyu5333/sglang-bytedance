@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cute/layout.hpp"
 #include "cutlass/kernel_launch.h"
 
 namespace cutlass::gemm::kernel {
