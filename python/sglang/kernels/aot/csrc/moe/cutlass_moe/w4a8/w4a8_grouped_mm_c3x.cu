@@ -830,20 +830,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
     case 460:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_N64_INDEPENDENT_TMA_MXFP4));
       return;
-    case 465:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_COMPACT_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
-    case 466:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_COMPACT_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_COMPACT_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 467:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PACKED_MAIN_N32_MXFP4));
       INVOKE_GEMM_WITH_CONFIG_AS(
@@ -893,7 +879,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 465, 466, 467, 470, 471, 473, 474, 475, 476, 477, 478");
+          "441, 448, 449, 460, 467, 470, 471, 473, 474, 475, 476, 477, 478");
   }
 }
 
