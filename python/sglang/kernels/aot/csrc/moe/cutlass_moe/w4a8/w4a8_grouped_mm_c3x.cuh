@@ -609,6 +609,10 @@ void cutlass_w4a8_group_gemm_caller(
         hw_info};
   }
   if constexpr (Gemm::UsePreMmaE8M0Scale) {
+    TORCH_CHECK(a_tensors.size(0) <= INT32_MAX, "Activation row count exceeds TMA coordinate range");
+    arguments.mainloop.ptr_B_base = static_cast<MmaType const*>(a_tensors.data_ptr());
+    arguments.mainloop.total_activation_rows = static_cast<int32_t>(a_tensors.size(0));
+    arguments.mainloop.ptr_B_row_offsets = static_cast<int32_t const*>(expert_offsets.data_ptr());
     using RasterOrderOptions =
         typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
     arguments.scheduler.max_swizzle_size = sgl_kernel::swg_detail::kSwgSchedulerMaxSwizzle;

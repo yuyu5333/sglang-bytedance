@@ -301,6 +301,52 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
+template <class BaseConfig>
+struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr bool CompactPointerSetup = true;
+    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
+    using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
+        typename OldMainloop::DispatchPolicy,
+        typename OldMainloop::TileShape,
+        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
+        typename OldMainloop::StrideA,
+        cutlass::float_e4m3_t,
+        typename OldMainloop::StrideB,
+        typename OldMainloop::TiledMma,
+        typename OldMainloop::GmemTiledCopyA,
+        typename OldMainloop::SmemLayoutAtomA,
+        typename OldMainloop::SmemCopyAtomA,
+        std::conditional_t<
+            std::is_base_of_v<cutlass::gemm::collective::PreparedOffsetLut, typename OldMainloop::TransformA>,
+            cutlass::gemm::collective::PreparedLutGlobalActivationTensorMap,
+            cutlass::gemm::collective::GlobalActivationTensorMap>,
+        typename OldMainloop::GmemTiledCopyB,
+        typename OldMainloop::SmemLayoutAtomB,
+        typename OldMainloop::SmemCopyAtomB,
+        typename OldMainloop::TransformB>;
+    struct CollectiveMainloopScaleOnly : Mainloop {
+      static constexpr bool UseTailMmaHandoff = true;
+    };
+    using GemmKernelScaleOnly = std::conditional_t<
+        Base::UseSingleWarpgroupKernel,
+        cutlass::gemm::kernel::SingleWarpgroupPersistentGemm<
+            sgl_kernel::w4a8_detail::ProblemShape,
+            CollectiveMainloopScaleOnly,
+            typename Base::CollectiveEpilogue,
+            Base::SingleWarpgroupCtasPerSm,
+            3,
+            cutlass::gemm::kernel::SingleWarpgroupPipelineMode::RollingRefill>,
+        cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+            sgl_kernel::w4a8_detail::ProblemShape,
+            CollectiveMainloopScaleOnly,
+            typename Base::CollectiveEpilogue,
+            typename Base::PrecomputedTileScheduler>>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -774,13 +820,39 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_COMPACT_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 468:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_SWG_EARLY_REFILL_MXFP4<8>>));
+      return;
+    case 469:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<
+              SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>));
+      return;
+    case 470:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>));
+      return;
+    case 471:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_INDEPENDENT_TMA_MXFP4>));
+      return;
+    case 472:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>>));
+      return;
+    case 473:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 464, 465, 466, 467");
+          "441, 448, 449, 460, 464, 465, 466, 467, 468, 469, 470, 471, 472, 473");
   }
 }
 

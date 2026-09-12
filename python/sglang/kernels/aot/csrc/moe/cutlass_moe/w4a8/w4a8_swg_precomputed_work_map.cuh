@@ -119,6 +119,13 @@ CUTE_DEVICE void swg_publish_prebuilt_tma_descriptor(
   }
 }
 
+template <class Params, class = void>
+struct SwgGlobalActivationTma : std::false_type {};
+
+template <class Params>
+struct SwgGlobalActivationTma<Params, std::void_t<decltype(Params::GlobalActivationTma)>>
+    : std::bool_constant<Params::GlobalActivationTma> {};
+
 template <class MainloopParams, class Problem>
 __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     MainloopParams const& mainloop_params,
@@ -165,8 +172,15 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     swg_publish_prebuilt_tma_descriptor(prebuilt_tma_desc_a + (weight_desc_per_group ? group : 0), smem_desc, 0);
   }
 
-  if (!build_activation_descriptor || cute::get<1>(problem) == 0) {
-    return;
+  constexpr bool GlobalActivationTma = SwgGlobalActivationTma<MainloopParams>::value;
+  if constexpr (GlobalActivationTma) {
+    if (group != 0) {
+      return;
+    }
+  } else {
+    if (!build_activation_descriptor || cute::get<1>(problem) == 0) {
+      return;
+    }
   }
 
   cute::TmaDescriptor& smem_desc = smem_descs[1];
@@ -176,7 +190,13 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     cute::array<uint64_t, MaxTensorRank> stride_b = {0, 0, 0, 0, 0};
     using PtrB = std::remove_reference_t<decltype(mainloop_params.ptr_B[group])>;
     PtrB ptr_b = nullptr;
-    uint32_t const N = static_cast<uint32_t>(cute::get<1>(problem));
+    uint32_t const N = [&] {
+      if constexpr (GlobalActivationTma) {
+        return static_cast<uint32_t>(mainloop_params.total_activation_rows);
+      } else {
+        return static_cast<uint32_t>(cute::get<1>(problem));
+      }
+    }();
     uint32_t const K = static_cast<uint32_t>(cute::get<2>(problem));
     auto d_b = mainloop_params.ptr_dB[group];
     auto stride_n = cute::get<0>(d_b);
@@ -186,7 +206,11 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
         cute::make_layout(cute::make_shape(N, K, uint32_t(1)), cute::make_stride(stride_n, stride_k, int64_t(0))));
 
     smem_desc = *mainloop_params.tma_load_b.get_tma_descriptor();
-    cute::tma_descriptor_replace_addr_in_shared_mem(smem_desc, mainloop_params.ptr_B[group]);
+    if constexpr (GlobalActivationTma) {
+      cute::tma_descriptor_replace_addr_in_shared_mem(smem_desc, mainloop_params.ptr_B_base);
+    } else {
+      cute::tma_descriptor_replace_addr_in_shared_mem(smem_desc, mainloop_params.ptr_B[group]);
+    }
     cute::detail::fill_tma_gmem_shape_stride(mainloop_params.tma_load_b, tensor_b, shape_b, stride_b);
     using ElementB = std::remove_cv_t<std::remove_pointer_t<PtrB>>;
     for (uint64_t& stride : stride_b) {

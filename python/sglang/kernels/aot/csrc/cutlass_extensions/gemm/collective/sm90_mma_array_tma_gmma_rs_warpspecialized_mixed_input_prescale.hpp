@@ -39,6 +39,8 @@ struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
+struct GlobalActivationTensorMap {};
+struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -210,6 +212,7 @@ struct CollectiveMmaArrayMixedInput<
 
   using TransformA = TransformA_;
   using TransformB = TransformB_;
+  static constexpr bool UseGlobalActivationTma = cute::is_base_of_v<GlobalActivationTensorMap, TransformA>;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
   using SwappedTransformB = cute::conditional_t<!SwapAB, TransformB, TransformA>;
   using ArchTag = typename DispatchPolicy::ArchTag;
@@ -383,6 +386,7 @@ struct CollectiveMmaArrayMixedInput<
   }
 
   int current_group_idx_ = 0;
+  int32_t current_activation_row_ = 0;
   cute::TmaDescriptor const* current_tma_desc_b_ = nullptr;
 
  public:
@@ -444,7 +448,7 @@ struct CollectiveMmaArrayMixedInput<
 
   static constexpr bool IsGroupedGemmKernel = !cute::is_same_v<InternalStrideA, StrideA>;
   static constexpr bool RequiresTensormapUpdateOnBatchChange = false;
-  static constexpr bool RequiresPrebuiltTensormapAcquireOnBatchChange = IsGroupedGemmKernel;
+  static constexpr bool RequiresPrebuiltTensormapAcquireOnBatchChange = IsGroupedGemmKernel && !UseGlobalActivationTma;
 
   // Host side kernel arguments.  Keep this parameter surface aligned with
   // mixed_input.hpp so callers can switch collectives without rebuilding the
@@ -464,10 +468,14 @@ struct CollectiveMmaArrayMixedInput<
     cute::TmaDescriptor const* ptr_A_prebuilt_tma_desc = nullptr;
     cute::TmaDescriptor const* ptr_B_prebuilt_tma_descs = nullptr;
     cute::TmaDescriptor const* ptr_ActivationScale_prebuilt_tma_descs = nullptr;
+    ElementB const* ptr_B_base = nullptr;
+    int32_t total_activation_rows = 0;
+    int32_t const* ptr_B_row_offsets = nullptr;
   };
 
   // Device side kernel params
   struct Params {
+    static constexpr bool GlobalActivationTma = UseGlobalActivationTma;
     // For grouped GEMM with non-layout stride: replace static-zero L stride (_0) with
     // a static non-zero value so the TMA descriptor includes the L dimension at creation.
     // Int<32> is the minimum static value that after subbyte upcast<2> (FP4→uint8_t)
@@ -529,6 +537,9 @@ struct CollectiveMmaArrayMixedInput<
     InternalSwappedStrideA dA;
     InternalSwappedStrideB dB;
     int num_groups;
+    SwappedElementB const* ptr_B_base;
+    int32_t total_activation_rows;
+    int32_t const* ptr_B_row_offsets;
   };
 
   //
@@ -659,7 +670,10 @@ struct CollectiveMmaArrayMixedInput<
           reload_factor,
           dA,
           dB,
-          num_groups_val};
+          num_groups_val,
+          reinterpret_cast<SwappedElementB const*>(args.ptr_B_base),
+          args.total_activation_rows,
+          args.ptr_B_row_offsets};
     };
 
     // Prescale keeps the historical scale_k field in Params so the argument
@@ -708,6 +722,10 @@ struct CollectiveMmaArrayMixedInput<
     if constexpr (IsGroupedGemmKernel) {
       implementable = implementable && (args.ptr_A_prebuilt_tma_desc != nullptr);
       implementable = implementable && (args.ptr_B_prebuilt_tma_descs != nullptr);
+    }
+    if constexpr (UseGlobalActivationTma) {
+      implementable = implementable && args.ptr_B_base != nullptr && args.total_activation_rows > 0 &&
+                      args.ptr_B_row_offsets != nullptr;
     }
     if (problem_shapes.is_host_problem_shape_available()) {
       // Check alignment for all problem sizes
@@ -774,8 +792,18 @@ struct CollectiveMmaArrayMixedInput<
     auto B_L = mock_L;
     Tensor mA_mkl = mainloop_params.tma_load_a.get_tma_tensor(
         shape(detail::get_gmem_layout(make_shape(M, K, A_L), mainloop_params.dA)));  // (m,k,l)
-    Tensor mB_nkl = mainloop_params.tma_load_b.get_tma_tensor(
+    if constexpr (UseGlobalActivationTma) {
+      N = mainloop_params.total_activation_rows;
+    }
+    Tensor mB_base = mainloop_params.tma_load_b.get_tma_tensor(
         shape(detail::get_gmem_layout(make_shape(N, K, B_L), mainloop_params.dB)));  // (n,k,l)
+    Tensor mB_nkl = [&] {
+      if constexpr (UseGlobalActivationTma) {
+        return domain_offset(make_coord(current_activation_row_, _0{}, _0{}), mB_base);
+      } else {
+        return mB_base;
+      }
+    }();
     int const scale_total_k128_blocks = int(K) / WeightScaleLogicalKPerFoldBlock;
 
     // Make tiled views, defer the slice
@@ -1135,7 +1163,7 @@ struct CollectiveMmaArrayMixedInput<
     // tensor in RF.  Smaller M tiles still prefer the compact offset cache.
     constexpr bool UseExpandedScaleRFForLargeM = size<0>(TileShape{}) >= 256;
     Tensor tCrA_scale = make_fragment_like<WeightScaleRawElement>(tCrA_load_4b_packed);
-    using CachedOffset = cute::conditional_t<cute::is_same_v<TransformA, PreparedOffsetLut>, uint2, uint32_t>;
+    using CachedOffset = cute::conditional_t<cute::is_base_of_v<PreparedOffsetLut, TransformA>, uint2, uint32_t>;
     cute::array<CachedOffset, K_BLOCK_MAX * ScalePairCount> lo_exp_offsets;
     cute::array<CachedOffset, K_BLOCK_MAX * ScalePairCount> hi_exp_offsets;
 
@@ -1407,8 +1435,14 @@ struct CollectiveMmaArrayMixedInput<
       [[maybe_unused]] ProblemShape_MNKL problem_shape_mnkl,
       [[maybe_unused]] int32_t next_batch) {
     current_group_idx_ = next_batch;
-    current_tma_desc_b_ = mainloop_params.ptr_B_prebuilt_tma_descs + next_batch;
-    return input_tensors;
+    if constexpr (UseGlobalActivationTma) {
+      current_tma_desc_b_ = mainloop_params.ptr_B_prebuilt_tma_descs;
+      current_activation_row_ = mainloop_params.ptr_B_row_offsets[next_batch];
+      return load_init(problem_shape_mnkl, mainloop_params);
+    } else {
+      current_tma_desc_b_ = mainloop_params.ptr_B_prebuilt_tma_descs + next_batch;
+      return input_tensors;
+    }
   }
 };
 
