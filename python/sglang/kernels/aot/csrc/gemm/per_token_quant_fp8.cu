@@ -487,7 +487,8 @@ void per_token_quant_fp8_impl(
     const float* residual,
     const int32_t* expert_offsets,
     const int32_t* permutation,
-    int64_t num_experts) {
+    int64_t num_experts,
+    bool omit_unused_smem = false) {
   const auto input_sizes = input.sizes();
   const int64_t num_tokens = permutation == nullptr ? input_sizes[0] : output_q.size(0);
   const int64_t hidden_dim = input_sizes[1];
@@ -548,7 +549,7 @@ void per_token_quant_fp8_impl(
             TOKENS_PER_CTA>(
             grid,
             block,
-            dynamicSmemSz,
+            omit_unused_smem ? 0 : dynamicSmemSz,
             stream,
             use_vec16,
             use_vec8,
@@ -699,5 +700,105 @@ void fused_per_token_quant_fp8_shuffled(
       static_cast<const int32_t*>(expert_offsets.data_ptr()),
       static_cast<const int32_t*>(permutation.data_ptr()),
       num_experts);
+}
+
+__global__ void per_token_quant_fp8_scatter6_kernel(
+    const nv_bfloat16* __restrict__ input,
+    const int32_t* __restrict__ topk_ids,
+    const int32_t* __restrict__ c_map,
+    __nv_fp8_e4m3* __restrict__ output_q,
+    float* __restrict__ output_s,
+    const float* __restrict__ residual) {
+  constexpr int Hidden = 4096;
+  constexpr int Vec = 16;
+  int const token = blockIdx.x;
+  int const tid = threadIdx.x;
+  flashinfer::vec_t<nv_bfloat16, Vec> values;
+  values.cast_load(input + int64_t(token) * Hidden + tid * Vec);
+  float amax = 0.0f;
+#pragma unroll
+  for (int i = 0; i < Vec; ++i) {
+    amax = fmaxf(amax, fabsf(static_cast<float>(values[i])));
+  }
+  amax = blockReduceMax(amax);
+  __shared__ float scale;
+  __shared__ int destinations[6];
+  if (tid == 0) {
+    scale = amax / FP8_E4M3_MAX;
+  }
+  if (tid < 6) {
+    destinations[tid] = c_map[token * 6 + tid];
+  }
+  __syncthreads();
+  if (tid < 6) {
+    output_s[destinations[tid]] = scale * residual[topk_ids[token * 6 + tid]];
+  }
+  float const inverse = scale == 0.0f ? 0.0f : 1.0f / scale;
+  __nv_fp8_e4m3 quantized[Vec];
+#pragma unroll
+  for (int i = 0; i < Vec; ++i) {
+    float const value = fmaxf(fminf(static_cast<float>(values[i]) * inverse, FP8_E4M3_MAX), -FP8_E4M3_MAX);
+    quantized[i] = static_cast<__nv_fp8_e4m3>(value);
+  }
+  uint4 const packed = *reinterpret_cast<uint4 const*>(quantized);
+#pragma unroll
+  for (int route = 0; route < 6; ++route) {
+    *reinterpret_cast<uint4*>(output_q + int64_t(destinations[route]) * Hidden + tid * Vec) = packed;
+  }
+}
+
+void fused_per_token_quant_fp8_route_experiment(
+    const torch::Tensor& input,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& a_map,
+    const torch::Tensor& c_map,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    const torch::Tensor& residual,
+    const torch::Tensor& expert_offsets,
+    bool scatter) {
+  CHECK_INPUT(input);
+  CHECK_INPUT(topk_ids);
+  CHECK_INPUT(a_map);
+  CHECK_INPUT(c_map);
+  CHECK_INPUT(output_q);
+  CHECK_INPUT(output_s);
+  CHECK_INPUT(residual);
+  CHECK_INPUT(expert_offsets);
+  TORCH_CHECK(
+      input.device() == topk_ids.device() && input.device() == a_map.device() &&
+          input.device() == c_map.device() && input.device() == output_q.device() &&
+          input.device() == output_s.device() && input.device() == residual.device() &&
+          input.device() == expert_offsets.device(),
+      "Route quantization experiment requires tensors on the same device");
+  TORCH_CHECK(
+      input.dim() == 2 && input.scalar_type() == at::kBFloat16 && input.is_contiguous() && input.size(1) == 4096 &&
+          topk_ids.dim() == 2 && topk_ids.scalar_type() == at::kInt && topk_ids.is_contiguous() && topk_ids.size(1) == 6 &&
+          topk_ids.size(0) == input.size(0) && input.size(0) >= 640,
+      "Route quantization experiment requires contiguous BF16 [M>=640,4096], int32 [M,6]");
+  TORCH_CHECK(
+      a_map.scalar_type() == at::kInt && c_map.scalar_type() == at::kInt &&
+          a_map.is_contiguous() && c_map.is_contiguous() && a_map.numel() == topk_ids.numel() &&
+          c_map.numel() == topk_ids.numel() && output_q.dim() == 2 && output_q.scalar_type() == at::kFloat8_e4m3fn &&
+          output_q.is_contiguous() && output_q.size(0) == topk_ids.numel() && output_q.size(1) == 4096 &&
+          output_s.scalar_type() == at::kFloat && output_s.is_contiguous() &&
+          output_s.numel() == topk_ids.numel() && residual.scalar_type() == at::kFloat &&
+          residual.is_contiguous() && residual.numel() == 256 &&
+          expert_offsets.scalar_type() == at::kInt && expert_offsets.numel() == 257,
+      "Invalid route quantization experiment buffers");
+  if (scatter) {
+    per_token_quant_fp8_scatter6_kernel<<<input.size(0), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        static_cast<nv_bfloat16 const*>(input.data_ptr()),
+        static_cast<int32_t const*>(topk_ids.data_ptr()),
+        static_cast<int32_t const*>(c_map.data_ptr()),
+        static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
+        static_cast<float*>(output_s.data_ptr()),
+        static_cast<float const*>(residual.data_ptr()));
+  } else {
+    per_token_quant_fp8_impl<true>(
+        input, output_q, output_s, static_cast<float const*>(residual.data_ptr()),
+        static_cast<int32_t const*>(expert_offsets.data_ptr()), static_cast<int32_t const*>(a_map.data_ptr()),
+        256, true);
+  }
 }
 #endif
