@@ -117,6 +117,13 @@ struct UseIndependentTmaProducers<
   static constexpr bool value = CollectiveMainloop::UseIndependentTmaProducers;
 };
 
+template <class Mainloop, class = void>
+struct UsesRowSizedN64Instructions : std::false_type {};
+
+template <class Mainloop>
+struct UsesRowSizedN64Instructions<Mainloop, std::void_t<decltype(Mainloop::UseRowSizedN64Instructions)>>
+    : std::bool_constant<Mainloop::UseRowSizedN64Instructions> {};
+
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -953,6 +960,11 @@ class GemmUniversalPrecomputedScheduler<
 
         if (TileScheduler::valid_warpgroup_in_work_tile(work_tile_info)) {
           math_wg_order_barrier.wait();
+
+          if constexpr (UsesRowSizedN64Instructions<CollectiveMainloop>::value) {
+            collective_mainloop.set_tile_rows(
+                int(get<1>(problem_shape_MNKL)) - int(n_coord) * int(size<1>(blk_shape)));
+          }
 
           if constexpr (UseTailMmaHandoff<CollectiveMainloop>::value) {
             typename CollectiveMainloop::NoopReleasedStageProducer no_refill;
