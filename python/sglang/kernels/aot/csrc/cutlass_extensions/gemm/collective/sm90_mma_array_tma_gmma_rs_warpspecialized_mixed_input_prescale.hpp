@@ -40,7 +40,6 @@ struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
-struct CommitEightK32 {};
 struct GlobalActivationTensorMap {};
 struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
 
@@ -1168,8 +1167,7 @@ struct CollectiveMmaArrayMixedInput<
     PipelineState smem_weight_release = smem_pipe_read;
 
     constexpr int K_BLOCK_MAX = size<2>(tCrA_load);
-    constexpr int K_COMMIT_GROUP_SIZE = cute::is_same_v<TransformB, CommitEightK32> ? 8 : 4;
-    static_assert(K_COMMIT_GROUP_SIZE == 4 || K_BLOCK_MAX == 16);
+    constexpr int K_COMMIT_GROUP_SIZE = 4;
     constexpr int K_COMMIT_GROUPS = (K_BLOCK_MAX + K_COMMIT_GROUP_SIZE - 1) / K_COMMIT_GROUP_SIZE;
     constexpr int K_WAIT_MAX = (K_COMMIT_GROUPS - 1 < 7) ? K_COMMIT_GROUPS - 1 : 7;
     constexpr bool DrainK256 = cute::is_same_v<TransformB, DrainedK256StageRefill>;
@@ -1243,10 +1241,10 @@ struct CollectiveMmaArrayMixedInput<
     };
     auto commit_mma_group = [&] {
       warpgroup_commit_batch();
-      // A operand slots are reused by the next K tile. Commit adjacent K
+      // A operand slots are reused by the next K tile.  Commit four adjacent K
       // blocks as one group and keep only the tail groups outstanding.  The
       // wait is FIFO: after the last group of tile T, the first group of T is
-      // retired before tile T+1 overwrites that group's slots. Subsequent commits in
+      // retired before tile T+1 overwrites slots 0..3.  Subsequent commits in
       // tile T+1 keep retiring older tail groups before their slots are reused.
       warpgroup_wait<K_WAIT_MAX>();
     };
