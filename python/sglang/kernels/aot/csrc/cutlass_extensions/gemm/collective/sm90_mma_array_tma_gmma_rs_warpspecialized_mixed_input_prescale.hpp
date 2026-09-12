@@ -40,6 +40,7 @@ struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
+struct MergedKTailLoop {};
 struct GlobalActivationTensorMap {};
 struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
 
@@ -1319,6 +1320,53 @@ struct CollectiveMmaArrayMixedInput<
 
     if (k_tile_count == 0) {
       tail_handoff();
+      return;
+    }
+
+    if constexpr (cute::is_same_v<TransformB, MergedKTailLoop>) {
+      static_assert(!EarlyStageRefill && !SplitWeightLifetime);
+      // Share the unrolled K32 body across middle and final tiles.
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; k_tile_count > 0; --k_tile_count) {
+        int const read_stage = smem_pipe_read.index();
+        bool const final_tile = k_tile_count == 1;
+        ++smem_pipe_read;
+        if (final_tile) {
+          tail_handoff();
+        }
+
+        cute::for_each(cute::make_seq<K_BLOCK_MAX>{}, [&](auto i) {
+          constexpr int k_block = decltype(i)::value;
+          warpgroup_arrive();
+          cute::gemm(
+              tiled_mma, tCrA_mma(_, _, cute::Int<k_block>{}), tCrB(_, _, cute::Int<k_block>{}, read_stage), accum);
+          maybe_commit_mma_group(cute::Int<k_block>{});
+
+          if constexpr (k_block == 0) {
+            if (!final_tile) {
+              barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
+            }
+          }
+          if constexpr (k_block == K_BLOCK_MAX - 1) {
+            pipeline.consumer_release(smem_pipe_release);
+            ++smem_pipe_release;
+            released_stage_producer();
+            if (!final_tile) {
+              pipeline.consumer_wait(smem_pipe_read, barrier_token);
+              int const next_read_stage = smem_pipe_read.index();
+              copy_weight_kblock(cute::Int<0>{}, next_read_stage);
+              copy_weight_kblock(cute::Int<1>{}, next_read_stage);
+              convert_A_kblock_static(cute::Int<0>{}, next_read_stage);
+            }
+          } else {
+            if constexpr (k_block < K_BLOCK_MAX - 2) {
+              copy_weight_kblock(cute::Int<k_block + 2>{}, read_stage);
+            }
+            convert_A_kblock_static(cute::Int<k_block + 1>{}, read_stage);
+          }
+        });
+      }
+      warpgroup_wait<0>();
       return;
     }
 
