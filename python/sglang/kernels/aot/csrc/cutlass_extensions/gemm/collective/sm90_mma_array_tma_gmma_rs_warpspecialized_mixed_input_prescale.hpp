@@ -41,7 +41,6 @@ struct DrainedK256StageRefill {};
 struct IndependentOperandTmaProducers {};
 struct GlobalActivationTensorMap {};
 struct PreparedLutGlobalActivationTensorMap : PreparedOffsetLut, GlobalActivationTensorMap {};
-struct FullKWeightCache {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -214,8 +213,6 @@ struct CollectiveMmaArrayMixedInput<
   using TransformA = TransformA_;
   using TransformB = TransformB_;
   static constexpr bool UseGlobalActivationTma = cute::is_base_of_v<GlobalActivationTensorMap, TransformA>;
-  static constexpr bool CacheFullWeightK = cute::is_same_v<TransformB, FullKWeightCache>;
-  static constexpr int WeightStages = CacheFullWeightK ? 4096 / size<2>(TileShape{}) : Stages;
   using SwappedTransformA = cute::conditional_t<!SwapAB, TransformA, TransformB>;
   using SwappedTransformB = cute::conditional_t<!SwapAB, TransformB, TransformA>;
   using ArchTag = typename DispatchPolicy::ArchTag;
@@ -311,7 +308,7 @@ struct CollectiveMmaArrayMixedInput<
       "SmemLayoutAtomScale must evenly divide tile k shape.");
 
   /// Tile along modes in a way that maximizes the TMA box size.
-  using SmemLayoutA = decltype(detail::get_smem_layout<WeightStages>(
+  using SmemLayoutA = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
       SwappedSmemLayoutAtomA{}, select<0, 2>(TileShape{}), InternalSwappedStrideA{}));
   using SmemLayoutB = decltype(detail::get_smem_layout<DispatchPolicy::Stages>(
       SwappedSmemLayoutAtomB{}, select<1, 2>(TileShape{}), InternalSwappedStrideB{}));
@@ -330,7 +327,7 @@ struct CollectiveMmaArrayMixedInput<
           Int<WeightScaleFoldedMPerFoldBlock>,
           Int<WeightScaleMBlocksPerTile>,
           Int<WeightScaleKBlocksPerTile>,
-          Int<WeightStages>>,
+          Int<Stages>>,
       Stride<
           _1,
           Int<WeightScalePhysicalColsPerFoldBlock>,
@@ -344,7 +341,7 @@ struct CollectiveMmaArrayMixedInput<
               Int<WeightScaleMSlicesPerFoldBlock>,
               Int<WeightScaleMBlocksPerTile>>,
           Shape<Int<ScalingGroupSize>, Shape<Int<WeightScaleScaleGroupsPerFoldBlock>, Int<WeightScaleKBlocksPerTile>>>,
-          Int<WeightStages>>,
+          Int<Stages>>,
       Stride<
           Stride<
               Int<WeightScalePhysicalColsPerFoldBlock>,
@@ -389,8 +386,6 @@ struct CollectiveMmaArrayMixedInput<
   }
 
   int current_group_idx_ = 0;
-  int cached_weight_group_ = -1;
-  int cached_weight_channel_ = -1;
   int32_t current_activation_row_ = 0;
   cute::TmaDescriptor const* current_tma_desc_b_ = nullptr;
 
@@ -481,7 +476,6 @@ struct CollectiveMmaArrayMixedInput<
   // Device side kernel params
   struct Params {
     static constexpr bool GlobalActivationTma = UseGlobalActivationTma;
-    static constexpr bool FullWeightKCache = CacheFullWeightK;
     // For grouped GEMM with non-layout stride: replace static-zero L stride (_0) with
     // a static non-zero value so the TMA descriptor includes the L dimension at creation.
     // Int<32> is the minimum static value that after subbyte upcast<2> (FP4→uint8_t)
@@ -774,7 +768,7 @@ struct CollectiveMmaArrayMixedInput<
   static constexpr uint32_t TmaTransactionBytesNK = Utils::compute_tma_transaction_bytes_nk();
   static constexpr uint32_t TmaTransactionBytesExtra = Utils::compute_tma_transaction_bytes_extra();
   static constexpr uint32_t TmaTransactionBytes =
-      TmaTransactionBytesNK + (CacheFullWeightK ? 0 : TmaTransactionBytesMK + TmaTransactionBytesExtra);
+      TmaTransactionBytesMK + TmaTransactionBytesNK + TmaTransactionBytesExtra;
 
   // Set up the data needed by this collective for load and mma.
   // Returns a tuple of tensors. The collective and the kernel layer have the contract that the
@@ -858,13 +852,6 @@ struct CollectiveMmaArrayMixedInput<
 
     // Partition the inputs based on the current block coordinates.
     auto [m_coord, n_coord, k_coord, l_coord] = blk_coord;
-    bool const load_weights = !CacheFullWeightK || cached_weight_group_ != current_group_idx_ ||
-                              cached_weight_channel_ != int(m_coord);
-    if constexpr (CacheFullWeightK) {
-      if (k_tile_count > WeightStages) {
-        asm volatile("trap;");
-      }
-    }
     auto a_l_coord = current_group_idx_;
     auto b_l_coord = cute::Int<0>{};
     Tensor gA = gA_mkl(_, _, m_coord, _, a_l_coord);  // (BLK_M,BLK_K,k)
@@ -928,11 +915,6 @@ struct CollectiveMmaArrayMixedInput<
       } else {
         pipeline.producer_acquire(smem_pipe_write);
       }
-      if constexpr (CacheFullWeightK) {
-        if (load_weights) {
-          pipeline.producer_expect_transaction(smem_pipe_write, TmaTransactionBytesMK + TmaTransactionBytesExtra);
-        }
-      }
 
       //
       // Copy gmem to smem for *k_tile_iter
@@ -948,15 +930,12 @@ struct CollectiveMmaArrayMixedInput<
       }();
 
       int write_stage = smem_pipe_write.index();
-      int const weight_stage = CacheFullWeightK ? int(*k_tile_iter) : write_stage;
       if (cute::elect_one_sync()) {
         // TMA for A and B
-        if (load_weights) {
-          copy(
-              mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
-              tAgA(_, _, _, *k_tile_iter),
-              tAsA(_, _, _, weight_stage));
-        }
+        copy(
+            mainloop_params.tma_load_a.with(mainloop_params.ptr_A_prebuilt_tma_desc, *tma_barrier, mcast_mask_a),
+            tAgA(_, _, _, *k_tile_iter),
+            tAsA(_, _, _, write_stage));
         if constexpr (!SplitWeightLifetime) {
           copy(
               mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b),
@@ -977,12 +956,12 @@ struct CollectiveMmaArrayMixedInput<
         int64_t const scale_gmem_offset =
             scale_gmem_fold_block(m64_block, scale_k128_offset) * int64_t(WeightScaleRawElementsPerFoldBlock);
         auto* scale_gmem_addr = reinterpret_cast<void const*>(scale_base + scale_gmem_offset);
-        auto* scale_smem_addr = static_cast<void*>(&sSRaw(0, 0, local_m64_block, 0, weight_stage));
+        auto* scale_smem_addr = static_cast<void*>(&sSRaw(0, 0, local_m64_block, 0, write_stage));
         cute::SM90_BULK_COPY_G2S::copy(
             scale_gmem_addr, reinterpret_cast<uint64_t*>(tma_barrier), scale_smem_addr, WeightScaleBulkCopyBytes);
       };
 
-      if (load_weights && cute::elect_one_sync()) {
+      if (cute::elect_one_sync()) {
         CUTLASS_PRAGMA_UNROLL
         for (int local_m64_block = 0; local_m64_block < WeightScaleMBlocksPerTile; ++local_m64_block) {
           issue_scale_bulk_copy(local_m64_block);
@@ -992,10 +971,6 @@ struct CollectiveMmaArrayMixedInput<
 
       // Advance smem_pipe_write
       ++smem_pipe_write;
-    }
-    if constexpr (CacheFullWeightK) {
-      cached_weight_group_ = current_group_idx_;
-      cached_weight_channel_ = int(m_coord);
     }
   }
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1124,7 +1099,8 @@ struct CollectiveMmaArrayMixedInput<
     CUTE_STATIC_ASSERT_V(size<1>(tCrA_mma) == size<1>(accum));           // MMA_M
     CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<2>(accum));               // N
     CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));                // K
-    CUTE_STATIC_ASSERT_V(Int<WeightStages>{} == size<2>(sA));           // A cache or PIPE
+    CUTE_STATIC_ASSERT_V(size<3>(tCsA) == size<3>(tCsB));                // PIPE
+    CUTE_STATIC_ASSERT_V(Int<DispatchPolicy::Stages>{} == size<2>(sA));  // PIPE
     CUTE_STATIC_ASSERT_V(Int<DispatchPolicy::Stages>{} == size<2>(sB));  // PIPE
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1163,7 +1139,6 @@ struct CollectiveMmaArrayMixedInput<
 
     PipelineState smem_pipe_release = smem_pipe_read;
     PipelineState smem_weight_release = smem_pipe_read;
-    int weight_read_tile = 0;
 
     constexpr int K_BLOCK_MAX = size<2>(tCrA_load);
     constexpr int K_COMMIT_GROUP_SIZE = 4;
@@ -1217,9 +1192,6 @@ struct CollectiveMmaArrayMixedInput<
       }
     };
     auto copy_weight_kblock = [&](auto k_block_c, int read_stage) {
-      if constexpr (CacheFullWeightK) {
-        read_stage = weight_read_tile;
-      }
       Utils::copy_tensors_A(
           smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, decltype(k_block_c)::value, read_stage);
       copy_scale_for_mma(k_block_c, read_stage);
@@ -1308,9 +1280,6 @@ struct CollectiveMmaArrayMixedInput<
         pipeline.consumer_wait(smem_pipe_read, barrier_token);
 
         int const next_read_stage = smem_pipe_read.index();
-        if constexpr (CacheFullWeightK) {
-          ++weight_read_tile;
-        }
         copy_weight_kblock(cute::Int<0>{}, next_read_stage);
         copy_weight_kblock(cute::Int<1>{}, next_read_stage);
 
@@ -1360,9 +1329,6 @@ struct CollectiveMmaArrayMixedInput<
         if constexpr (k_block == K_BLOCK_MAX - 1) {
           pipeline.consumer_wait(smem_pipe_read, barrier_token);
           int const next_read_stage = smem_pipe_read.index();
-          if constexpr (CacheFullWeightK) {
-            ++weight_read_tile;
-          }
           copy_weight_kblock(cute::Int<0>{}, next_read_stage);
           copy_weight_kblock(cute::Int<1>{}, next_read_stage);
 
