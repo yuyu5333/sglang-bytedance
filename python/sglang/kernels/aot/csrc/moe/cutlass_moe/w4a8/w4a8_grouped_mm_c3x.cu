@@ -302,14 +302,19 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
-template <class BaseConfig, int L2Distance = 0>
+template <class BaseConfig, int L2Distance = 0, int StageOverride = 0>
 struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr bool CompactPointerSetup = true;
     using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
+    using Policy = std::conditional_t<
+        (StageOverride > 0),
+        cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+            StageOverride, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>,
+        typename OldMainloop::DispatchPolicy>;
     using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
-        typename OldMainloop::DispatchPolicy,
+        Policy,
         typename OldMainloop::TileShape,
         cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
         typename OldMainloop::StrideA,
@@ -916,13 +921,29 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           a_strides, b_strides, d_strides, s_strides, chunk_size,
           act_block_scales, as_strides, act_scale_group, expert_ids);
       return;
+    case 539:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2, 3>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 540:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_MAIN_N32_MXFP4, 0, 3>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 541:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>, 0, 4>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 538");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 538, 539, 540, 541");
   }
 }
 
