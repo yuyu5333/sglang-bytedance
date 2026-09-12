@@ -245,7 +245,6 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
   static constexpr bool CompactPointerSetup = false;
   static constexpr bool WarpReduceMetadata = false;
-  static constexpr int PersistentCtasPerSm = 1;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
@@ -504,8 +503,6 @@ void cutlass_w4a8_group_gemm_caller(
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
   if constexpr (Gemm::UseSingleWarpgroupKernel) {
     hw_info.sm_count *= Gemm::SingleWarpgroupCtasPerSm;
-  } else {
-    hw_info.sm_count *= Gemm::PersistentCtasPerSm;
   }
   Args arguments;
   sgl_kernel::swg_detail::SwgPrecomputedWorkMap swg_work_map;

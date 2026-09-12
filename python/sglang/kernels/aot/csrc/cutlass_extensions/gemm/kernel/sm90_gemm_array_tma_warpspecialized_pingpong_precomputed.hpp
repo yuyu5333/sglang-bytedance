@@ -95,16 +95,6 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
-template <class Mainloop, class = void>
-struct SingleConsumerRegisterBudget {
-  static constexpr int value = 0;
-};
-
-template <class Mainloop>
-struct SingleConsumerRegisterBudget<Mainloop, std::void_t<decltype(Mainloop::SingleConsumerRegisters)>> {
-  static constexpr int value = Mainloop::SingleConsumerRegisters;
-};
-
 template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
@@ -201,18 +191,16 @@ class GemmUniversalPrecomputedScheduler<
   using TileSchedulerParams = typename TileScheduler::Params;
 
   static constexpr uint32_t NumLoadWarpGroups = 1;
-  static constexpr int SingleConsumerRegisters = SingleConsumerRegisterBudget<CollectiveMainloop>::value;
-  static constexpr uint32_t NumMmaWarpGroups = SingleConsumerRegisters > 0 ? 1 : 2;
+  static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr uint32_t MaxThreadsPerBlock =
       CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
-  static constexpr uint32_t MinBlocksPerMultiprocessor = SingleConsumerRegisters > 0 ? 2 : 1;
+  static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
   static constexpr uint32_t LoadRegisterRequirement = UseMaxMmaRegisters ? 32 : 40;
-  static constexpr uint32_t MmaRegisterRequirement =
-      SingleConsumerRegisters > 0 ? SingleConsumerRegisters : (UseMaxMmaRegisters ? 240 : 232);
+  static constexpr uint32_t MmaRegisterRequirement = UseMaxMmaRegisters ? 240 : 232;
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
@@ -515,8 +503,7 @@ class GemmUniversalPrecomputedScheduler<
 
     // Preconditions
     static_assert(size(TiledMma{}) == 128, "Pingpong kernel must have TiledMMA operating using 128 threads.");
-    static_assert(NumMmaWarpGroups == 2 || SingleConsumerRegisters > 0);
-    static_assert(NumMmaWarpGroups > 1 || !UseTailMmaHandoff<CollectiveMainloop>::value);
+    static_assert(NumMmaWarpGroups == 2, "Pingpong kernels currently only support NumMmaWarpGroups == 2");
 
     if constexpr (cutlass::epilogue::collective::detail::sm90_is_ptr_array_tma_dispatch_policy_v<
                       typename CollectiveEpilogue::DispatchPolicy>) {
@@ -965,9 +952,7 @@ class GemmUniversalPrecomputedScheduler<
         auto accumulators = partition_fragment_C(tiled_mma, take<0, 2>(blk_shape));  // (MMA,MMA_M,MMA_N)
 
         if (TileScheduler::valid_warpgroup_in_work_tile(work_tile_info)) {
-          if constexpr (NumMmaWarpGroups > 1) {
-            math_wg_order_barrier.wait();
-          }
+          math_wg_order_barrier.wait();
 
           if constexpr (UseTailMmaHandoff<CollectiveMainloop>::value) {
             typename CollectiveMainloop::NoopReleasedStageProducer no_refill;
@@ -991,17 +976,13 @@ class GemmUniversalPrecomputedScheduler<
                 mma_thread_idx,
                 shared_storage.tensors.mainloop,
                 params.mainloop);
-            if constexpr (NumMmaWarpGroups > 1) {
-              math_wg_order_barrier.arrive();
-            }
+            math_wg_order_barrier.arrive();
           }
 
           // Make sure the math instructions are done and free buffers before entering the epilogue
           collective_mainloop.mma_tail(mainloop_pipeline, mainloop_pipe_consumer_state, work_k_tile_count);
 
-          if constexpr (NumMmaWarpGroups > 1) {
-            math_wg_order_barrier.wait();
-          }
+          math_wg_order_barrier.wait();
 
           // Update starting mainloop pipeline state for the next tile
           mainloop_pipe_consumer_state.advance(work_k_tile_count);
@@ -1042,7 +1023,7 @@ class GemmUniversalPrecomputedScheduler<
         work_tile_info = next_work_tile_info;
 
         // Skip a tile for pingpong
-        if (NumMmaWarpGroups > 1 && work_tile_info.is_valid()) {
+        if (work_tile_info.is_valid()) {
           if constexpr (IsGroupedGemmKernel) {
             problem_shape_MNKL = append<4>(params.problem_shape.get_problem_shape(work_tile_info.L_idx), 1);
           }
@@ -1087,15 +1068,11 @@ class GemmUniversalPrecomputedScheduler<
         // ping pong
         epi_load_pipe_consumer_state = epi_load_pipe_consumer_state_next_;
         epi_store_pipe_producer_state = epi_store_pipe_producer_state_next_;
-        if constexpr (NumMmaWarpGroups > 1) {
-          epi_load_pipe_consumer_state.advance(c_tile_count);
-          epi_store_pipe_producer_state.advance(d_tile_count);
-        }
+        epi_load_pipe_consumer_state.advance(c_tile_count);
+        epi_store_pipe_producer_state.advance(d_tile_count);
 
         // Cue for next Math WG's Epilogue to start
-        if constexpr (NumMmaWarpGroups > 1) {
-          math_wg_order_barrier.arrive();
-        }
+        math_wg_order_barrier.arrive();
 
       }  // Scheduler work fetch loop
     }  // Consumer Warp Groups End
