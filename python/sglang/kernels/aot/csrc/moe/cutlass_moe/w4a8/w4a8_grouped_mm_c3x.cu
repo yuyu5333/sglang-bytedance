@@ -302,7 +302,7 @@ struct SM90_N64_INDEPENDENT_TMA_MXFP4 {
   };
 };
 
-template <class BaseConfig, int L2Distance = 0, bool MergeKTail = false>
+template <class BaseConfig, int L2Distance = 0>
 struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
@@ -329,8 +329,7 @@ struct SM90_GLOBAL_ACTIVATION_TMA_MXFP4 {
         typename OldMainloop::GmemTiledCopyB,
         typename OldMainloop::SmemLayoutAtomB,
         typename OldMainloop::SmemCopyAtomB,
-        std::conditional_t<
-            MergeKTail, cutlass::gemm::collective::MergedKTailLoop, typename OldMainloop::TransformB>>;
+        typename OldMainloop::TransformB>;
     struct CollectiveMainloopScaleOnly : Mainloop {
       static constexpr bool UseTailMmaHandoff = true;
     };
@@ -904,18 +903,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
               64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
       return;
-    case 527:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2, true>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
-    case 528:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_MAIN_N32_MXFP4, 0, true>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 529:
       invoke_light_heavy_gemm<true>(
           d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets, problem_sizes,
@@ -934,7 +921,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 517, 518, 527, 528, 529, 530");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 517, 518, 529, 530");
   }
 }
 
