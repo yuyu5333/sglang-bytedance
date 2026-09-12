@@ -363,6 +363,10 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
+}  // namespace
+
+namespace sgl_kernel::w4a8_detail {
+
 template <class Mainloop>
 __global__ void pack_mxfp4a8_stage_weights_kernel(
     uint8_t const* weight, uint8_t const* scale, uint8_t* packed, int channels, int reduction) {
@@ -395,6 +399,10 @@ __global__ void pack_mxfp4a8_stage_weights_kernel(
     record[ABytes + i] = scale[source];
   }
 }
+
+}  // namespace sgl_kernel::w4a8_detail
+
+namespace {
 
 template <typename Config>
 inline void invoke_gemm(
@@ -925,7 +933,8 @@ torch::Tensor pack_mxfp4a8_stage_weights_sm90(torch::Tensor const& weight, torch
   c10::cuda::CUDAGuard guard(weight.device());
   auto result = torch::empty({experts, channels, reduction * 17 / 32}, weight.options());
   using Mainloop = SM90_PRECOMPUTED_MXFP4<128, 32, 512>::Cutlass3xW4A8Gemm::CollectiveMainloopScaleOnly;
-  pack_mxfp4a8_stage_weights_kernel<Mainloop><<<records, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+  sgl_kernel::w4a8_detail::pack_mxfp4a8_stage_weights_kernel<Mainloop>
+      <<<records, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       static_cast<uint8_t const*>(weight.data_ptr()), static_cast<uint8_t const*>(scale.data_ptr()),
       static_cast<uint8_t*>(result.data_ptr()), int(channels), int(reduction));
   TORCH_CHECK(cudaPeekAtLastError() == cudaSuccess, "Stage weight packing launch failed");
