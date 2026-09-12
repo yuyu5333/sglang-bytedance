@@ -4,12 +4,12 @@
 
 namespace cutlass::gemm::collective {
 
-template <bool Enabled, int Bytes, int Alignment>
+template <bool Enabled, int Bytes>
 struct PackedWeightScaleStorage {};
 
-template <int Bytes, int Alignment>
-struct PackedWeightScaleStorage<true, Bytes, Alignment> {
-  CUTE_ALIGNAS(Alignment)
+template <int Bytes>
+struct PackedWeightScaleStorage<true, Bytes> {
+  CUTE_ALIGNAS(128)
   cute::ArrayEngine<uint8_t, Bytes> smem_packed_weight;
 };
 
@@ -20,15 +20,9 @@ CUTE_HOST_DEVICE constexpr auto packed_weight_stage_layout(Layout layout) {
     return cute::make_composed_layout(
         layout.layout_a(),
         layout.offset(),
-        cute::make_layout(
-            cute::shape(base),
-            cute::replace<2>(
-                cute::stride(base), cute::compact_col_major(cute::shape<2>(base), cute::Int<StageStride>{}))));
+        cute::make_layout(cute::shape(base), cute::replace<2>(cute::stride(base), cute::Int<StageStride>{})));
   } else {
-    return cute::make_layout(
-        cute::shape(layout),
-        cute::replace<2>(
-            cute::stride(layout), cute::compact_col_major(cute::shape<2>(layout), cute::Int<StageStride>{})));
+    return cute::make_layout(cute::shape(layout), cute::replace<2>(cute::stride(layout), cute::Int<StageStride>{}));
   }
 }
 
