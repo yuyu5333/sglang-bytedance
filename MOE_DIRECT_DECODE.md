@@ -4,6 +4,10 @@ Date: 2026-09-12. Branch: `feat/moe-direct-decode`.
 Base: `527aafd7ed` on `feat/marlin-moe-bounded-workspace`.
 Kernel prototype: `d7e48efde4`; tested runner integration: `f43ae5bcce`.
 
+Follow-up: [expert-local tensor-core decode](MOE_GROUPED_DECODE.md) tested M1/M4/M8
+with uniform and hot routing. Its narrow hot-route gain does not justify
+expanding this report's M1-only runner selector; the original path is unchanged.
+
 ## Decision
 
 Retain an **opt-in single-token experiment**, not a prefill optimization
