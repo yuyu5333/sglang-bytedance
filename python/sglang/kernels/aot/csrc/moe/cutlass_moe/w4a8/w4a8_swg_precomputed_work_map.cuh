@@ -27,6 +27,8 @@ enum class ExpertRowPolicy {
   TailN16,
   AtMost24,
   Above24,
+  MainN96,
+  TailN32Of96,
 };
 
 template <ExpertRowPolicy Policy>
@@ -52,6 +54,11 @@ CUTLASS_HOST_DEVICE bool swg_select_expert_rows(uint64_t rows) {
     return rows <= 24;
   } else if constexpr (Policy == ExpertRowPolicy::Above24) {
     return rows > 24;
+  } else if constexpr (Policy == ExpertRowPolicy::MainN96) {
+    return rows >= 96 || rows % 96 > 80;
+  } else if constexpr (Policy == ExpertRowPolicy::TailN32Of96) {
+    uint64_t const remainder = rows % 96;
+    return remainder <= 80 && (remainder >= 32 || remainder % 32 > 16);
   }
   return true;
 }
@@ -270,12 +277,19 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
     } else if constexpr (RowPolicy == ExpertRowPolicy::TailN16) {
       static_assert(TileN == 16);
       return uint64_t(1);
+    } else if constexpr (RowPolicy == ExpertRowPolicy::MainN96) {
+      static_assert(TileN == 96);
+      return rows / 96 + uint64_t(rows % 96 > 80);
+    } else if constexpr (RowPolicy == ExpertRowPolicy::TailN32Of96) {
+      static_assert(TileN == 32);
+      return rows % 96 / 32 + uint64_t(rows % 32 > 16);
     } else {
       return swg_div_up(rows, uint64_t(TileN));
     }
   }();
   static_assert(
-      (RowPolicy != ExpertRowPolicy::MainN32 && RowPolicy != ExpertRowPolicy::TailN16) ||
+      (RowPolicy != ExpertRowPolicy::MainN32 && RowPolicy != ExpertRowPolicy::TailN16 &&
+       RowPolicy != ExpertRowPolicy::MainN96 && RowPolicy != ExpertRowPolicy::TailN32Of96) ||
       kSwgWorkMapMaxSwizzle == 1);
   int const swizzle_log = swg_log_swizzle_size(channel_tiles, token_tiles, kSwgWorkMapMaxSwizzle);
   uint64_t const swizzle = uint64_t(1) << swizzle_log;
@@ -443,6 +457,10 @@ __global__ void build_swg_precomputed_work_map_kernel(
       uint64_t const first_tail_tile = uint64_t(cute::get<1>(problem_shapes[group])) / 32 * 2;
       packed_tile = SwgWorkTile::pack(
           SwgWorkTile::channel_idx(packed_tile), first_tail_tile + SwgWorkTile::token_idx(packed_tile), group);
+    } else if constexpr (RowPolicy == ExpertRowPolicy::TailN32Of96) {
+      uint64_t const first_tail_tile = uint64_t(cute::get<1>(problem_shapes[group])) / 96 * 3;
+      packed_tile = SwgWorkTile::pack(
+          SwgWorkTile::channel_idx(packed_tile), first_tail_tile + SwgWorkTile::token_idx(packed_tile), group);
     }
     if constexpr (ChunkMajorWorkMap) {
       uint64_t const worker = global_tile / tiles_per_worker;
@@ -494,7 +512,9 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
 
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
-  if constexpr (Gemm::ExpertRows == ExpertRowPolicy::MainN32 || Gemm::ExpertRows == ExpertRowPolicy::TailN16) {
+  if constexpr (
+      Gemm::ExpertRows == ExpertRowPolicy::MainN32 || Gemm::ExpertRows == ExpertRowPolicy::TailN16 ||
+      Gemm::ExpertRows == ExpertRowPolicy::MainN96 || Gemm::ExpertRows == ExpertRowPolicy::TailN32Of96) {
     TORCH_CHECK(grid_shape.y == 1, "Split N16 tails require an unswizzled token grid");
   }
   uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));
