@@ -28,7 +28,6 @@
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/trace.h"
 #include "cutlass_extensions/detail/collective/mixed_input_utils.hpp"
-#include "cutlass_extensions/gemm/collective/sm90_gemm1_finalize.hpp"
 #include "cutlass_extensions/gemm/collective/sm90_split_weight_pipeline.hpp"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -472,7 +471,6 @@ struct CollectiveMmaArrayMixedInput<
     ElementB const* ptr_B_base = nullptr;
     int32_t total_activation_rows = 0;
     int32_t const* ptr_B_row_offsets = nullptr;
-    Gemm1FinalizeParams finalize{};
   };
 
   // Device side kernel params
@@ -542,7 +540,6 @@ struct CollectiveMmaArrayMixedInput<
     SwappedElementB const* ptr_B_base;
     int32_t total_activation_rows;
     int32_t const* ptr_B_row_offsets;
-    Gemm1FinalizeParams finalize;
   };
 
   //
@@ -676,8 +673,7 @@ struct CollectiveMmaArrayMixedInput<
           num_groups_val,
           reinterpret_cast<SwappedElementB const*>(args.ptr_B_base),
           args.total_activation_rows,
-          args.ptr_B_row_offsets,
-          args.finalize};
+          args.ptr_B_row_offsets};
     };
 
     // Prescale keeps the historical scale_k field in Params so the argument
