@@ -260,7 +260,7 @@ struct SM90_COMPACT_METADATA_MXFP4 {
   };
 };
 
-template <class BaseConfig>
+template <class BaseConfig, bool IndependentProducers = false>
 struct SM90_SPLIT_WEIGHT_LIFETIME_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
@@ -280,7 +280,10 @@ struct SM90_SPLIT_WEIGHT_LIFETIME_MXFP4 {
         typename OldMainloop::GmemTiledCopyB,
         typename OldMainloop::SmemLayoutAtomB,
         typename OldMainloop::SmemCopyAtomB,
-        cutlass::gemm::collective::SplitWeightStageRelease>;
+        std::conditional_t<
+            IndependentProducers,
+            cutlass::gemm::collective::IndependentOperandTmaProducers,
+            cutlass::gemm::collective::SplitWeightStageRelease>>;
     struct CollectiveMainloopScaleOnly : SplitMainloop {
       static constexpr bool UseTailMmaHandoff = true;
     };
@@ -757,13 +760,33 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2>));
       return;
+    case 459:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>, true>));
+      return;
+    case 460:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>, true>));
+      return;
+    case 461:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512, 1, 1, false>, true>));
+      return;
+    case 462:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 512>, true>));
+      return;
+    case 463:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SPLIT_WEIGHT_LIFETIME_MXFP4<SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2, true>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 454, 455, 456, 457, 458");
+          "441, 448, 449, 454, 455, 456, 457, 458, 459, 460, 461, 462, 463");
   }
 }
 

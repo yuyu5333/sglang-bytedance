@@ -39,6 +39,7 @@ struct PreparedOffsetLut {};
 struct EarlyK128StageRefill {};
 struct DrainedK256StageRefill {};
 struct SplitWeightStageRelease {};
+struct IndependentOperandTmaProducers {};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -271,7 +272,9 @@ struct CollectiveMmaArrayMixedInput<
   static constexpr uint32_t WeightScaleTransactionBytes =
       cutlass::bits_to_bytes(WeightScaleRawElementsPerStage * cutlass::sizeof_bits<WeightScaleRawElement>::value);
   static_assert(WeightScaleBulkCopyBytes % 16 == 0, "Folded weight-scale bulk copy size must be 16B aligned.");
-  static constexpr bool SplitWeightLifetime = cute::is_same_v<TransformB, SplitWeightStageRelease>;
+  static constexpr bool UseIndependentTmaProducers = cute::is_same_v<TransformB, IndependentOperandTmaProducers>;
+  static constexpr bool SplitWeightLifetime =
+      cute::is_same_v<TransformB, SplitWeightStageRelease> || UseIndependentTmaProducers;
   static constexpr uint32_t WeightTransactionBytes =
       cutlass::bits_to_bytes(size<0>(TileShape{}) * size<2>(TileShape{}) * sizeof_bits_v<SwappedElementA>) +
       WeightScaleTransactionBytes;
@@ -858,6 +861,25 @@ struct CollectiveMmaArrayMixedInput<
       }
     }
 
+    if constexpr (UseIndependentTmaProducers) {
+      if (canonical_warp_idx_sync() == 1) {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; k_tile_count > 0; --k_tile_count) {
+          pipeline.producer_acquire(smem_pipe_write);
+          if (cute::elect_one_sync()) {
+            auto* barrier = pipeline.producer_get_barrier(smem_pipe_write);
+            copy(
+                mainloop_params.tma_load_b.with(current_tma_desc_b_, *barrier, mcast_mask_b),
+                tBgB(_, _, _, *k_tile_iter),
+                tBsB(_, _, _, smem_pipe_write.index()));
+          }
+          ++k_tile_iter;
+          ++smem_pipe_write;
+        }
+        return;
+      }
+    }
+
     // Mainloop
     CUTLASS_PRAGMA_NO_UNROLL
     for (; k_tile_count > 0; --k_tile_count) {
@@ -919,7 +941,7 @@ struct CollectiveMmaArrayMixedInput<
           issue_scale_bulk_copy(local_m64_block);
         }
       }
-      if constexpr (SplitWeightLifetime) {
+      if constexpr (SplitWeightLifetime && !UseIndependentTmaProducers) {
         // Weight TMA can run while the old activation stage still has WGMMA readers.
         pipeline.producer_acquire(smem_pipe_write);
         if (cute::elect_one_sync()) {
@@ -1158,10 +1180,12 @@ struct CollectiveMmaArrayMixedInput<
       Utils::copy_tensors_A(
           smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, decltype(k_block_c)::value, read_stage);
       copy_scale_for_mma(k_block_c, read_stage);
-      if constexpr (SplitWeightLifetime && decltype(k_block_c)::value == K_BLOCK_MAX - 1) {
-        // All packed A and scale loads are synchronous; only RF values remain live.
-        pipeline.weight.consumer_release(smem_weight_release);
-        ++smem_weight_release;
+      if constexpr (SplitWeightLifetime) {
+        if constexpr (decltype(k_block_c)::value == K_BLOCK_MAX - 1) {
+          // All packed A and scale loads are synchronous; only RF values remain live.
+          pipeline.weight.consumer_release(smem_weight_release);
+          ++smem_weight_release;
+        }
       }
     };
     auto convert_A_kblock_static = [&](auto k_block_c, int read_stage) {
