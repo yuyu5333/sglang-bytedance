@@ -289,6 +289,7 @@ template <
     bool ChunkMajorWorkMap,
     ExpertRowPolicy RowPolicy,
     bool CompactPointerSetup,
+    bool WarpReduceMetadata,
     class Problem,
     class MainloopParams>
 __global__ void build_swg_precomputed_work_map_kernel(
@@ -379,16 +380,46 @@ __global__ void build_swg_precomputed_work_map_kernel(
       prefix_sum += info.group_tiles;
     }
   }
-  prefix_partials[tid] = static_cast<unsigned long long>(prefix_sum);
-  total_partials[tid] = static_cast<unsigned long long>(total_sum);
-  __syncthreads();
-
-  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-    if (tid < offset) {
-      prefix_partials[tid] += prefix_partials[tid + offset];
-      total_partials[tid] += total_partials[tid + offset];
+  if constexpr (WarpReduceMetadata) {
+    int const lane = tid % 32;
+    int const warp = tid / 32;
+    auto prefix = static_cast<unsigned long long>(prefix_sum);
+    auto total = static_cast<unsigned long long>(total_sum);
+    CUTLASS_PRAGMA_UNROLL
+    for (int delta = 16; delta > 0; delta /= 2) {
+      prefix += __shfl_down_sync(0xffffffffu, prefix, delta);
+      total += __shfl_down_sync(0xffffffffu, total, delta);
+    }
+    if (lane == 0) {
+      prefix_partials[warp] = prefix;
+      total_partials[warp] = total;
     }
     __syncthreads();
+    if (warp == 0) {
+      prefix = lane < blockDim.x / 32 ? prefix_partials[lane] : 0;
+      total = lane < blockDim.x / 32 ? total_partials[lane] : 0;
+      CUTLASS_PRAGMA_UNROLL
+      for (int delta = 16; delta > 0; delta /= 2) {
+        prefix += __shfl_down_sync(0xffffffffu, prefix, delta);
+        total += __shfl_down_sync(0xffffffffu, total, delta);
+      }
+      if (lane == 0) {
+        prefix_partials[0] = prefix;
+        total_partials[0] = total;
+      }
+    }
+    __syncthreads();
+  } else {
+    prefix_partials[tid] = static_cast<unsigned long long>(prefix_sum);
+    total_partials[tid] = static_cast<unsigned long long>(total_sum);
+    __syncthreads();
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+      if (tid < offset) {
+        prefix_partials[tid] += prefix_partials[tid + offset];
+        total_partials[tid] += total_partials[tid + offset];
+      }
+      __syncthreads();
+    }
   }
 
   uint64_t const group_start = static_cast<uint64_t>(prefix_partials[0]);
@@ -519,7 +550,7 @@ void launch_swg_precomputed_work_map(
       kSwgPrebuiltTmaDescriptorScratchBytes + size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
   build_swg_precomputed_work_map_kernel<
-      TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows, Gemm::CompactPointerSetup>
+      TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows, Gemm::CompactPointerSetup, Gemm::WarpReduceMetadata>
       <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(
           problem_shapes,
           groups,

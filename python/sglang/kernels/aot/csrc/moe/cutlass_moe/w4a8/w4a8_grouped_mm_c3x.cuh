@@ -244,6 +244,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
   static constexpr bool UseChunkMajorWorkMap = ChunkMajorWorkMap;
   static constexpr bool CompactPointerSetup = false;
+  static constexpr bool WarpReduceMetadata = false;
   static constexpr bool UseWarpShuffleGemm2Epilogue =
       std::is_same_v<EpilogueSchedule, WarpShuffleGemm2Epilogue> ||
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreGemm2Epilogue> ||
