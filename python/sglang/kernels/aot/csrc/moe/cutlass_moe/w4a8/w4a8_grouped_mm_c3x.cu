@@ -207,17 +207,17 @@ struct SM90_TAIL_HANDOFF_MXFP4 {
   };
 };
 
-template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
+template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy, int PipelineStages = 3, int CtasPerSm = 3>
 struct SM90_N16_K256_SWG_MXFP4 {
   using Base = SM90_PRECOMPUTED_MXFP4<128, 16, 256>::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr bool UseSingleWarpgroupKernel = true;
-    static constexpr int SingleWarpgroupCtasPerSm = 3;
+    static constexpr int SingleWarpgroupCtasPerSm = CtasPerSm;
     static constexpr auto ExpertRows = RowPolicy;
     using TileShape = cute::Shape<cute::Int<128>, cute::Int<16>, cute::Int<256>>;
     using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
     using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
-        3, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
+        PipelineStages, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
     using CollectiveMainloopScaleOnly = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
         Policy,
         TileShape,
@@ -245,8 +245,8 @@ struct SM90_N16_K256_SWG_MXFP4 {
         sgl_kernel::w4a8_detail::ProblemShape,
         CollectiveMainloopScaleOnly,
         CollectiveEpilogue,
-        3,
-        3,
+        CtasPerSm,
+        (PipelineStages < 3 ? PipelineStages : 3),
         cutlass::gemm::kernel::SingleWarpgroupPipelineMode::RollingRefill>;
     using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
   };
@@ -862,13 +862,27 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_WARP_METADATA_MXFP4<
               SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>>));
       return;
+    case 489:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16, 2, 4>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
+      return;
+    case 490:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16, 4, 2>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 484");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 484, 489, 490");
   }
 }
 
