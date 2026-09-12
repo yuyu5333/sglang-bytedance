@@ -60,16 +60,6 @@ inline __device__ unsigned prmt(unsigned hi, unsigned lo, unsigned select_code) 
 template <class...>
 using MixedInputVoid = void;
 
-template <class Transform, class = void>
-struct MixedInputAdditiveE8M0Lut {
-  static constexpr bool value = false;
-};
-
-template <class Transform>
-struct MixedInputAdditiveE8M0Lut<Transform, MixedInputVoid<decltype(Transform::UseAdditiveE8M0Lut)>> {
-  static constexpr bool value = Transform::UseAdditiveE8M0Lut;
-};
-
 template <class Collective, class = void>
 struct MixedInputFusedE8M0PreMmaScale {
   static constexpr bool value = false;
@@ -299,13 +289,7 @@ struct MixedGroupedGemmInputUtils {
   }
 
   CUTLASS_DEVICE static uint2 prepare_e8m0_lut(uint32_t offset) {
-    if constexpr (MixedInputAdditiveE8M0Lut<typename Collective::TransformA>::value) {
-      // Humming preprocessing bounds folded offsets to 1..12; no byte carries.
-      uint32_t const hi = offset * 0x08080808U + 0x1c181410U;
-      return make_uint2((hi & 0xffffff00U) - 0x10101400U, hi);
-    } else {
-      return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
-    }
+    return make_uint2(offset * 0x08080800U + 0x0c080000U, offset * 0x08080808U + 0x1c181410U);
   }
 
   template <class CachedOffset>
