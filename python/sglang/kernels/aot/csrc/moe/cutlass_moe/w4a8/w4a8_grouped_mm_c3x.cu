@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "cutlass/cutlass.h"
+#include "cutlass_extensions/gemm/kernel/sm90_gemm_array_tma_parallel_partitions.hpp"
 #include "w4a8_grouped_mm_c3x.cuh"
 
 using namespace cute;
@@ -359,7 +360,22 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
-template <typename Config>
+template <class BaseConfig>
+struct SM90_GRID_PLANE_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    using PrecomputedTileScheduler = cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90GroupPrecomputed<
+        sgl_kernel::w4a8_detail::ProblemShape, 8, Base::UseChunkMajorWorkMap, true>;
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        typename Base::CollectiveMainloopScaleOnly,
+        typename Base::CollectiveEpilogue,
+        PrecomputedTileScheduler>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
+template <typename Config, class Launch = sgl_kernel::w4a8_detail::DefaultGroupedGemmLaunch>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
     torch::Tensor const& a_tensors,
@@ -378,7 +394,8 @@ inline void invoke_gemm(
     std::optional<torch::Tensor> act_block_scales = std::nullopt,
     std::optional<torch::Tensor> as_strides = std::nullopt,
     int64_t act_scale_group = 0,
-    std::optional<torch::Tensor> expert_ids = std::nullopt) {
+    std::optional<torch::Tensor> expert_ids = std::nullopt,
+    Launch launch = {}) {
   using GemmT = typename Config::Cutlass3xW4A8Gemm;
   cutlass_w4a8_group_gemm_caller<GemmT>(
       d_tensors,
@@ -396,7 +413,42 @@ inline void invoke_gemm(
       act_block_scales,
       as_strides,
       act_scale_group,
-      expert_ids);
+      expert_ids,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      0.0,
+      false,
+      launch);
+}
+
+template <class... Args>
+void invoke_parallel_light_heavy_gemm(Args&&... args) {
+  using Light = SM90_GRID_PLANE_MXFP4<SM90_WARP_METADATA_MXFP4<
+      SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+          128, 16, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::AtMost16>>>>;
+  using Heavy = SM90_GRID_PLANE_MXFP4<SM90_WARP_METADATA_MXFP4<
+      SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
+          64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>>;
+  using First = typename Light::Cutlass3xW4A8Gemm::GemmKernelScaleOnly;
+  using Second = typename Heavy::Cutlass3xW4A8Gemm::GemmKernelScaleOnly;
+  auto launch_first = [&](auto& first, auto const&, cudaStream_t stream) {
+    auto const first_grid = First::get_grid_shape(first.params());
+    auto launch_second = [&](auto& second, auto const&, cudaStream_t second_stream) {
+      auto const second_grid = Second::get_grid_shape(second.params());
+      TORCH_CHECK(
+          first_grid.x == second_grid.x && first_grid.y == second_grid.y &&
+              first_grid.z == 1 && second_grid.z == 1 && stream == second_stream,
+          "Parallel GEMM partitions require identical 2D grids and one stream");
+      return cutlass::gemm::kernel::launch_parallel_partitions<First, Second>(
+          first.params(), second.params(), first_grid, stream);
+    };
+    invoke_gemm<Heavy>(args..., launch_second);
+    return cutlass::Status::kSuccess;
+  };
+  invoke_gemm<Light>(args..., launch_first);
 }
 
 // Helper macro to reduce code duplication.
@@ -858,13 +910,19 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_WARP_METADATA_MXFP4<SM90_TAIL_HANDOFF_MXFP4<SM90_PRECOMPUTED_MXFP4<
               64, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::Above16>>>));
       return;
+    case 538:
+      invoke_parallel_light_heavy_gemm(
+          d_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets, problem_sizes,
+          a_strides, b_strides, d_strides, s_strides, chunk_size,
+          act_block_scales, as_strides, act_scale_group, expert_ids);
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 538");
   }
 }
 
