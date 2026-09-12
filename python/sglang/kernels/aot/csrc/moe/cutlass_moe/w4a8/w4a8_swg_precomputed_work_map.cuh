@@ -97,41 +97,11 @@ struct SwgPrecomputedWorkMap {
   torch::Tensor storage;
   torch::Tensor prebuilt_tma_desc_a;
   torch::Tensor prebuilt_tma_desc_b;
-  torch::Tensor prebuilt_tma_desc_d;
   uint32_t worker_count = 0;
   uint32_t grid_x = 0;
   uint32_t grid_y = 0;
   uint32_t tiles_per_worker = 0;
 };
-
-template <class Gemm, class = void>
-struct SwgPrebuiltOutputTma : std::false_type {};
-
-template <class Gemm>
-struct SwgPrebuiltOutputTma<Gemm, std::void_t<decltype(Gemm::PrebuiltOutputTma)>>
-    : std::bool_constant<Gemm::PrebuiltOutputTma> {};
-
-struct SwgNoOutputTma {
-  static constexpr bool Enabled = false;
-};
-
-template <class EpilogueParams>
-struct SwgOutputTma {
-  static constexpr bool Enabled = true;
-  typename EpilogueParams::TMA_D tma;
-  decltype(EpilogueParams{}.ptr_D) ptrs;
-  decltype(EpilogueParams{}.dD) strides;
-  cute::TmaDescriptor* descriptors;
-};
-
-template <class Gemm, class EpilogueParams>
-auto swg_output_tma_params(EpilogueParams const& params) {
-  if constexpr (SwgPrebuiltOutputTma<Gemm>::value) {
-    return SwgOutputTma<EpilogueParams>{params.tma_store_d, params.ptr_D, params.dD, params.prebuilt_output_tma};
-  } else {
-    return SwgNoOutputTma{};
-  }
-}
 
 constexpr int kSwgPrebuiltTmaDescriptorCount = 2;
 constexpr size_t kSwgPrebuiltTmaDescriptorScratchBytes = kSwgPrebuiltTmaDescriptorCount * sizeof(cute::TmaDescriptor);
@@ -251,31 +221,6 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
   swg_publish_prebuilt_tma_descriptor(prebuilt_tma_desc_b + group, smem_desc, 1);
 }
 
-template <class OutputTma, class Problem>
-__device__ __forceinline__ void swg_build_output_tma(
-    OutputTma const& output, Problem const& problem, int group, cute::TmaDescriptor* smem_descs) {
-  if constexpr (OutputTma::Enabled) {
-    auto& descriptor = smem_descs[2];
-    if (threadIdx.x == 64) {
-      cute::array<uint32_t, 5> shape = {1, 1, 1, 1, 1};
-      cute::array<uint64_t, 5> strides = {0, 0, 0, 0, 0};
-      using Element = std::remove_pointer_t<std::remove_reference_t<decltype(output.ptrs[group])>>;
-      auto tensor = cute::make_tensor(
-          static_cast<Element const*>(nullptr),
-          cute::make_layout(
-              cute::make_shape(cute::get<0>(problem), cute::get<1>(problem), cute::_1{}), output.strides[group]));
-      descriptor = *output.tma.get_tma_descriptor();
-      cute::tma_descriptor_replace_addr_in_shared_mem(descriptor, output.ptrs[group]);
-      cute::detail::fill_tma_gmem_shape_stride(output.tma, tensor, shape, strides);
-      for (uint64_t& stride : strides) {
-        stride = stride * cutlass::sizeof_bits<Element>::value / 8;
-      }
-      cute::tma_descriptor_replace_dims_strides_in_shared_mem(descriptor, shape, strides);
-    }
-    swg_publish_prebuilt_tma_descriptor(output.descriptors + group, descriptor, 2);
-  }
-}
-
 __device__ __forceinline__ uint64_t swg_make_work_tile(
     uint64_t global_linear_idx,
     uint64_t local_linear_idx,
@@ -346,8 +291,7 @@ template <
     bool CompactPointerSetup,
     bool WarpReduceMetadata,
     class Problem,
-    class MainloopParams,
-    class OutputTma>
+    class MainloopParams>
 __global__ void build_swg_precomputed_work_map_kernel(
     Problem const* problem_shapes,
     int groups,
@@ -374,8 +318,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
     uint64_t reduction_channels,
     bool weight_desc_per_group,
     cute::TmaDescriptor* prebuilt_tma_desc_a,
-    cute::TmaDescriptor* prebuilt_tma_desc_b,
-    OutputTma output_tma) {
+    cute::TmaDescriptor* prebuilt_tma_desc_b) {
   int const tid = threadIdx.x;
   uint64_t const worker_count = uint64_t(gemm_grid_x) * uint64_t(gemm_grid_y);
 
@@ -395,9 +338,7 @@ __global__ void build_swg_precomputed_work_map_kernel(
 
   extern __shared__ __align__(64) unsigned char shared_storage[];
   auto* smem_descs = reinterpret_cast<cute::TmaDescriptor*>(shared_storage);
-  constexpr size_t descriptor_bytes =
-      kSwgPrebuiltTmaDescriptorScratchBytes + (OutputTma::Enabled ? sizeof(cute::TmaDescriptor) : 0);
-  auto* prefix_partials = reinterpret_cast<unsigned long long*>(shared_storage + descriptor_bytes);
+  auto* prefix_partials = reinterpret_cast<unsigned long long*>(shared_storage + kSwgPrebuiltTmaDescriptorScratchBytes);
   auto* total_partials = prefix_partials + blockDim.x;
   auto* group_info_storage = total_partials + blockDim.x;
 
@@ -429,10 +370,6 @@ __global__ void build_swg_precomputed_work_map_kernel(
       prebuilt_tma_desc_a,
       prebuilt_tma_desc_b,
       !CompactPointerSetup || group_info_storage[1] != 0);
-
-  if (group_info_storage[1] != 0) {
-    swg_build_output_tma(output_tma, problem_shapes[group], group, smem_descs);
-  }
 
   uint64_t prefix_sum = 0;
   uint64_t total_sum = 0;
@@ -580,9 +517,6 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   result.prebuilt_tma_desc_a =
       torch::empty(int64_t((weight_desc_per_group && groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
   result.prebuilt_tma_desc_b = torch::empty(int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
-  if constexpr (SwgPrebuiltOutputTma<Gemm>::value) {
-    result.prebuilt_tma_desc_d = torch::empty(int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
-  }
   result.worker_count = static_cast<uint32_t>(worker_count_u64);
   result.grid_x = grid_shape.x;
   result.grid_y = grid_shape.y;
@@ -590,7 +524,7 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   return result;
 }
 
-template <class Gemm, class Problem, class MainloopParams, class EpilogueParams>
+template <class Gemm, class Problem, class MainloopParams>
 void launch_swg_precomputed_work_map(
     SwgPrecomputedWorkMap const& work_map,
     Problem const* problem_shapes,
@@ -609,15 +543,11 @@ void launch_swg_precomputed_work_map(
     torch::Tensor const& activation_scale,
     torch::Tensor const& weight_scale,
     bool weight_desc_per_group,
-    cudaStream_t stream,
-    EpilogueParams const& epilogue_params) {
+    cudaStream_t stream) {
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
-  auto const output_tma = swg_output_tma_params<Gemm>(epilogue_params);
   size_t const scheduler_smem =
-      kSwgPrebuiltTmaDescriptorScratchBytes +
-      (SwgPrebuiltOutputTma<Gemm>::value ? sizeof(cute::TmaDescriptor) : 0) +
-      size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
+      kSwgPrebuiltTmaDescriptorScratchBytes + size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
   build_swg_precomputed_work_map_kernel<
       TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows, Gemm::CompactPointerSetup, Gemm::WarpReduceMetadata>
@@ -647,8 +577,7 @@ void launch_swg_precomputed_work_map(
           static_cast<uint64_t>(activation.size(1)),
           weight_desc_per_group,
           static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_a.data_ptr()),
-          static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_b.data_ptr()),
-          output_tma);
+          static_cast<cute::TmaDescriptor*>(work_map.prebuilt_tma_desc_b.data_ptr()));
   TORCH_CHECK(cudaPeekAtLastError() == cudaSuccess, "Failed to launch SWG precomputed work-map kernel");
 }
 

@@ -635,10 +635,6 @@ void cutlass_w4a8_group_gemm_caller(
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
-    if constexpr (sgl_kernel::swg_detail::SwgPrebuiltOutputTma<Gemm>::value) {
-      arguments.epilogue.prebuilt_output_tma =
-          static_cast<cute::TmaDescriptor*>(swg_work_map.prebuilt_tma_desc_d.data_ptr());
-    }
   }
 
   // MXFP4A8: feed the activation block-scale into the mainloop's optional path.
@@ -685,8 +681,7 @@ void cutlass_w4a8_group_gemm_caller(
         a_scales,
         b_scales,
         false,
-        stream,
-        gemm.params().epilogue);
+        stream);
   }
 
   status = gemm.run(stream, nullptr, true);
