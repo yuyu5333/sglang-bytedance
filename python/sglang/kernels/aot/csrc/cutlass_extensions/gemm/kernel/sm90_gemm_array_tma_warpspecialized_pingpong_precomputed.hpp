@@ -122,13 +122,6 @@ template <class Mainloop>
 struct CompactProducerWarp<Mainloop, std::void_t<decltype(Mainloop::CompactProducer)>>
     : std::bool_constant<Mainloop::CompactProducer> {};
 
-template <class Mainloop, class = void>
-struct CompactProducerReallocation : std::false_type {};
-
-template <class Mainloop>
-struct CompactProducerReallocation<Mainloop, std::void_t<decltype(Mainloop::ReallocateCompactRegisters)>>
-    : std::bool_constant<Mainloop::ReallocateCompactRegisters> {};
-
 template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
@@ -227,8 +220,6 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr bool UseCompactProducer = CompactProducerWarp<CollectiveMainloop>::value;
-  static constexpr bool ReallocateRegisters =
-      !UseCompactProducer || CompactProducerReallocation<CollectiveMainloop>::value;
   static_assert(!UseCompactProducer || cute::size(ClusterShape{}) == 1);
   static_assert(!UseCompactProducer || !UseIndependentTmaProducers<CollectiveMainloop>::value);
   static constexpr uint32_t MaxThreadsPerBlock =
@@ -737,7 +728,7 @@ class GemmUniversalPrecomputedScheduler<
     auto k_tile_count = size<3>(gA_mkl);
 
     if (warp_group_role == WarpGroupRole::Producer) {
-      if constexpr (ReallocateRegisters) {
+      if constexpr (!UseCompactProducer) {
         cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
       }
 
@@ -952,7 +943,7 @@ class GemmUniversalPrecomputedScheduler<
     }  // Producer Warp Group End
 
     else if (warp_group_role == WarpGroupRole::Consumer0 || warp_group_role == WarpGroupRole::Consumer1) {
-      if constexpr (ReallocateRegisters) {
+      if constexpr (!UseCompactProducer) {
         cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
       }
 
