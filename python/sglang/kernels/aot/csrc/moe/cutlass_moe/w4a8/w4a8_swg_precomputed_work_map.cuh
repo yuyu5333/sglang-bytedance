@@ -34,6 +34,8 @@ enum class ExpertRowPolicy {
   MainN32Fine8,
   TailN16Fine8,
   TailN8Of32,
+  MainN64,
+  TailN32Of64,
 };
 
 template <ExpertRowPolicy Policy>
@@ -73,6 +75,10 @@ CUTLASS_HOST_DEVICE bool swg_select_expert_rows(uint64_t rows) {
     return rows % 32 > 8 && rows % 32 <= 24;
   } else if constexpr (Policy == ExpertRowPolicy::TailN8Of32) {
     return rows % 16 > 0 && rows % 16 <= 8;
+  } else if constexpr (Policy == ExpertRowPolicy::MainN64) {
+    return rows >= 64 || rows % 64 > 48;
+  } else if constexpr (Policy == ExpertRowPolicy::TailN32Of64) {
+    return rows % 64 > 16 && rows % 64 <= 48;
   }
   return true;
 }
@@ -297,6 +303,12 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
     } else if constexpr (RowPolicy == ExpertRowPolicy::TailN16Fine8 || RowPolicy == ExpertRowPolicy::TailN8Of32) {
       static_assert(TileN == (RowPolicy == ExpertRowPolicy::TailN16Fine8 ? 16 : 8));
       return uint64_t(1);
+    } else if constexpr (RowPolicy == ExpertRowPolicy::MainN64) {
+      static_assert(TileN == 64);
+      return rows / 64 + uint64_t(rows % 64 > 48);
+    } else if constexpr (RowPolicy == ExpertRowPolicy::TailN32Of64) {
+      static_assert(TileN == 32);
+      return uint64_t(1);
     } else {
       return swg_div_up(rows, uint64_t(TileN));
     }
@@ -307,6 +319,8 @@ __device__ __forceinline__ SwgGroupInfo swg_group_info(Problem const& problem) {
   static_assert(
       (RowPolicy != ExpertRowPolicy::MainN32Fine8 && RowPolicy != ExpertRowPolicy::TailN16Fine8 &&
        RowPolicy != ExpertRowPolicy::TailN8Of32) || kSwgWorkMapMaxSwizzle == 1);
+  static_assert((RowPolicy != ExpertRowPolicy::MainN64 && RowPolicy != ExpertRowPolicy::TailN32Of64) ||
+                kSwgWorkMapMaxSwizzle == 1);
   int const swizzle_log = swg_log_swizzle_size(channel_tiles, token_tiles, kSwgWorkMapMaxSwizzle);
   uint64_t const swizzle = uint64_t(1) << swizzle_log;
   uint64_t const problem_blocks_m = swg_round_up(channel_tiles, swizzle);
@@ -477,6 +491,10 @@ __global__ void build_swg_precomputed_work_map_kernel(
       uint64_t const first_tail_tile = uint64_t(cute::get<1>(problem_shapes[group])) / 16 * 2;
       packed_tile = SwgWorkTile::pack(
           SwgWorkTile::channel_idx(packed_tile), first_tail_tile + SwgWorkTile::token_idx(packed_tile), group);
+    } else if constexpr (RowPolicy == ExpertRowPolicy::TailN32Of64) {
+      uint64_t const first_tail_tile = uint64_t(cute::get<1>(problem_shapes[group])) / 64 * 2;
+      packed_tile = SwgWorkTile::pack(
+          SwgWorkTile::channel_idx(packed_tile), first_tail_tile + SwgWorkTile::token_idx(packed_tile), group);
     }
     if constexpr (ChunkMajorWorkMap) {
       uint64_t const worker = global_tile / tiles_per_worker;
@@ -531,7 +549,8 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   if constexpr (
       Gemm::ExpertRows == ExpertRowPolicy::MainN32 || Gemm::ExpertRows == ExpertRowPolicy::TailN16 ||
       Gemm::ExpertRows == ExpertRowPolicy::MainN32Fine8 || Gemm::ExpertRows == ExpertRowPolicy::TailN16Fine8 ||
-      Gemm::ExpertRows == ExpertRowPolicy::TailN8Of32) {
+      Gemm::ExpertRows == ExpertRowPolicy::TailN8Of32 ||
+      Gemm::ExpertRows == ExpertRowPolicy::MainN64 || Gemm::ExpertRows == ExpertRowPolicy::TailN32Of64) {
     TORCH_CHECK(grid_shape.y == 1, "Split N16 tails require an unswizzled token grid");
   }
   uint64_t const channel_tiles = swg_div_up(channels, uint64_t(TileM));

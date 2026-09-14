@@ -105,6 +105,16 @@ struct ConsumerRegisterBudget<Mainloop, std::void_t<decltype(Mainloop::ConsumerR
   static constexpr int value = Mainloop::ConsumerRegisters;
 };
 
+template <class Mainloop, class = void>
+struct PingpongCtaCount {
+  static constexpr int value = 1;
+};
+
+template <class Mainloop>
+struct PingpongCtaCount<Mainloop, std::void_t<decltype(Mainloop::CtasPerSm)>> {
+  static constexpr int value = Mainloop::CtasPerSm;
+};
+
 template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
@@ -204,12 +214,13 @@ class GemmUniversalPrecomputedScheduler<
   static constexpr uint32_t NumMmaWarpGroups = 2;
   static constexpr uint32_t MaxThreadsPerBlock =
       CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
-  static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
+  static constexpr uint32_t MinBlocksPerMultiprocessor = PingpongCtaCount<CollectiveMainloop>::value;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
-  static constexpr uint32_t LoadRegisterRequirement = UseMaxMmaRegisters ? 32 : 40;
+  static constexpr uint32_t LoadRegisterRequirement =
+      MinBlocksPerMultiprocessor > 1 ? 24 : (UseMaxMmaRegisters ? 32 : 40);
   static constexpr int ExplicitConsumerRegisters = ConsumerRegisterBudget<CollectiveMainloop>::value;
   static_assert(ExplicitConsumerRegisters == 0 ||
                 (ExplicitConsumerRegisters >= 24 && ExplicitConsumerRegisters <= 232 &&
