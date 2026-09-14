@@ -504,6 +504,46 @@ struct SM90_ACTIVATION_SWIZZLE_MXFP4 {
   };
 };
 
+template <class BaseConfig, int Bytes>
+struct SM90_WEIGHT_SWIZZLE_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
+    static_assert(!OldMainloop::SwapAB);
+    static_assert(Bytes == 32 || Bytes == 64);
+    using WeightLayout = std::conditional_t<
+        Bytes == 32,
+        cute::GMMA::Layout_K_SW32_Atom<cutlass::float_e2m1_t>,
+        cute::GMMA::Layout_K_SW64_Atom<cutlass::float_e2m1_t>>;
+    static_assert(!std::is_same_v<WeightLayout, typename OldMainloop::SmemLayoutAtomA>);
+    using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
+        typename OldMainloop::DispatchPolicy,
+        typename OldMainloop::TileShape,
+        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
+        typename OldMainloop::StrideA,
+        cutlass::float_e4m3_t,
+        typename OldMainloop::StrideB,
+        typename OldMainloop::TiledMma,
+        typename OldMainloop::GmemTiledCopyA,
+        WeightLayout,
+        typename OldMainloop::SmemCopyAtomA,
+        typename OldMainloop::TransformA,
+        typename OldMainloop::GmemTiledCopyB,
+        typename OldMainloop::SmemLayoutAtomB,
+        typename OldMainloop::SmemCopyAtomB,
+        typename OldMainloop::TransformB>;
+    struct CollectiveMainloopScaleOnly : Mainloop {
+      static constexpr bool UseTailMmaHandoff = true;
+    };
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        CollectiveMainloopScaleOnly,
+        typename Base::CollectiveEpilogue,
+        typename Base::PrecomputedTileScheduler>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -1068,6 +1108,36 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 616:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WEIGHT_SWIZZLE_MXFP4<
+              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                  128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+              64>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 617:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WEIGHT_SWIZZLE_MXFP4<SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_MAIN_N32_MXFP4>, 64>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 618:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WEIGHT_SWIZZLE_MXFP4<
+              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                  128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+              32>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 619:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_WEIGHT_SWIZZLE_MXFP4<SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_MAIN_N32_MXFP4>, 32>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
@@ -1075,7 +1145,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "603, 608, 609, 610, 615");
+          "603, 608, 609, 610, 615, 616, 617, 618, 619");
   }
 }
 
