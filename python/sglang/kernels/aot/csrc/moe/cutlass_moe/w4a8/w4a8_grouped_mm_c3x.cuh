@@ -272,7 +272,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static_assert(
       !UseWarpShuffleGemm2Epilogue ||
       (cute::size<0>(TileShape{}) == 128 &&
-       (((cute::size<1>(TileShape{}) == 24 || cute::size<1>(TileShape{}) == 32) &&
+       (((cute::size<1>(TileShape{}) == 24 || cute::size<1>(TileShape{}) == 32 || cute::size<1>(TileShape{}) == 64) &&
          cute::size<2>(TileShape{}) == 512) ||
         ((cute::size<1>(TileShape{}) == 40 || cute::size<1>(TileShape{}) == 48 || cute::size<1>(TileShape{}) == 56) &&
          cute::size<2>(TileShape{}) == 256))));
