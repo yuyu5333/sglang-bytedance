@@ -95,6 +95,16 @@ struct PreferMaxMmaRegisters<CollectiveEpilogue, std::void_t<decltype(Collective
   static constexpr bool value = CollectiveEpilogue::PreferMaxMmaRegisters;
 };
 
+template <class Mainloop, class = void>
+struct ConsumerRegisterBudget {
+  static constexpr int value = 0;
+};
+
+template <class Mainloop>
+struct ConsumerRegisterBudget<Mainloop, std::void_t<decltype(Mainloop::ConsumerRegisters)>> {
+  static constexpr int value = Mainloop::ConsumerRegisters;
+};
+
 template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
@@ -200,7 +210,12 @@ class GemmUniversalPrecomputedScheduler<
   /// Register requirement for Load and Math WGs
   static constexpr bool UseMaxMmaRegisters = PreferMaxMmaRegisters<CollectiveEpilogue>::value;
   static constexpr uint32_t LoadRegisterRequirement = UseMaxMmaRegisters ? 32 : 40;
-  static constexpr uint32_t MmaRegisterRequirement = UseMaxMmaRegisters ? 240 : 232;
+  static constexpr int ExplicitConsumerRegisters = ConsumerRegisterBudget<CollectiveMainloop>::value;
+  static_assert(ExplicitConsumerRegisters == 0 ||
+                (ExplicitConsumerRegisters >= 24 && ExplicitConsumerRegisters <= 232 &&
+                 ExplicitConsumerRegisters % 8 == 0));
+  static constexpr uint32_t MmaRegisterRequirement =
+      ExplicitConsumerRegisters > 0 ? ExplicitConsumerRegisters : (UseMaxMmaRegisters ? 240 : 232);
 
   // 1 stage ordered sequence between mainloop and epilogue producer load threads
   using LoadWarpOrderBarrier = cutlass::OrderedSequenceBarrier<1, 2>;
