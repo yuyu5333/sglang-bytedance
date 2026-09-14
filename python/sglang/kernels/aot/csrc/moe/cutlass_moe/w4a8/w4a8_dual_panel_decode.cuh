@@ -106,7 +106,7 @@ struct DualPanelDecodeMainloop : RawMainloop {
       Utils::convert_A_kblock_fused_e8m0_pre_mma_raw_scale_to_slot(fp4, output, scale_fragment, k);
       copy(output, destination(_, _, k, stage));
     });
-    cute::fence_view_async_shared();
+    cutlass::arch::fence_view_async_shared();
   }
 
   template <class Inputs, class TensorMaps, class Coord, class Iterator>
