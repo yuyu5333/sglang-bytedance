@@ -289,6 +289,20 @@ struct SM90_PACKED_MAIN_N32_MXFP4 {
   };
 };
 
+struct SM90_PACKED_MAIN_N32_FINE8_MXFP4 {
+  using Base = SM90_PACKED_MAIN_N32_MXFP4::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::MainN32Fine8;
+  };
+};
+
+struct SM90_N8_FINE_TAIL_MXFP4 {
+  using Base = SM90_SWG_EARLY_REFILL_MXFP4<8>::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::TailN8Of32;
+  };
+};
+
 struct SM90_PACKED_HEAVY24_MXFP4 {
   using Base = SM90_PRECOMPUTED_MXFP4_WARP_SHUFFLE_PACKED_GEMM2::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
@@ -956,13 +970,29 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 601:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PACKED_MAIN_N32_FINE8_MXFP4>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16Fine8>>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N8_FINE_TAIL_MXFP4>));
+      return;
+    case 602:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<
+              SM90_PRECOMPUTED_MXFP4<
+                  128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32Fine8>,
+              2>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16Fine8>>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N8_FINE_TAIL_MXFP4>));
+      return;
     default:
       TORCH_CHECK(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
-          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, 598, 599, 600");
+          "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, 598, 599, 600, 601, 602");
   }
 }
 
