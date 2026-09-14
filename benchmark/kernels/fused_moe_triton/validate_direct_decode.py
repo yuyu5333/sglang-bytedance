@@ -38,6 +38,7 @@ def capture(fn):
 def validate(args, report):
     from sglang.kernels.ops.moe.direct_decode import direct_decode
     from sglang.kernels.ops.moe.grouped_decode import grouped_decode
+    from sglang.kernels.ops.moe.streamed_decode import streamed_decode
     from sglang.srt.distributed.parallel_state import (
         destroy_distributed_environment,
         destroy_model_parallel,
@@ -141,10 +142,33 @@ def validate(args, report):
             block_k=args.block_k,
         )
 
-    functions = {} if args.grouped_only else {"direct": direct}
+    def streamed():
+        if args.inplace:
+            x.copy_(original)
+        return streamed_decode(
+            x,
+            quant.w13_weight,
+            quant.w2_weight,
+            ids,
+            weights,
+            b1=quant.b13,
+            b2=quant.b2,
+            scale=args.scale,
+            inplace=args.inplace,
+            up_n=args.up_n,
+            down_n=args.down_n,
+            up_warps=args.up_warps,
+            down_warps=args.down_warps,
+            unroll=args.unroll,
+            vectorized_down=args.vectorized_down,
+        )
+
+    functions = {} if args.grouped_only or args.streamed_only else {"direct": direct}
     if args.grouped or args.grouped_only:
         functions["grouped"] = grouped
-    if not args.direct_only and not args.grouped_only:
+    if args.streamed or args.streamed_only:
+        functions["streamed"] = streamed
+    if not args.direct_only and not args.grouped_only and not args.streamed_only:
         functions["baseline"] = baseline
     context = (
         override_config(
@@ -190,10 +214,14 @@ def validate(args, report):
                 report["grouped_vs_baseline"] = error_metrics(
                     outputs["grouped"], outputs["baseline"], args.atol, args.rtol
                 )
+            if "streamed" in outputs:
+                report["streamed_vs_baseline"] = error_metrics(
+                    outputs["streamed"], outputs["baseline"], args.atol, args.rtol
+                )
 
         graphs = {name: capture(fn) for name, fn in functions.items()}
         saved_ids, saved_weights = ids.clone(), weights.clone()
-        if args.grouped or args.grouped_only:
+        if args.grouped or args.grouped_only or args.streamed or args.streamed_only:
             changed_ids = (
                 torch.arange(args.tokens, device="cuda")[:, None] * (args.topk + 1)
                 + torch.arange(args.topk, device="cuda")[None, :]
@@ -268,7 +296,11 @@ def validate(args, report):
                 report.setdefault("profiles", {})[name] = str(target)
         report["pass"] = all(
             report.get(key, {"pass": True})["pass"]
-            for key in ("direct_vs_baseline", "grouped_vs_baseline")
+            for key in (
+                "direct_vs_baseline",
+                "grouped_vs_baseline",
+                "streamed_vs_baseline",
+            )
         ) and all(
             case["reference"]["pass"]
             and case["changed_routing_graph"]["pass"]
@@ -300,6 +332,14 @@ def main():
     parser.add_argument("--direct-only", action="store_true")
     parser.add_argument("--grouped", action="store_true")
     parser.add_argument("--grouped-only", action="store_true")
+    parser.add_argument("--streamed", action="store_true")
+    parser.add_argument("--streamed-only", action="store_true")
+    parser.add_argument("--up-n", type=int, choices=[2, 4, 8, 16], default=4)
+    parser.add_argument("--down-n", type=int, choices=[2, 4, 8, 16, 32, 64], default=16)
+    parser.add_argument("--up-warps", type=int, choices=[4, 8], default=4)
+    parser.add_argument("--down-warps", type=int, choices=[4, 8], default=4)
+    parser.add_argument("--unroll", type=int, choices=[1, 2, 4, 8], default=1)
+    parser.add_argument("--vectorized-down", action="store_true")
     parser.add_argument("--block-n", type=int, choices=[16, 32, 64], default=32)
     parser.add_argument("--block-k", type=int, choices=[32, 64, 128, 256], default=64)
     parser.add_argument("--runner-direct", action="store_true")
@@ -334,7 +374,7 @@ def main():
     import triton
 
     import sglang
-    from sglang.kernels.ops.moe import direct_decode, grouped_decode
+    from sglang.kernels.ops.moe import direct_decode, grouped_decode, streamed_decode
 
     report = {
         "args": {
@@ -356,6 +396,9 @@ def main():
         ).hexdigest(),
         "grouped_source_sha256": hashlib.sha256(
             Path(grouped_decode.__file__).read_bytes()
+        ).hexdigest(),
+        "streamed_source_sha256": hashlib.sha256(
+            Path(streamed_decode.__file__).read_bytes()
         ).hexdigest(),
         "scope": "Synthetic BF16/FP16 MoE; TP/EP/PP/DP=1; no checkpoint/KV/HTTP/speculative/mem-fraction workload",
         "pass": False,
