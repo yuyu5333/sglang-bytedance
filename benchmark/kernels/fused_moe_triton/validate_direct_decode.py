@@ -142,7 +142,7 @@ def validate(args, report):
             block_k=args.block_k,
         )
 
-    def streamed():
+    def streamed(vectorized_down=None):
         if args.inplace:
             x.copy_(original)
         return streamed_decode(
@@ -160,7 +160,9 @@ def validate(args, report):
             up_warps=args.up_warps,
             down_warps=args.down_warps,
             unroll=args.unroll,
-            vectorized_down=args.vectorized_down,
+            vectorized_down=args.vectorized_down
+            if vectorized_down is None
+            else vectorized_down,
         )
 
     functions = {} if args.grouped_only or args.streamed_only else {"direct": direct}
@@ -168,6 +170,8 @@ def validate(args, report):
         functions["grouped"] = grouped
     if args.streamed or args.streamed_only:
         functions["streamed"] = streamed
+    if args.ablate_vector:
+        functions["vectorized"] = lambda: streamed(True)
     if not args.direct_only and not args.grouped_only and not args.streamed_only:
         functions["baseline"] = baseline
     context = (
@@ -340,6 +344,7 @@ def main():
     parser.add_argument("--down-warps", type=int, choices=[4, 8], default=4)
     parser.add_argument("--unroll", type=int, choices=[1, 2, 4, 8], default=1)
     parser.add_argument("--vectorized-down", action="store_true")
+    parser.add_argument("--ablate-vector", action="store_true")
     parser.add_argument("--block-n", type=int, choices=[16, 32, 64], default=32)
     parser.add_argument("--block-k", type=int, choices=[32, 64, 128, 256], default=64)
     parser.add_argument("--runner-direct", action="store_true")
@@ -355,6 +360,10 @@ def main():
     parser.add_argument("--port", type=int, default=29861)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.ablate_vector and (
+        not (args.streamed or args.streamed_only) or args.vectorized_down
+    ):
+        parser.error("--ablate-vector requires a non-vectorized streamed candidate")
     args.backend = "triton"
     if (
         min(
