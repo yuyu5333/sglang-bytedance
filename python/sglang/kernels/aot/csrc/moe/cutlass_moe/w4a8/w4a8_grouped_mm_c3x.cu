@@ -9,7 +9,6 @@
 
 #include "cutlass/cutlass.h"
 #include "w4a8_grouped_mm_c3x.cuh"
-#include "w4a8_dual_panel_decode.cuh"
 
 using namespace cute;
 using sgl_kernel::w4a8_detail::cutlass_3x_w4a8_group_gemm;
@@ -483,39 +482,6 @@ struct SM90_WEIGHT_SWIZZLE_MXFP4 {
         CollectiveMainloopScaleOnly,
         typename Base::CollectiveEpilogue,
         typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
-template <int K = 256, int Stages = 3, int Ctas = 1>
-struct SM90_DUAL_PANEL_DECODE_MXFP4 {
-  using Base = typename SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 64, K>>::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::MainN64;
-    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
-    using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
-        Stages, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
-    using RawMainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
-        Policy,
-        typename OldMainloop::TileShape,
-        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
-        typename OldMainloop::StrideA,
-        cutlass::float_e4m3_t,
-        typename OldMainloop::StrideB,
-        typename OldMainloop::TiledMma,
-        typename OldMainloop::GmemTiledCopyA,
-        typename OldMainloop::SmemLayoutAtomA,
-        typename OldMainloop::SmemCopyAtomA,
-        typename OldMainloop::TransformA,
-        typename OldMainloop::GmemTiledCopyB,
-        typename OldMainloop::SmemLayoutAtomB,
-        typename OldMainloop::SmemCopyAtomB,
-        typename OldMainloop::TransformB>;
-    using CollectiveMainloopScaleOnly = sgl_kernel::w4a8_detail::DualPanelDecodeMainloop<RawMainloop>;
-    using CollectiveEpilogue = typename SM90_PRECOMPUTED_MXFP4<128, 32, K>::Cutlass3xW4A8Gemm::CollectiveEpilogue;
-    using GemmKernelScaleOnly = sgl_kernel::w4a8_detail::DualPanelDecodeKernel<
-        sgl_kernel::w4a8_detail::ProblemShape, CollectiveMainloopScaleOnly,
-        CollectiveEpilogue, typename Base::PrecomputedTileScheduler, Ctas>;
     using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
   };
 };
@@ -1058,14 +1024,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
-    case 636:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_DUAL_PANEL_DECODE_MXFP4<128, 2, 2>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 637:
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
@@ -1087,7 +1045,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 636, 637, 638");
+          "608, 616, 637, 638");
   }
 }
 
