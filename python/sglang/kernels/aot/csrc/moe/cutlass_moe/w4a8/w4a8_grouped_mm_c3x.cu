@@ -411,22 +411,6 @@ struct SM90_WARP_METADATA_MXFP4 {
   };
 };
 
-template <class BaseConfig, int Registers>
-struct SM90_CONSUMER_REGISTERS_MXFP4 {
-  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    struct CollectiveMainloopScaleOnly : Base::CollectiveMainloopScaleOnly {
-      static constexpr int ConsumerRegisters = Registers;
-    };
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        CollectiveMainloopScaleOnly,
-        typename Base::CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
 template <sgl_kernel::swg_detail::ExpertRowPolicy RowPolicy>
 struct SM90_TWO_CTA_PINGPONG_MXFP4 {
   using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 64, 256, 1, 1, false>>::Cutlass3xW4A8Gemm;
@@ -1060,15 +1044,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
               56, sgl_kernel::swg_detail::ExpertRowPolicy::From49To56>>));
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N64_HEAVY56_MXFP4>));
       return;
-    case 603:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_CONSUMER_REGISTERS_MXFP4<
-              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-                  128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
-              208>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 608:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::MainN64>));
       INVOKE_GEMM_WITH_CONFIG_AS(
@@ -1107,7 +1082,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "603, 608, 616, 617, 636");
+          "608, 616, 617, 636");
   }
 }
 
