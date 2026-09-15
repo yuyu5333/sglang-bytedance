@@ -1100,19 +1100,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
-    case 643:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_SHORT_EPILOGUE_MXFP4<
-              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>>));
-      return;
-    case 644:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_SHORT_EPILOGUE_MXFP4<
-              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-                  64, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 645:
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_SHORT_EPILOGUE_MXFP4<
@@ -1150,7 +1137,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 643, 644, 645, 646, 647");
+          "608, 616, 645, 646, 647");
   }
 }
 
