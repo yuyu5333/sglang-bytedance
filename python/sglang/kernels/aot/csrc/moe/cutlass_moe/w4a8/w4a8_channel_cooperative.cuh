@@ -4,7 +4,7 @@
 
 namespace sgl_kernel::w4a8_detail {
 
-template <class Problem, class Mainloop, class Epilogue, class Scheduler, int Ctas = 2>
+template <class Problem, class Mainloop, class Epilogue, class Scheduler, int Ctas = 2, bool Overlap = false>
 struct ChannelCooperativeKernel
     : cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<Problem, Mainloop, Epilogue, Scheduler> {
   using Base = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<Problem, Mainloop, Epilogue, Scheduler>;
@@ -26,6 +26,7 @@ struct ChannelCooperativeKernel
   };
   static constexpr int SharedStorageSize = sizeof(SharedStorage);
   static_assert(Ctas == 2 || Ctas == 3);
+  static_assert(!Overlap || K == 256);
   static_assert(SharedStorageSize + 1024 <= 228 * 1024 / Ctas);
   static_assert(cute::size<0>(typename Mainloop::TileShape{}) == 128);
   static_assert(cute::size<1>(typename Mainloop::TileShape{}) == 32);
@@ -62,6 +63,7 @@ struct ChannelCooperativeKernel
     auto sB = make_tensor(make_smem_ptr(storage.tensors.mainloop.smem_B.begin()), typename Mainloop::SmemLayoutB{});
     auto b = slice.make_fragment_B(slice.partition_B(sB));
     State read{};
+    State release{};
     mma.accumulate_ = GMMA::ScaleOut::Zero;
     for (int tile = 0; tile < tiles; ++tile) {
       pipeline.consumer_wait(read);
@@ -81,9 +83,21 @@ struct ChannelCooperativeKernel
           warpgroup_wait<1>();
         }
       });
-      warpgroup_wait<0>();
-      pipeline.consumer_release(read);
+      if constexpr (Overlap) {
+        // The rolling wait has retired the preceding tile, including its B reads.
+        if (tile > 0) {
+          pipeline.consumer_release(release);
+          ++release;
+        }
+      } else {
+        warpgroup_wait<0>();
+        pipeline.consumer_release(read);
+      }
       ++read;
+    }
+    if constexpr (Overlap) {
+      warpgroup_wait<0>();
+      pipeline.consumer_release(release);
     }
   }
 
