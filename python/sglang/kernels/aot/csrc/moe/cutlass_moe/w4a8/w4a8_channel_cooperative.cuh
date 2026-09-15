@@ -4,7 +4,7 @@
 
 namespace sgl_kernel::w4a8_detail {
 
-template <class Problem, class Mainloop, class Epilogue, class Scheduler>
+template <class Problem, class Mainloop, class Epilogue, class Scheduler, int Ctas = 2>
 struct ChannelCooperativeKernel
     : cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<Problem, Mainloop, Epilogue, Scheduler> {
   using Base = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<Problem, Mainloop, Epilogue, Scheduler>;
@@ -17,7 +17,7 @@ struct ChannelCooperativeKernel
   using Utils = cutlass::gemm::collective::detail::MixedGroupedGemmInputUtils<Mainloop>;
   static constexpr int K = cute::size<2>(typename Mainloop::TileShape{});
   static constexpr int Stages = Mainloop::DispatchPolicy::Stages;
-  static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
+  static constexpr uint32_t MinBlocksPerMultiprocessor = Ctas;
   using Panel = cute::Shape<cute::_64, cute::_32, cute::Int<K>>;
 
   struct SharedStorage : Base::SharedStorage {
@@ -25,7 +25,8 @@ struct ChannelCooperativeKernel
     float token_scale[32];
   };
   static constexpr int SharedStorageSize = sizeof(SharedStorage);
-  static_assert(SharedStorageSize <= 114 * 1024);
+  static_assert(Ctas == 2 || Ctas == 3);
+  static_assert(SharedStorageSize + 1024 <= 228 * 1024 / Ctas);
   static_assert(cute::size<0>(typename Mainloop::TileShape{}) == 128);
   static_assert(cute::size<1>(typename Mainloop::TileShape{}) == 32);
   static_assert(!Mainloop::UseIndependentTmaProducers);
@@ -96,7 +97,7 @@ struct ChannelCooperativeKernel
     if (group == 0) {
       cutlass::arch::warpgroup_reg_dealloc<24>();
     } else {
-      cutlass::arch::warpgroup_reg_alloc<104>();
+      cutlass::arch::warpgroup_reg_alloc<Ctas == 2 ? 104 : 72>();
     }
     Mainloop mainloop;
     Scheduler scheduler{params.scheduler};

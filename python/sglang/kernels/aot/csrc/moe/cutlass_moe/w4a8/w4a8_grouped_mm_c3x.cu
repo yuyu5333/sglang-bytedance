@@ -487,14 +487,15 @@ struct SM90_WEIGHT_SWIZZLE_MXFP4 {
   };
 };
 
+template <int K = 256, int Stages = 3, int Ctas = 2>
 struct SM90_CHANNEL_COOPERATIVE_MXFP4 {
-  using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, 256>>::Cutlass3xW4A8Gemm;
+  using Base = typename SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, K>>::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::MainN32;
     static constexpr bool UseWarpShuffleGemm2Epilogue = true;
     using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
     using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
-        3, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
+        Stages, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
     using CollectiveMainloopScaleOnly = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
         Policy,
         typename OldMainloop::TileShape,
@@ -519,7 +520,8 @@ struct SM90_CHANNEL_COOPERATIVE_MXFP4 {
         sgl_kernel::w4a8_detail::ProblemShape,
         CollectiveMainloopScaleOnly,
         CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
+        typename Base::PrecomputedTileScheduler,
+        Ctas>;
     using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
   };
 };
@@ -1063,7 +1065,12 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 640:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CHANNEL_COOPERATIVE_MXFP4));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CHANNEL_COOPERATIVE_MXFP4<>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 641:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CHANNEL_COOPERATIVE_MXFP4<128, 4, 3>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
@@ -1074,7 +1081,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 640");
+          "608, 616, 640, 641");
   }
 }
 
