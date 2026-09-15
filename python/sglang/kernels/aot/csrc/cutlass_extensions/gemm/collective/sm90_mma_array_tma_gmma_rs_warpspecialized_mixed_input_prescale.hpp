@@ -266,7 +266,6 @@ struct CollectiveMmaArrayMixedInput<
       WeightScaleMSlicesPerFoldBlock * WeightScaleScaleGroupsPerFoldBlock;
   static constexpr int WeightScaleMBlocksPerTile = size<0>(TileShape{}) / WeightScaleLogicalMPerFoldBlock;
   static constexpr int WeightScaleKBlocksPerTile = size<2>(TileShape{}) / WeightScaleLogicalKPerFoldBlock;
-  static constexpr bool HasPartialChannelTile = size<0>(TileShape{}) == 192;
   static_assert(
       size<0>(TileShape{}) % WeightScaleLogicalMPerFoldBlock == 0,
       "Folded weight scale requires TileShapeM to be a multiple of 64.");
@@ -762,11 +761,7 @@ struct CollectiveMmaArrayMixedInput<
           implementable = false;
         } else {
           implementable = implementable && (args.chunk_size == ScalingGroupSize);
-          if constexpr (HasPartialChannelTile) {
-            implementable = implementable && scale_mn > 0 && (scale_mn % WeightScaleLogicalMPerFoldBlock == 0);
-          } else {
-            implementable = implementable && ((scale_mn % size<0>(TileShape{})) == 0);
-          }
+          implementable = implementable && ((scale_mn % size<0>(TileShape{})) == 0);
           implementable = implementable && ((K % size<2>(TileShape{})) == 0);
         }
         implementable = implementable && (args.ptr_S != nullptr);
@@ -830,11 +825,7 @@ struct CollectiveMmaArrayMixedInput<
     // Make tiled views, defer the slice
     Tensor gA_mkl = local_tile(mA_mkl, TileShape{}, make_coord(_, _, _), Step<_1, X, _1>{});  // (BLK_M,BLK_K,m,k,l)
     Tensor gB_nkl = local_tile(mB_nkl, TileShape{}, make_coord(_, _, _), Step<X, _1, _1>{});  // (BLK_N,BLK_K,n,k,l)
-    if constexpr (HasPartialChannelTile) {
-      return cute::make_tuple(gA_mkl, gB_nkl, scale_total_k128_blocks, int(M) / WeightScaleLogicalMPerFoldBlock);
-    } else {
-      return cute::make_tuple(gA_mkl, gB_nkl, scale_total_k128_blocks);
-    }
+    return cute::make_tuple(gA_mkl, gB_nkl, scale_total_k128_blocks);
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -853,7 +844,7 @@ struct CollectiveMmaArrayMixedInput<
       int thread_idx,
       uint32_t block_rank_in_cluster,
       TensorStorage& shared_tensors) {
-    static_assert(sizeof...(Ts) == (HasPartialChannelTile ? 4 : 3));
+    static_assert(sizeof...(Ts) == 3, "Fused pre-MMA scale needs three inputs (gA, gB, total_k128_blocks)");
     static_assert(sizeof...(TMs) == 2, "Only A and B tensormaps needed");
 
     Tensor sA_ = make_tensor(make_smem_ptr(shared_tensors.smem_A.begin()), SmemLayoutA{});  // (BLK_M,BLK_K,PIPE)
@@ -987,14 +978,7 @@ struct CollectiveMmaArrayMixedInput<
         return int64_t(m64_block) * int64_t(scale_total_k128_blocks) + int64_t(k128_block);
       };
       auto issue_scale_bulk_copy = [&](int local_m64_block) {
-        int const m64_block = [&] {
-          if constexpr (HasPartialChannelTile) {
-            // TMA zeros out-of-range weights; bulk scale copies still need a valid source.
-            return cute::min(scale_m64_offset + local_m64_block, get<3>(load_inputs) - 1);
-          } else {
-            return scale_m64_offset + local_m64_block;
-          }
-        }();
+        int const m64_block = scale_m64_offset + local_m64_block;
         int64_t const scale_gmem_offset =
             scale_gmem_fold_block(m64_block, scale_k128_offset) * int64_t(WeightScaleRawElementsPerFoldBlock);
         auto* scale_gmem_addr = reinterpret_cast<void const*>(scale_base + scale_gmem_offset);
