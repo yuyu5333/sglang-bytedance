@@ -215,10 +215,18 @@ struct DualPanelDecodeKernel
     int const tid = int(threadIdx.x);
     int const group = tid / 128;
     int const local_tid = tid % 128;
-    if (group == 0) {
-      cutlass::arch::warpgroup_reg_dealloc<Ctas == 1 ? 104 : 96>();
+    if constexpr (Ctas == 1) {
+      if (group == 0) {
+        cutlass::arch::warpgroup_reg_dealloc<104>();
+      } else {
+        cutlass::arch::warpgroup_reg_alloc<192>();
+      }
     } else {
-      cutlass::arch::warpgroup_reg_alloc<Ctas == 1 ? 192 : 72>();
+      if (group == 0) {
+        cutlass::arch::warpgroup_reg_alloc<96>();
+      } else {
+        cutlass::arch::warpgroup_reg_dealloc<72>();
+      }
     }
 
     using EpiLoad = typename Epilogue::LoadPipeline;
