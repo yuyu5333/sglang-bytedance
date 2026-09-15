@@ -487,6 +487,45 @@ struct SM90_WEIGHT_SWIZZLE_MXFP4 {
   };
 };
 
+template <class BaseConfig>
+struct SM90_SHORT_EPILOGUE_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    using OldEpilogue = typename Base::CollectiveEpilogue;
+    using OldPolicy = typename OldEpilogue::DispatchPolicy;
+    using Policy = cutlass::epilogue::Sm90PtrArrayTmaWarpSpecialized<
+        2, 1, OldPolicy::FragmentSize, OldPolicy::ReuseSmemC, OldPolicy::DelayTmaStore, 2>;
+    using Operation = cutlass::epilogue::fusion::PtrArrayPerTokenScaledAcc<
+        typename OldEpilogue::ElementD, float, float>;
+    using Callbacks = cutlass::epilogue::fusion::FusionCallbacks<
+        Policy, Operation, typename OldEpilogue::CtaTileMNK, typename OldEpilogue::EpilogueTile>;
+    using CollectiveEpilogue =
+        tensorrt_llm::cutlass_extensions::epilogue::collective::Sm90MixedInputPtrArrayTmaWarpSpecializedEpilogue<
+            2, 1, OldPolicy::FragmentSize, OldPolicy::ReuseSmemC, OldPolicy::DelayTmaStore, 2,
+            typename OldEpilogue::CtaTileMNK,
+            typename OldEpilogue::EpilogueTile,
+            typename OldEpilogue::ElementC,
+            typename OldEpilogue::StrideC,
+            typename OldEpilogue::ElementD,
+            typename OldEpilogue::StrideD,
+            Callbacks,
+            typename OldEpilogue::CopyOpG2S,
+            typename OldEpilogue::SmemLayoutAtomC,
+            typename OldEpilogue::CopyOpS2R,
+            typename OldEpilogue::CopyOpS2G,
+            typename OldEpilogue::SmemLayoutAtomD,
+            typename OldEpilogue::CopyOpR2S,
+            typename OldEpilogue::CopyAtomC,
+            typename OldEpilogue::CopyOpR2R>;
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        typename Base::CollectiveMainloopScaleOnly,
+        CollectiveEpilogue,
+        typename Base::PrecomputedTileScheduler>;
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <int K = 256, int Stages = 3, int Ctas = 2, bool Overlap = false>
 struct SM90_CHANNEL_COOPERATIVE_MXFP4 {
   using Base = typename SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<128, 32, K>>::Cutlass3xW4A8Gemm;
@@ -1075,6 +1114,29 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 643:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SHORT_EPILOGUE_MXFP4<
+              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<64, 32, 512, 1, 1, false>>>));
+      return;
+    case 644:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SHORT_EPILOGUE_MXFP4<
+              SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                  64, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 645:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_SHORT_EPILOGUE_MXFP4<
+              SM90_WEIGHT_SWIZZLE_MXFP4<
+                  SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                      128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                  64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
@@ -1082,7 +1144,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 641, 642");
+          "608, 616, 641, 642, 643, 644, 645");
   }
 }
 
