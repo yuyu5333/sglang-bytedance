@@ -36,6 +36,7 @@ def capture(fn):
 
 
 def validate(args, report):
+    from sglang.kernels.ops.moe.adaptive_decode import adaptive_decode
     from sglang.kernels.ops.moe.direct_decode import direct_decode
     from sglang.kernels.ops.moe.grouped_decode import grouped_decode
     from sglang.kernels.ops.moe.streamed_decode import streamed_decode
@@ -73,6 +74,8 @@ def validate(args, report):
     logits = torch.randn(args.tokens, args.experts, device="cuda")
     if args.routing == "hot":
         logits[:, args.topk :] = -100
+    if args.routing == "mixed":
+        logits[: args.tokens // 2, args.topk :] = -100
     values, ids = logits.topk(args.topk, -1)
     ids = ids.to(getattr(torch, args.ids_dtype))
     weights = values.softmax(-1)
@@ -165,14 +168,44 @@ def validate(args, report):
             else vectorized_down,
         )
 
-    functions = {} if args.grouped_only or args.streamed_only else {"direct": direct}
+    def adaptive():
+        if args.inplace:
+            x.copy_(original)
+        return adaptive_decode(
+            x,
+            quant.w13_weight,
+            quant.w2_weight,
+            ids,
+            weights,
+            b1=quant.b13,
+            b2=quant.b2,
+            scale=args.scale,
+            inplace=args.inplace,
+            min_reuse=args.min_reuse,
+            simt_n=args.simt_n,
+            group_n=args.block_n,
+            group_k=args.block_k,
+        )
+
+    functions = (
+        {}
+        if args.grouped_only or args.streamed_only or args.adaptive_only
+        else {"direct": direct}
+    )
+    if args.adaptive or args.adaptive_only:
+        functions["adaptive"] = adaptive
     if args.grouped or args.grouped_only:
         functions["grouped"] = grouped
     if args.streamed or args.streamed_only:
         functions["streamed"] = streamed
     if args.ablate_vector:
         functions["vectorized"] = lambda: streamed(True)
-    if not args.direct_only and not args.grouped_only and not args.streamed_only:
+    if not (
+        args.direct_only
+        or args.grouped_only
+        or args.streamed_only
+        or args.adaptive_only
+    ):
         functions["baseline"] = baseline
     context = (
         override_config(
@@ -222,10 +255,21 @@ def validate(args, report):
                 report["streamed_vs_baseline"] = error_metrics(
                     outputs["streamed"], outputs["baseline"], args.atol, args.rtol
                 )
+            if "adaptive" in outputs:
+                report["adaptive_vs_baseline"] = error_metrics(
+                    outputs["adaptive"], outputs["baseline"], args.atol, args.rtol
+                )
 
         graphs = {name: capture(fn) for name, fn in functions.items()}
         saved_ids, saved_weights = ids.clone(), weights.clone()
-        if args.grouped or args.grouped_only or args.streamed or args.streamed_only:
+        if (
+            args.grouped
+            or args.grouped_only
+            or args.streamed
+            or args.streamed_only
+            or args.adaptive
+            or args.adaptive_only
+        ):
             changed_ids = (
                 torch.arange(args.tokens, device="cuda")[:, None] * (args.topk + 1)
                 + torch.arange(args.topk, device="cuda")[None, :]
@@ -304,6 +348,7 @@ def validate(args, report):
                 "direct_vs_baseline",
                 "grouped_vs_baseline",
                 "streamed_vs_baseline",
+                "adaptive_vs_baseline",
             )
         ) and all(
             case["reference"]["pass"]
@@ -324,7 +369,9 @@ def main():
     parser.add_argument("--topk", type=int, default=6)
     parser.add_argument("--dtype", choices=["float16", "bfloat16"], default="bfloat16")
     parser.add_argument("--ids-dtype", choices=["int32", "int64"], default="int32")
-    parser.add_argument("--routing", choices=["uniform", "hot"], default="uniform")
+    parser.add_argument(
+        "--routing", choices=["uniform", "hot", "mixed"], default="uniform"
+    )
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--bias", action="store_true")
     parser.add_argument("--masked", action="store_true")
@@ -338,6 +385,10 @@ def main():
     parser.add_argument("--grouped-only", action="store_true")
     parser.add_argument("--streamed", action="store_true")
     parser.add_argument("--streamed-only", action="store_true")
+    parser.add_argument("--adaptive", action="store_true")
+    parser.add_argument("--adaptive-only", action="store_true")
+    parser.add_argument("--min-reuse", type=int, choices=range(1, 10), default=4)
+    parser.add_argument("--simt-n", type=int, choices=[4, 8, 16], default=16)
     parser.add_argument("--up-n", type=int, choices=[2, 4, 8, 16], default=4)
     parser.add_argument("--down-n", type=int, choices=[2, 4, 8, 16, 32, 64], default=16)
     parser.add_argument("--up-warps", type=int, choices=[4, 8], default=4)
@@ -383,7 +434,12 @@ def main():
     import triton
 
     import sglang
-    from sglang.kernels.ops.moe import direct_decode, grouped_decode, streamed_decode
+    from sglang.kernels.ops.moe import (
+        adaptive_decode,
+        direct_decode,
+        grouped_decode,
+        streamed_decode,
+    )
 
     report = {
         "args": {
@@ -408,6 +464,9 @@ def main():
         ).hexdigest(),
         "streamed_source_sha256": hashlib.sha256(
             Path(streamed_decode.__file__).read_bytes()
+        ).hexdigest(),
+        "adaptive_source_sha256": hashlib.sha256(
+            Path(adaptive_decode.__file__).read_bytes()
         ).hexdigest(),
         "scope": "Synthetic BF16/FP16 MoE; TP/EP/PP/DP=1; no checkpoint/KV/HTTP/speculative/mem-fraction workload",
         "pass": False,
