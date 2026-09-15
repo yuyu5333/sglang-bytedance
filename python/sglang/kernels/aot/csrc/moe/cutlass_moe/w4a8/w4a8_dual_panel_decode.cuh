@@ -195,7 +195,7 @@ struct DualPanelDecodeMainloop : RawMainloop {
   }
 };
 
-template <class ProblemShape, class Mainloop, class Epilogue, class Scheduler>
+template <class ProblemShape, class Mainloop, class Epilogue, class Scheduler, int Ctas = 1>
 struct DualPanelDecodeKernel
     : cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<ProblemShape, Mainloop, Epilogue, Scheduler> {
   using Base = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<ProblemShape, Mainloop, Epilogue, Scheduler>;
@@ -204,7 +204,9 @@ struct DualPanelDecodeKernel
   using TileShape = typename Mainloop::TileShape;
   using PanelShape = typename Mainloop::PanelShape;
   using TiledMma = typename Mainloop::TiledMma;
-  static_assert(sizeof(SharedStorage) <= 227 * 1024);
+  static constexpr uint32_t MinBlocksPerMultiprocessor = Ctas;
+  static_assert(Ctas == 1 || Ctas == 2);
+  static_assert(sizeof(SharedStorage) <= (Ctas == 1 ? 227 : 114) * 1024);
 
   CUTLASS_DEVICE void operator()(Params const& params, char* smem_buf) {
 #if defined(__CUDA_ARCH_FEAT_SM90_ALL)
@@ -214,9 +216,9 @@ struct DualPanelDecodeKernel
     int const group = tid / 128;
     int const local_tid = tid % 128;
     if (group == 0) {
-      cutlass::arch::warpgroup_reg_dealloc<104>();
+      cutlass::arch::warpgroup_reg_dealloc<Ctas == 1 ? 104 : 96>();
     } else {
-      cutlass::arch::warpgroup_reg_alloc<192>();
+      cutlass::arch::warpgroup_reg_alloc<Ctas == 1 ? 192 : 72>();
     }
 
     using EpiLoad = typename Epilogue::LoadPipeline;
