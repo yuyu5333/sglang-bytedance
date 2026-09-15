@@ -143,7 +143,7 @@ struct ChannelCooperativeKernel
         Mma mma;
         auto accum = partition_fragment_C(mma, take<0, 2>(Panel{}));
         consume(pipeline, tiles, group - 1, accum, storage);
-        auto coords = mma.get_thread_slice(local_tid).partition_C(make_identity_tensor(Int<64>{}, Int<32>{}));
+        auto coords = mma.get_thread_slice(local_tid).partition_C(make_identity_tensor(make_shape(Int<64>{}, Int<32>{})));
         cutlass::NumericConverter<ElementD, float> convert;
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(accum); ++i) {
