@@ -20,7 +20,16 @@ struct ChannelCooperativeKernel
   static constexpr uint32_t MinBlocksPerMultiprocessor = Ctas;
   using Panel = cute::Shape<cute::_64, cute::_32, cute::Int<K>>;
 
-  struct SharedStorage : Base::SharedStorage {
+  struct SharedStorage {
+    struct {
+      typename Mainloop::TensorStorage mainloop;
+    } tensors;
+    struct {
+      alignas(16) typename Mainloop::PipelineStorage mainloop;
+    } pipelines;
+    struct {
+      typename Mainloop::TensorMapStorage mainloop;
+    } tensormaps;
     alignas(16) ElementD output[128 * 32];
     float token_scale[32];
   };
