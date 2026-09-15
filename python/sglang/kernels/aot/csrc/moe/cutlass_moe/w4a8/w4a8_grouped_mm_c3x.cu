@@ -1064,11 +1064,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
-    case 640:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_CHANNEL_COOPERATIVE_MXFP4<>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 641:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_CHANNEL_COOPERATIVE_MXFP4<128, 4, 3>));
       INVOKE_GEMM_WITH_CONFIG_AS(
@@ -1081,7 +1076,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 640, 641");
+          "608, 616, 641");
   }
 }
 
