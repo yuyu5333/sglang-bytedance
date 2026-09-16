@@ -525,8 +525,9 @@ struct SM90_SHORT_EPILOGUE_MXFP4 {
   };
 };
 
-template <class BaseScheduler, int TileM, int TileN>
+template <class BaseScheduler, int TileM, int TileN, int TokenGroup = 0>
 struct SM90_TOKEN_CONTIGUOUS_SCHEDULER : BaseScheduler {
+  static_assert(TokenGroup == 0 || TokenGroup == 2 || TokenGroup == 4);
   using Params = typename BaseScheduler::Params;
   using Arguments = typename BaseScheduler::Arguments;
   using WorkTileInfo = typename BaseScheduler::WorkTileInfo;
@@ -534,6 +535,7 @@ struct SM90_TOKEN_CONTIGUOUS_SCHEDULER : BaseScheduler {
 
   int cached_group = -1;
   int channel_tiles = 0;
+  int token_count = 0;
   cutlass::FastDivmod token_tiles;
 
   CUTLASS_DEVICE explicit SM90_TOKEN_CONTIGUOUS_SCHEDULER(Params const& params) : BaseScheduler(params) {}
@@ -566,11 +568,31 @@ struct SM90_TOKEN_CONTIGUOUS_SCHEDULER : BaseScheduler {
       channel_tiles = (channels + TileM - 1) / TileM;
       // The caller uses MainN32/MainN64; the short tails remain separate.
       int const count = rows / TileN + int(rows % TileN > TileN - 16);
-      token_tiles = cutlass::FastDivmod(count);
+      if constexpr (TokenGroup == 0) {
+        token_tiles = cutlass::FastDivmod(count);
+      } else {
+        token_count = count;
+        int const remainder = count % TokenGroup;
+        token_tiles = cutlass::FastDivmod(remainder == 0 ? TokenGroup : remainder);
+      }
       cached_group = work.L_idx;
     }
-    int const linear = work.N_idx * channel_tiles + work.M_idx;
-    token_tiles(work.M_idx, work.N_idx, linear);
+    if constexpr (TokenGroup == 0) {
+      int const linear = work.N_idx * channel_tiles + work.M_idx;
+      token_tiles(work.M_idx, work.N_idx, linear);
+    } else {
+      // Transpose only inside each token band. The incomplete final band
+      // uses its actual width, so no tiles are duplicated or padded.
+      int const first_token = work.N_idx / TokenGroup * TokenGroup;
+      int const linear = (work.N_idx % TokenGroup) * channel_tiles + work.M_idx;
+      if (first_token + TokenGroup <= token_count) {
+        work.M_idx = linear / TokenGroup;
+        work.N_idx = first_token + linear % TokenGroup;
+      } else {
+        token_tiles(work.M_idx, work.N_idx, linear);
+        work.N_idx += first_token;
+      }
+    }
     return work;
   }
 
@@ -585,7 +607,7 @@ struct SM90_TOKEN_CONTIGUOUS_SCHEDULER : BaseScheduler {
   }
 };
 
-template <class BaseConfig>
+template <class BaseConfig, int TokenGroup = 0>
 struct SM90_TOKEN_CONTIGUOUS_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
@@ -594,7 +616,7 @@ struct SM90_TOKEN_CONTIGUOUS_MXFP4 {
     using Mainloop = typename Base::CollectiveMainloopScaleOnly;
     using Tile = typename Mainloop::TileShape;
     using PrecomputedTileScheduler = SM90_TOKEN_CONTIGUOUS_SCHEDULER<
-        typename Base::PrecomputedTileScheduler, cute::size<0>(Tile{}), cute::size<1>(Tile{})>;
+        typename Base::PrecomputedTileScheduler, cute::size<0>(Tile{}), cute::size<1>(Tile{}), TokenGroup>;
     using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
         sgl_kernel::w4a8_detail::ProblemShape,
         Mainloop,
@@ -1165,6 +1187,52 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 651:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_WEIGHT_SWIZZLE_MXFP4<
+                  SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                      128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                  64>,
+              2>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 652:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_SHORT_EPILOGUE_MXFP4<
+                  SM90_WEIGHT_SWIZZLE_MXFP4<
+                      SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                          128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                      64>>,
+              2>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 653:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_WEIGHT_SWIZZLE_MXFP4<
+                  SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                      128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                  64>,
+              4>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 654:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_SHORT_EPILOGUE_MXFP4<
+                  SM90_WEIGHT_SWIZZLE_MXFP4<
+                      SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                          128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                      64>>,
+              4>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
@@ -1172,7 +1240,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 645, 649");
+          "608, 616, 645, 649, 651, 652, 653, 654");
   }
 }
 
