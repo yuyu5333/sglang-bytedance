@@ -2,8 +2,8 @@
 # DeepSeek v4.1 kernels plus the SM90 mixed packed-Main reader.
 FetchContent_Declare(
     repo-flashmla
-    URL      https://${GITHUB_ARTIFACTORY}/yuyu5333/FlashMLA/archive/d49edb1f7dcee0b929dbcf62e3a6149639b14507.tar.gz
-    URL_HASH SHA256=1f96d8e884d0fec7fee8f33b4a0292969e0b1f94a0d664a6d9ce1a1b387aa959
+    URL      https://${GITHUB_ARTIFACTORY}/yuyu5333/FlashMLA/archive/4960de014f73eb4475b5302b7c36ec2083a01d4a.tar.gz
+    URL_HASH SHA256=c8186f3acc0fe1d8ff3ba4fb7c1003714dab084cf24e6ce5303af807e144f18f
 )
 FetchContent_Populate(repo-flashmla)
 
