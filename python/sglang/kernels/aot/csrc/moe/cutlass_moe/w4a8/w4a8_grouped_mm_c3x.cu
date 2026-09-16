@@ -525,44 +525,6 @@ struct SM90_SHORT_EPILOGUE_MXFP4 {
   };
 };
 
-template <class BaseConfig>
-struct SM90_FULL_TILE_EPILOGUE_MXFP4 {
-  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
-  struct Cutlass3xW4A8Gemm : Base {
-    using Mainloop = typename Base::CollectiveMainloopScaleOnly;
-    using Tile = typename Mainloop::TileShape;
-    static_assert(cute::size<0>(Tile{}) == 64);
-    using EpiTile = cute::Shape<decltype(cute::size<0>(Tile{})), decltype(cute::size<1>(Tile{}))>;
-    using Operation = cutlass::epilogue::fusion::PtrArrayPerTokenScaledAcc<
-        sgl_kernel::w4a8_detail::ElementD, float, float>;
-    using CollectiveEpilogue =
-        typename tensorrt_llm::cutlass_extensions::epilogue::collective::MixedInputSm90TmaEpilogueBuilder<
-            cutlass::arch::Sm90,
-            cutlass::arch::OpClassTensorOp,
-            Tile,
-            typename Mainloop::DispatchPolicy::ClusterShape,
-            EpiTile,
-            float,
-            float,
-            sgl_kernel::w4a8_detail::ElementC,
-            sgl_kernel::w4a8_detail::LayoutC_Transpose*,
-            8,
-            sgl_kernel::w4a8_detail::ElementD,
-            sgl_kernel::w4a8_detail::LayoutD_Transpose*,
-            8,
-            cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-            Operation>::CollectiveOp;
-    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
-        sgl_kernel::w4a8_detail::ProblemShape,
-        Mainloop,
-        CollectiveEpilogue,
-        typename Base::PrecomputedTileScheduler>;
-    static_assert(sizeof(typename GemmKernelScaleOnly::SharedStorage) + 1024 <=
-                  228 * 1024 / GemmKernelScaleOnly::MinBlocksPerMultiprocessor);
-    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
-  };
-};
-
 template <class BaseScheduler, int TileM, int TileN>
 struct SM90_TOKEN_CONTIGUOUS_SCHEDULER : BaseScheduler {
   using Params = typename BaseScheduler::Params;
@@ -1192,16 +1154,6 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
-    case 647:
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_FULL_TILE_EPILOGUE_MXFP4<
-              SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::MainN64>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
-              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
-      INVOKE_GEMM_WITH_CONFIG_AS(
-          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
-      return;
     case 648:
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_TOKEN_CONTIGUOUS_MXFP4<
@@ -1240,7 +1192,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 645, 647, 648, 649, 650");
+          "608, 616, 645, 648, 649, 650");
   }
 }
 
