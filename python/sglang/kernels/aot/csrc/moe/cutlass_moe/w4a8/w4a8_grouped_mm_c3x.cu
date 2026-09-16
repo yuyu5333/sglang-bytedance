@@ -563,6 +563,87 @@ struct SM90_FULL_TILE_EPILOGUE_MXFP4 {
   };
 };
 
+template <class BaseScheduler, int TileM, int TileN>
+struct SM90_TOKEN_CONTIGUOUS_SCHEDULER : BaseScheduler {
+  using Params = typename BaseScheduler::Params;
+  using Arguments = typename BaseScheduler::Arguments;
+  using WorkTileInfo = typename BaseScheduler::WorkTileInfo;
+  using GroupProblemShape = sgl_kernel::w4a8_detail::ProblemShape;
+
+  int cached_group = -1;
+  int channel_tiles = 0;
+  cutlass::FastDivmod token_tiles;
+
+  CUTLASS_DEVICE explicit SM90_TOKEN_CONTIGUOUS_SCHEDULER(Params const& params) : BaseScheduler(params) {}
+
+  template <class TileShape, class ClusterShape>
+  static Params to_underlying_arguments(
+      GroupProblemShape problem_shapes,
+      TileShape tile_shape,
+      ClusterShape cluster_shape,
+      cutlass::KernelHardwareInfo const& hw_info,
+      Arguments const& arguments,
+      void* workspace = nullptr,
+      uint32_t epilogue_subtile = 1,
+      uint32_t ktile_start_alignment_count = 1) {
+    auto params = BaseScheduler::to_underlying_arguments(
+        problem_shapes, tile_shape, cluster_shape, hw_info, arguments,
+        workspace, epilogue_subtile, ktile_start_alignment_count);
+    params.problem_shapes_ = problem_shapes;
+    return params;
+  }
+
+  CUTLASS_DEVICE WorkTileInfo reorder(WorkTileInfo work) {
+    if (!work.is_valid()) {
+      return work;
+    }
+    if (cached_group != work.L_idx) {
+      auto problem = this->scheduler_params.problem_shapes_.get_problem_shape(work.L_idx);
+      int const channels = cute::get<0>(problem);
+      int const rows = cute::get<1>(problem);
+      channel_tiles = (channels + TileM - 1) / TileM;
+      // The caller uses MainN32/MainN64; the short tails remain separate.
+      int const count = rows / TileN + int(rows % TileN > TileN - 16);
+      token_tiles = cutlass::FastDivmod(count);
+      cached_group = work.L_idx;
+    }
+    int const linear = work.N_idx * channel_tiles + work.M_idx;
+    token_tiles(work.M_idx, work.N_idx, linear);
+    return work;
+  }
+
+  template <class ClusterShape>
+  CUTLASS_DEVICE WorkTileInfo initial_work_tile_info(ClusterShape cluster) {
+    return reorder(BaseScheduler::initial_work_tile_info(cluster));
+  }
+
+  CUTLASS_DEVICE auto fetch_next_work(WorkTileInfo work) {
+    auto [next, increment] = BaseScheduler::fetch_next_work(work);
+    return cute::make_tuple(reorder(next), increment);
+  }
+};
+
+template <class BaseConfig>
+struct SM90_TOKEN_CONTIGUOUS_MXFP4 {
+  using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static_assert(Base::ExpertRows == sgl_kernel::swg_detail::ExpertRowPolicy::MainN32 ||
+                  Base::ExpertRows == sgl_kernel::swg_detail::ExpertRowPolicy::MainN64);
+    using Mainloop = typename Base::CollectiveMainloopScaleOnly;
+    using Tile = typename Mainloop::TileShape;
+    using PrecomputedTileScheduler = SM90_TOKEN_CONTIGUOUS_SCHEDULER<
+        typename Base::PrecomputedTileScheduler, cute::size<0>(Tile{}), cute::size<1>(Tile{})>;
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        Mainloop,
+        typename Base::CollectiveEpilogue,
+        PrecomputedTileScheduler>;
+    static_assert(sizeof(typename GemmKernelScaleOnly::SharedStorage) + 1024 <=
+                  228 * 1024 / GemmKernelScaleOnly::MinBlocksPerMultiprocessor);
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <typename Config>
 inline void invoke_gemm(
     torch::Tensor& d_tensors,
@@ -1121,6 +1202,37 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 648:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_WEIGHT_SWIZZLE_MXFP4<
+                  SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                      128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                  64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 649:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_SHORT_EPILOGUE_MXFP4<
+                  SM90_WEIGHT_SWIZZLE_MXFP4<
+                      SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+                          128, 32, 512, 1, 1, true, sgl_kernel::swg_detail::ExpertRowPolicy::MainN32>, 2>,
+                      64>>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 650:
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TOKEN_CONTIGUOUS_MXFP4<
+              SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::MainN64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
@@ -1128,7 +1240,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 645, 647");
+          "608, 616, 645, 647, 648, 649, 650");
   }
 }
 
