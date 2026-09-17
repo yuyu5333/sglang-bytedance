@@ -1363,7 +1363,9 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
 
     @property
     def has_kv_region_layouts(self) -> bool:
-        return any(getattr(self, "sources_by_ratio", {}).get(ratio) for ratio in (1, 2))
+        # All target PP stages must use the same protocol, including an SWA-only
+        # stage that contributes an empty region list. Drafts have all-zero ratios.
+        return any(ratio in (1, 2) for ratio in self.compression_ratios)
 
     def get_kv_transfer_regions(self) -> List[KVTransferRegion]:
         """FULL-page regions in PD registration order, shared with HiCache."""

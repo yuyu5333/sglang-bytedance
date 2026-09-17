@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from test_packed_main_kv_staging import make_caches
 
 from sglang.kernels.ops.attention.dsv4.dequant_k_cache import (
     dequantize_k_cache_paged,
@@ -11,16 +12,14 @@ from sglang.kernels.ops.attention.dsv4.dequant_k_cache import (
 )
 from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
 from sglang.srt.layers.attention.deepseek_v4_backend import (
-    DSV4AttnMetadata,
     DeepseekV4AttnBackend,
+    DSV4AttnMetadata,
 )
 from sglang.srt.layers.attention.dsv4.sparse_prefill_utils import SparsePrefillWorkspace
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.mem_cache.dsv41_staging_workspace import MainKVStagingWorkspace
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.test.ci.ci_register import register_cuda_ci
-
-from test_packed_main_kv_staging import make_caches
 
 register_cuda_ci(est_time=60, stage="base-b-kernel-unit", runner_config="1-gpu-large")
 pytestmark = pytest.mark.skipif(
