@@ -42,6 +42,8 @@ struct PrefillServerInfo {
     kv_cache_dtype: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dsv41_spec_layout: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_region_layouts_by_pp: Option<HashMap<String, Option<serde_json::Value>>>,
     follow_bootstrap_room: bool,
     enable_dsa_cache_layer_split: bool,
     prefill_http_port: Option<i64>,
@@ -109,6 +111,7 @@ struct Topology {
     page_size: Option<i64>,
     kv_cache_dtype: Option<String>,
     dsv41_spec_layout: Option<serde_json::Value>,
+    kv_region_layouts_by_pp: HashMap<String, Option<serde_json::Value>>,
     follow_bootstrap_room: Option<bool>,
     enable_dsa_cache_layer_split: Option<bool>,
     prefill_http_port: Option<i64>,
@@ -158,6 +161,8 @@ struct Route {
     kv_cache_dtype: Option<String>,
     #[serde(default)]
     dsv41_spec_layout: Option<serde_json::Value>,
+    #[serde(default)]
+    kv_region_layouts: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "parse_int_opt")]
     prefill_http_port: Option<i64>,
     #[serde(default)]
@@ -167,6 +172,15 @@ struct Route {
 }
 
 async fn route_put(State(state): State<Arc<Registry>>, Json(body): Json<Route>) -> Response {
+    // Keep Python-owned descriptors opaque here; workers validate the schema
+    // before registration and again before accepting a peer's transfer buffers.
+    if body
+        .kv_region_layouts
+        .as_ref()
+        .is_some_and(|regions| !regions.is_array())
+    {
+        return json_error(StatusCode::BAD_REQUEST, "KV region layouts must be a list");
+    }
     // `system_dp_size == 1` → attention-dp topology; else system-dp topology.
     let dp_size = if body.system_dp_size == 1 {
         body.attn_dp_size
@@ -182,13 +196,25 @@ async fn route_put(State(state): State<Arc<Registry>>, Json(body): Json<Route>) 
     // Copy-on-write update. `rcu` may re-run the closure under write
     // contention, so it only reads `body` and clones what it stores.
     let mut layout_mismatch = false;
+    let mut region_mismatch = false;
     state.topology.rcu(|current| {
         let mut topo = (**current).clone();
         layout_mismatch =
             topo.registered_count > 0 && topo.dsv41_spec_layout != body.dsv41_spec_layout;
-        if layout_mismatch {
+        let stage = body.pp_rank.to_string();
+        region_mismatch = topo
+            .kv_region_layouts_by_pp
+            .get(&stage)
+            .is_some_and(|prior| prior != &body.kv_region_layouts)
+            || topo
+                .kv_region_layouts_by_pp
+                .values()
+                .any(|prior| prior.is_some() != body.kv_region_layouts.is_some());
+        if layout_mismatch || region_mismatch {
             return topo;
         }
+        topo.kv_region_layouts_by_pp
+            .insert(stage, body.kv_region_layouts.clone());
         topo.dsv41_spec_layout = body.dsv41_spec_layout.clone();
         topo.attn_tp_size.get_or_insert(body.attn_tp_size);
         topo.attn_cp_size.get_or_insert(body.attn_cp_size);
@@ -224,6 +250,12 @@ async fn route_put(State(state): State<Arc<Registry>>, Json(body): Json<Route>) 
         return json_error(
             StatusCode::BAD_REQUEST,
             "DeepSeek-V4.1 DSpark PD layout differs across prefill ranks",
+        );
+    }
+    if region_mismatch {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "KV region layout differs across prefill ranks",
         );
     }
 
@@ -282,6 +314,11 @@ async fn route_get(
             page_size: topo.page_size,
             kv_cache_dtype: topo.kv_cache_dtype.clone(),
             dsv41_spec_layout: topo.dsv41_spec_layout.clone(),
+            kv_region_layouts_by_pp: topo
+                .kv_region_layouts_by_pp
+                .values()
+                .any(Option::is_some)
+                .then(|| topo.kv_region_layouts_by_pp.clone()),
             follow_bootstrap_room: topo.follow_bootstrap_room.unwrap_or(true),
             enable_dsa_cache_layer_split: topo.enable_dsa_cache_layer_split.unwrap_or(false),
             prefill_http_port: topo.prefill_http_port,

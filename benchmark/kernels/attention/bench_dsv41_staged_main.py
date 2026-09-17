@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 import torch
-
 from sgl_kernel.flash_mla import (
     flash_mla_with_kvcache,
     flash_mla_with_mixed_kvcache,
@@ -54,18 +53,29 @@ def v4_cache(values, page_slots):
     )
 
 
-def measure(fn, iterations):
+def measure(fn, iterations, memory_only):
     for _ in range(3):
         fn()
     torch.cuda.synchronize()
-    # Single invocation graph: resident output, scheduler and kernel scratch.
+    gc.collect()
+    torch.cuda.empty_cache()
+    # Include private-pool reservations: allocated bytes alone miss scratch
+    # whose Python Tensor has died but whose address is still held by the graph.
     before = torch.cuda.memory_allocated()
+    reserved_before = torch.cuda.memory_reserved()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = fn()
     resident = torch.cuda.memory_allocated() - before
+    reserved = torch.cuda.memory_reserved() - reserved_before
+    result = {
+        "single_graph_resident_bytes": resident,
+        "single_graph_reserved_bytes": reserved,
+    }
     del output, graph
     gc.collect()
+    if memory_only:
+        return result
     # One sample, bounded work. Capture amortizes Python launch overhead.
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -78,14 +88,13 @@ def measure(fn, iterations):
     graph.replay()
     end.record()
     end.synchronize()
-    return {
+    return result | {
         "us": start.elapsed_time(end) * 1000 / iterations,
-        "single_graph_resident_bytes": resident,
         "samples": 1,
     }
 
 
-def run_case(rows, heads, page_slots, slots, topk, iterations):
+def run_case(rows, heads, page_slots, slots, topk, iterations, memory_only):
     torch.manual_seed(20260917 + rows + heads + page_slots)
     values = (
         torch.randn(
@@ -115,12 +124,12 @@ def run_case(rows, heads, page_slots, slots, topk, iterations):
     backend.softmax_scale = 512**-0.5
     legacy_meta = get_mla_metadata()[0]
     direct_meta = get_mla_metadata()[0]
-    common = dict(
-        q=q,
-        head_dim_v=512,
-        softmax_scale=512**-0.5,
-        attn_sink=sink,
-    )
+    common = {
+        "q": q,
+        "head_dim_v": 512,
+        "softmax_scale": 512**-0.5,
+        "attn_sink": sink,
+    }
 
     def attention(cache, indices, metadata):
         return flash_mla_with_kvcache(
@@ -202,7 +211,7 @@ def run_case(rows, heads, page_slots, slots, topk, iterations):
     if (heads == 128) ^ (page_slots == 256):
         fns.reverse()
     for name, fn in fns:
-        result[name] = measure(fn, iterations)
+        result[name] = measure(fn, iterations, memory_only)
     return result
 
 
@@ -212,6 +221,7 @@ def main():
     parser.add_argument("--slots", type=int, default=65536)
     parser.add_argument("--topk", type=int, default=1024)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument("--memory-only", action="store_true")
     args = parser.parse_args()
     assert torch.cuda.get_device_capability()[0] == 9
     assert args.slots % 256 == 0 and args.topk % 64 == 0
@@ -224,13 +234,20 @@ def main():
         ).strip(),
         "iterations": args.iterations,
         "repeat": 1,
+        "memory_only": args.memory_only,
         "cases": [],
     }
     for rows in (2, 32):
         for heads in (64, 128):
             for page_slots in (128, 256):
                 case = run_case(
-                    rows, heads, page_slots, args.slots, args.topk, args.iterations
+                    rows,
+                    heads,
+                    page_slots,
+                    args.slots,
+                    args.topk,
+                    args.iterations,
+                    args.memory_only,
                 )
                 result["cases"].append(case)
                 print(json.dumps(case), flush=True)
