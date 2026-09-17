@@ -77,7 +77,7 @@ class TestDSV41PackedMainKVLayout(CustomTestCase):
         self.assertEqual(args.dsv41_main_kv_layout, "auto")
         self.assertEqual(args.dsv41_main_kv_consumer, "auto")
 
-    def test_packed_layout_requires_explicit_direct_consumer(self):
+    def test_packed_layout_requires_explicit_consumer(self):
         from sglang.srt.arg_groups.deepseek_v4_hook import (
             validate_deepseek_v41_features,
         )
@@ -101,6 +101,44 @@ class TestDSV41PackedMainKVLayout(CustomTestCase):
             self.assertRaisesRegex(ValueError, "currently requires.*direct"),
         ):
             validate_deepseek_v41_features(object())
+
+    def test_staged_consumer_gate(self):
+        from sglang.srt.arg_groups.deepseek_v4_hook import (
+            validate_deepseek_v41_features,
+        )
+        from sglang.srt.model_executor.cuda_graph_config import Backend
+
+        config = SimpleNamespace(
+            dsv41_main_kv_layout="packed_fp4", dsv41_main_kv_consumer="staged",
+            dsv4_attn_backend="flashmla", enable_encoder_swa_bounded_replay=False,
+            enable_decoder_swa_bounded_replay=False, speculative_algorithm=None,
+            enable_hisparse=False, enable_two_batch_overlap=False, pp_size=1,
+            disaggregation_mode="null",
+            cuda_graph_config=SimpleNamespace(
+                prefill=SimpleNamespace(backend=Backend.DISABLED, max_seq_len=None)
+            ),
+        )
+        model = SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41"))
+        platform = SimpleNamespace(is_sm90=True)
+        prefix = "sglang.srt.arg_groups.deepseek_v4_hook."
+        with (
+            patch(prefix + "resolving_view", return_value=config),
+            patch(prefix + "model_config_of", return_value=model),
+            patch(prefix + "get_platform", return_value=platform),
+        ):
+            validate_deepseek_v41_features(object())
+            for layout in ("auto", "flashmla_fp8"):
+                config.dsv41_main_kv_layout = layout
+                with self.subTest(layout=layout), self.assertRaisesRegex(ValueError, "requires"):
+                    validate_deepseek_v41_features(object())
+            config.dsv41_main_kv_layout = "packed_fp4"
+            platform.is_sm90 = False
+            with self.assertRaisesRegex(ValueError, "requires SM90"):
+                validate_deepseek_v41_features(object())
+            platform.is_sm90 = True
+            config.dsv4_attn_backend = "trtllm"
+            with self.assertRaisesRegex(ValueError, "FlashMLA"):
+                validate_deepseek_v41_features(object())
 
     def test_direct_consumer_rejects_non_sm90(self):
         from sglang.srt.arg_groups.deepseek_v4_hook import (
