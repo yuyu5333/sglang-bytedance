@@ -164,7 +164,7 @@ def test_prefill_attention_packed_matches_legacy(page_slots):
     cache = SparsePrefillChunkCache.build(
         seq_lens=lens, extend_seq_lens=extend, query_lens=extend,
         query_pos=positions, req_pool_indices=torch.tensor([0, 1], **ints),
-        req_to_token=mapping[None].repeat(2, 1), full_to_swa=mapping,
+        req_to_token=mapping[None].repeat(2, 1), full_to_swa=mapping.long(),
         swa_window_size=128, swa_page_size=128, num_qo_tokens=4,
         max_seq_len=224, total_swa=258,
     )
