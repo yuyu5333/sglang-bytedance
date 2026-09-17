@@ -57,7 +57,12 @@ def test_packed_full_page_roundtrip(layout, io):
         assembler, "get_memory", return_value=SimpleNamespace(hicache_mem_layout=layout)
     ):
         entries = assembler._dsv4_low_ratio_entries(pool, 256, 3, 5)
-    assert len(entries) == 6  # C1/C2 Main, index payload and index scales
+    assert len(entries) == 4  # CUDA C1/C2 Main and fused FP4 indexer pages
+    assert {
+        r.layout.layout_id
+        for r in pool.get_kv_transfer_regions()
+        if r.layout.kind == "indexer"
+    } == {"indexer_fp4_fused_block32_v1"}
     region_ptrs = {r.buffer.data_ptr() for r in pool.get_kv_transfer_regions()}
     host_ids = torch.arange(256, device="cuda", dtype=torch.int64)
     source_ids = torch.arange(256, 512, device="cuda", dtype=torch.int64)

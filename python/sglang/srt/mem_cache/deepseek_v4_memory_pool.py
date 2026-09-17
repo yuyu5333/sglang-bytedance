@@ -32,8 +32,8 @@ from sglang.srt.mem_cache.dsv41_main_kv_layout import (
     make_dsv41_packed_main_kv_spec,
     validate_dsv41_packed_main_kv_spec,
 )
-from sglang.srt.mem_cache.memory_pool import KVCache
 from sglang.srt.mem_cache.kv_region_layout import KVRegionLayout, KVTransferRegion
+from sglang.srt.mem_cache.memory_pool import KVCache
 from sglang.srt.runtime_context import get_exec, get_spec
 from sglang.srt.utils import ceil_div, is_hip
 
@@ -1415,7 +1415,9 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
                 append(
                     indexer.index_k_with_scale_buffer,
                     "indexer",
-                    "indexer_fp8_v1",
+                    "indexer_fp4_fused_block32_v1"
+                    if indexer.use_fp4_indexer
+                    else "indexer_fp8_v1",
                     pages_per_full,
                 )
             else:
