@@ -145,3 +145,45 @@ def test_runtime_graph_replay_with_mutated_main():
         graph.replay()
         torch.testing.assert_close(output, reference(), atol=0.002, rtol=0.02)
         assert ptr == backend.main_kv_staging_workspace.pages.data_ptr()
+
+
+@pytest.mark.parametrize("page_slots", [128, 256])
+def test_prefill_attention_packed_matches_legacy(page_slots):
+    from sglang.srt.layers.attention.dsv4.sparse_prefill_utils import (
+        SparsePrefillChunkCache,
+    )
+
+    backend, view, legacy, _, _, _, _ = make_case(2, 64, page_slots)
+    pool = backend.token_to_kv_pool
+    ratio = 256 // page_slots
+    ints = dict(device="cuda", dtype=torch.int32)
+    lens = torch.tensor([192, 224], **ints)
+    extend = torch.tensor([2, 2], **ints)
+    positions = torch.tensor([190, 191, 222, 223], **ints)
+    mapping = torch.arange(256, **ints)
+    cache = SparsePrefillChunkCache.build(
+        seq_lens=lens, extend_seq_lens=extend, query_lens=extend,
+        query_pos=positions, req_pool_indices=torch.tensor([0, 1], **ints),
+        req_to_token=mapping[None].repeat(2, 1), full_to_swa=mapping,
+        swa_window_size=128, swa_page_size=128, num_qo_tokens=4,
+        max_seq_len=224, total_swa=258,
+    )
+    core = backend.forward_metadata.core_attn_metadata
+    core.page_table = torch.zeros((4, 1), **ints)
+    raw = torch.arange(8, 72, **ints)[None].repeat(4, 1)
+    raw[:, 3] = -1
+    setattr(core, f"c{ratio}_sparse_raw_indices", raw)
+    backend.forward_metadata.sparse_prefill_cache = cache
+    q = torch.randn((4, 1, 64, 512), device="cuda", dtype=torch.bfloat16) * 0.1
+    sink = torch.zeros(64, device="cuda", dtype=torch.float32)
+    for method in (backend._forward_prefill_sparse, backend._forward_prefill_sparse_q8kv8):
+        kwargs = dict(
+            q=q, layer_id=0, compress_ratio=ratio, forward_batch=None,
+            token_to_kv_pool=pool, core_attn_metadata=core, attn_sink=sink,
+        )
+        pool.get_extra_key_layout = lambda _: view.spec.layout_id
+        actual = method(**kwargs)
+        pool.get_extra_key_layout = lambda _: KVLayout.V4
+        expected = method(**kwargs)
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
