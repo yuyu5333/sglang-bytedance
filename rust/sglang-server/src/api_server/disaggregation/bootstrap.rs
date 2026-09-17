@@ -564,6 +564,68 @@ mod tests {
         assert_eq!(info["dsv41_spec_layout"], layout);
     }
 
+    fn packed_regions(source: i64) -> serde_json::Value {
+        serde_json::json!([{
+            "schema_version": 1,
+            "kind": "kv",
+            "layout_id": "dsv41_main_kv_e2m1_block16_rope_bf16_v1",
+            "compression_ratio": 2,
+            "global_page_size": 256,
+            "page_slots": 128,
+            "page_bytes": 49152,
+            "source_layer_id": source,
+        }])
+    }
+
+    /// Python workers need the union of PP-local sources to validate the D stage.
+    /// Losing the field at this alternate bootstrap entry rejects compatible peers.
+    #[test]
+    fn kv_regions_preserve_pp_sources_and_reject_rank_mismatch() {
+        let (_rt, addr) = start_on_free_port();
+        for pp in 0..2 {
+            let body = put_route(serde_json::json!({
+                "pp_size": 2, "pp_rank": pp, "kv_region_layouts": packed_regions(pp * 20),
+            }));
+            assert_eq!(request(addr, "PUT", "/route", Some(&body)).0, 200);
+        }
+        let (status, body) = request(addr, "GET", SENTINEL, None);
+        assert_eq!(status, 200);
+        let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let expected = serde_json::json!({"0": packed_regions(0), "1": packed_regions(20)});
+        assert_eq!(info["kv_region_layouts_by_pp"], expected);
+
+        for regions in [serde_json::Value::Null, packed_regions(21)] {
+            let body = put_route(serde_json::json!({
+                "pp_size": 2, "pp_rank": 1, "kv_region_layouts": regions,
+            }));
+            assert_eq!(request(addr, "PUT", "/route", Some(&body)).0, 400);
+        }
+        let (_, body) = request(addr, "GET", SENTINEL, None);
+        let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(info["kv_region_layouts_by_pp"], expected);
+    }
+
+    #[test]
+    fn kv_regions_reject_mixed_prefill_registration() {
+        for first_packed in [false, true] {
+            let (_rt, addr) = start_on_free_port();
+            for pp in 0..2 {
+                let regions = if (pp == 0) == first_packed {
+                    packed_regions(pp * 20)
+                } else {
+                    serde_json::Value::Null
+                };
+                let body = put_route(serde_json::json!({
+                    "pp_size": 2, "pp_rank": pp, "kv_region_layouts": regions,
+                }));
+                let expected = if pp == 0 { 200 } else { 400 };
+                assert_eq!(request(addr, "PUT", "/route", Some(&body)).0, expected);
+            }
+            // Rejected registrations must not count towards readiness.
+            assert_eq!(request(addr, "GET", SENTINEL, None).0, 503);
+        }
+    }
+
     /// System-dp topology derivation: with `system_dp_size > 1` the dp axis
     /// (readiness expectation AND rank keying) comes from `system_dp_*`, not
     /// `attn_dp_*` — a "looks equivalent" simplification to always using
