@@ -537,6 +537,50 @@ struct SM90_TWO_CTA_N128_MXFP4 {
   };
 };
 
+template <int Stages>
+struct SM90_TWO_CTA_C128_N64_MXFP4 {
+  using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<
+      SM90_PRECOMPUTED_MXFP4<128, 64, 128, 1, 1, false>>::Cutlass3xW4A8Gemm;
+  struct Cutlass3xW4A8Gemm : Base {
+    static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::MainN64;
+    using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
+    using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+        Stages, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
+    using Mainloop = cutlass::gemm::collective::CollectiveMmaArrayMixedInput<
+        Policy,
+        typename OldMainloop::TileShape,
+        cute::tuple<cutlass::float_e2m1_t, cutlass::float_ue8m0_t>,
+        typename OldMainloop::StrideA,
+        cutlass::float_e4m3_t,
+        typename OldMainloop::StrideB,
+        typename OldMainloop::TiledMma,
+        typename OldMainloop::GmemTiledCopyA,
+        typename OldMainloop::SmemLayoutAtomA,
+        typename OldMainloop::SmemCopyAtomA,
+        typename OldMainloop::TransformA,
+        typename OldMainloop::GmemTiledCopyB,
+        typename OldMainloop::SmemLayoutAtomB,
+        typename OldMainloop::SmemCopyAtomB,
+        cutlass::gemm::collective::EarlyK128StageRefill>;
+    struct CollectiveMainloopScaleOnly : Mainloop {
+      static constexpr int ConsumerRegisters = 104;
+      static constexpr int CtasPerSm = 2;
+      static constexpr bool UseTailMmaHandoff = true;
+    };
+    using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversalPrecomputedScheduler<
+        sgl_kernel::w4a8_detail::ProblemShape,
+        CollectiveMainloopScaleOnly,
+        typename Base::CollectiveEpilogue,
+        typename Base::PrecomputedTileScheduler>;
+    static_assert(Stages == 3 || Stages == 4);
+    static_assert(GemmKernelScaleOnly::MinBlocksPerMultiprocessor == 2);
+    static_assert(sizeof(typename GemmKernelScaleOnly::SharedStorage) + 1024 <= 228 * 1024 / 2);
+    static_assert((GemmKernelScaleOnly::LoadRegisterRequirement +
+                   2 * GemmKernelScaleOnly::MmaRegisterRequirement) * 128 * 2 <= 65536);
+    using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
+  };
+};
+
 template <class BaseConfig, int Bytes>
 struct SM90_WEIGHT_SWIZZLE_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
@@ -1293,6 +1337,22 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 659:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_C128_N64_MXFP4<3>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 660:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_C128_N64_MXFP4<4>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
@@ -1300,7 +1360,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 645, 649, 655, 656, 657, 658");
+          "608, 616, 645, 649, 655, 656, 657, 658, 659, 660");
   }
 }
 
