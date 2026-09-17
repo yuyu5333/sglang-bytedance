@@ -1221,6 +1221,7 @@ class TestSWAPoolFloor(CustomTestCase):
         cfg.swa_cap_tokens = None
         cfg.swa_prefix_tails = 0
         cfg.request_window_bytes = 0
+        cfg.main_staging_fixed_bytes = 0
         cfg.bytes_per_swa_token = 0.0
         cfg._unified_fp8 = False
         # object.__new__ skips __init__; bf16 unified row is 2B * latent
@@ -1238,6 +1239,53 @@ class TestSWAPoolFloor(CustomTestCase):
             + cfg._fixed_c4_state_bytes(max_running_requests)
             + cfg._get_c128_state_fixed_bytes(max_running_requests)
         )
+
+    def test_dsv41_staging_budget_tracks_backend_allocations(self):
+        from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
+        from sglang.srt.mem_cache.dsv41_main_kv_layout import (
+            resolve_dsv41_main_kv_layout_specs,
+        )
+        from sglang.srt.mem_cache.dsv41_staging_workspace import staging_workspace_bytes
+        from sglang.srt.model_executor.pool_configurator import DSV4PoolConfigurator
+        from sglang.srt.runtime_context import get_context
+
+        cfg = SimpleNamespace(
+            qk_nope_head_dim=448, qk_rope_head_dim=64, index_head_dim=128,
+            context_len=131072, compress_ratios=[0, 2, 2, 1, 1], window_size=128,
+            hf_config=SimpleNamespace(kv_source_layer_ids=[1, 3]),
+            hf_text_config=SimpleNamespace(index_topk=1024),
+        )
+        kvc = SimpleNamespace(
+            kv_cache_dtype_str="fp8_e4m3", model_config=cfg,
+            layer_info=SimpleNamespace(start_layer=0, end_layer=5),
+            ps=SimpleNamespace(pp_size=1, attn_dp_size=1),
+            sliding_window_size=128, page_size=256,
+            spec_algorithm=SimpleNamespace(is_none=lambda: True),
+            resolve_dsv4_storage_layouts=lambda: (
+                KVLayout.V4, None, resolve_dsv41_main_kv_layout_specs("packed_fp4", 256)
+            ),
+        )
+        budget = 512 * (1 << 20)
+        for consumer, mux, owners in (("direct", False, 0), ("staged", False, 1), ("staged", True, 3)):
+            with self.subTest(consumer=consumer, pdmux=mux):
+                override = get_context().override_server_args(
+                    dsv41_main_kv_layout="packed_fp4", dsv41_main_kv_consumer=consumer,
+                    max_running_requests=2, page_size=256,
+                    enable_pdmux=mux, sm_group_num=2,
+                )
+                override.install()
+                try:
+                    planner = DSV4PoolConfigurator(kvc)
+                    reserved = owners * staging_workspace_bytes(1024)
+                    self.assertEqual(planner.main_staging_fixed_bytes, reserved)
+                    actual = planner.calculate_pool_sizes(budget, 256)
+                    # Exact fixed-byte contract: subtracting scratch before
+                    # planning must equal the built-in reservation.
+                    planner.main_staging_fixed_bytes = 0
+                    expected = planner.calculate_pool_sizes(budget - reserved, 256)
+                    self.assertEqual(actual.max_total_num_tokens, expected.max_total_num_tokens)
+                finally:
+                    override.restore()
 
     def test_dsv4_paged_dspark_budget_reserves_window_and_draft_layers(self):
         from sglang.srt.model_executor.pool_configurator import DSV4PoolConfigurator
