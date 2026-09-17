@@ -10,7 +10,9 @@ STAGING_QUERY_TILE = 64
 STAGING_PAGE_SLOTS = 256
 
 
-def staging_geometry(topk: int, query_tile: int = STAGING_QUERY_TILE) -> tuple[int, int]:
+def staging_geometry(
+    topk: int, query_tile: int = STAGING_QUERY_TILE
+) -> tuple[int, int]:
     if topk <= 0 or query_tile <= 0:
         raise ValueError("staging topk and query tile must be positive")
     width = (topk + 63) // 64 * 64

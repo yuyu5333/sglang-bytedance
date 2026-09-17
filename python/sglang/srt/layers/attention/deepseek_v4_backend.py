@@ -1229,9 +1229,7 @@ class DeepseekV4AttnBackend(
 
         kernel = get_exec().kernel
         self.enable_deepseek_v4_fp4_indexer = kernel.enable_deepseek_v4_fp4_indexer
-        self.dsv41_main_kv_consumer = getattr(
-            kernel, "dsv41_main_kv_consumer", "auto"
-        )
+        self.dsv41_main_kv_consumer = getattr(kernel, "dsv41_main_kv_consumer", "auto")
         self.main_kv_staging_workspace = None
         if self.dsv41_main_kv_consumer == "staged" and self.low_ratios:
             from sglang.srt.mem_cache.dsv41_staging_workspace import (
@@ -3914,8 +3912,7 @@ class DeepseekV4AttnBackend(
             if (
                 forward_batch.forward_mode.is_extend_without_speculative()
                 and (
-                    packed_main_view is None
-                    or self.dsv41_main_kv_consumer == "staged"
+                    packed_main_view is None or self.dsv41_main_kv_consumer == "staged"
                 )
                 and not get_platform().is_sm120
                 and self.forward_metadata.late_layer_tail is None
@@ -4019,8 +4016,13 @@ class DeepseekV4AttnBackend(
                     and self.dsv41_main_kv_consumer == "staged"
                 ):
                     return self._forward_staged_main(
-                        q, swa_k_cache, swa_page_indices, swa_topk_lengths,
-                        packed_main_view, extra_indices, extra_topk_lengths,
+                        q,
+                        swa_k_cache,
+                        swa_page_indices,
+                        swa_topk_lengths,
+                        packed_main_view,
+                        extra_indices,
+                        extra_topk_lengths,
                         attn_sink,
                     ).squeeze(1)
 
@@ -4090,8 +4092,15 @@ class DeepseekV4AttnBackend(
         raise NotImplementedError("ragged attention")
 
     def _forward_staged_main(
-        self, q, swa_cache, swa_indices, swa_lengths, main_view, main_indices,
-        main_lengths, attn_sink,
+        self,
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        main_view,
+        main_indices,
+        main_lengths,
+        attn_sink,
     ):
         """Convert selected Main slots and run V4 attention in bounded tiles."""
         from sgl_kernel.flash_mla import flash_mla_with_kvcache
@@ -4190,7 +4199,6 @@ class DeepseekV4AttnBackend(
         # Resolve the workspace + indices for this ratio, then dequant
         # SWA + compressed regions directly into the workspace (no torch.cat).
         compressed_slice = None
-        extra_k_cache = None
         extra_page_size = None
         flat_token_ids = None
         if compress_ratio == 0:
@@ -4362,7 +4370,6 @@ class DeepseekV4AttnBackend(
             self.forward_metadata.sparse_prefill_cache = cache
 
         compressed_slice = None
-        extra_k_cache = None
         extra_page_size = None
         flat_token_ids = None
 

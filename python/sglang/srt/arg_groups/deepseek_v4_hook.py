@@ -270,9 +270,7 @@ def validate_deepseek_v41_features(server_args: ServerArgs) -> None:
                 "--dsv41-main-kv-consumer=direct or staged; auto remains on the legacy layout"
             )
         if not get_platform().is_sm90:
-            raise ValueError(
-                "DeepSeek-V4.1 packed Main-KV consumption requires SM90"
-            )
+            raise ValueError("DeepSeek-V4.1 packed Main-KV consumption requires SM90")
         if cfg.dsv4_attn_backend not in ("auto", "flashmla"):
             raise ValueError(
                 "DeepSeek-V4.1 packed Main-KV consumption requires the "

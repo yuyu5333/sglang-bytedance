@@ -41,7 +41,9 @@ def make_case(rows, heads, page_slots):
     ids[:, 3] = 2 * page_slots
     lengths = torch.full((rows,), 64, device="cuda", dtype=torch.int32)
     lengths[0] = 0
-    swa_ids = torch.arange(8, 136, device="cuda", dtype=torch.int32)[None].repeat(rows, 1)
+    swa_ids = torch.arange(8, 136, device="cuda", dtype=torch.int32)[None].repeat(
+        rows, 1
+    )
     core = DSV4AttnMetadata.__new__(DSV4AttnMetadata)
     core.swa_page_indices = swa_ids
     core.swa_topk_lengths = torch.full((rows,), 128, device="cuda", dtype=torch.int32)
@@ -89,21 +91,24 @@ def make_case(rows, heads, page_slots):
 
         # The packed adapter promises bounds masking. The legacy SM90 reader
         # requires -1 for OOB slots, so normalize its reference input explicitly.
-        reference_ids = torch.where(
-            (ids >= 0) & (ids < 2 * page_slots), ids, -1
-        )
+        reference_ids = torch.where((ids >= 0) & (ids < 2 * page_slots), ids, -1)
         return flash_mla_with_kvcache(
             q=q.unsqueeze(1),
             k_cache=swa.as_strided((2, 128, 1, 584), (swa.stride(0), 584, 584, 1)),
-            block_table=None, cache_seqlens=None, head_dim_v=512,
+            block_table=None,
+            cache_seqlens=None,
+            head_dim_v=512,
             tile_scheduler_metadata=get_mla_metadata()[0],
-            softmax_scale=backend.softmax_scale, is_fp8_kvcache=True,
-            indices=swa_ids.unsqueeze(1), topk_length=core.swa_topk_lengths,
+            softmax_scale=backend.softmax_scale,
+            is_fp8_kvcache=True,
+            indices=swa_ids.unsqueeze(1),
+            topk_length=core.swa_topk_lengths,
             attn_sink=sink,
             extra_k_cache=legacy.as_strided(
                 (2, page_slots, 1, 584), (legacy.stride(0), 584, 584, 1)
             ),
-            extra_indices_in_kvcache=reference_ids.unsqueeze(1), extra_topk_length=lengths,
+            extra_indices_in_kvcache=reference_ids.unsqueeze(1),
+            extra_topk_length=lengths,
         )[0].squeeze(1)
 
     return backend, view, legacy, ids, lengths, run, reference
@@ -111,7 +116,9 @@ def make_case(rows, heads, page_slots):
 
 @pytest.mark.parametrize("rows,heads,page_slots", [(2, 64, 128), (65, 128, 256)])
 def test_runtime_staged_matches_legacy(rows, heads, page_slots):
-    backend, view, legacy, ids, lengths, run, reference = make_case(rows, heads, page_slots)
+    backend, view, legacy, ids, lengths, run, reference = make_case(
+        rows, heads, page_slots
+    )
     original = ids.clone()
     torch.testing.assert_close(run(), reference(), atol=0.002, rtol=0.02)
     assert torch.equal(ids, original)
@@ -162,11 +169,18 @@ def test_prefill_attention_packed_matches_legacy(page_slots):
     positions = torch.tensor([190, 191, 222, 223], **ints)
     mapping = torch.arange(256, **ints)
     cache = SparsePrefillChunkCache.build(
-        seq_lens=lens, extend_seq_lens=extend, query_lens=extend,
-        query_pos=positions, req_pool_indices=torch.tensor([0, 1], **ints),
-        req_to_token=mapping[None].repeat(2, 1), full_to_swa=mapping.long(),
-        swa_window_size=128, swa_page_size=128, num_qo_tokens=4,
-        max_seq_len=224, total_swa=258,
+        seq_lens=lens,
+        extend_seq_lens=extend,
+        query_lens=extend,
+        query_pos=positions,
+        req_pool_indices=torch.tensor([0, 1], **ints),
+        req_to_token=mapping[None].repeat(2, 1),
+        full_to_swa=mapping.long(),
+        swa_window_size=128,
+        swa_page_size=128,
+        num_qo_tokens=4,
+        max_seq_len=224,
+        total_swa=258,
     )
     core = backend.forward_metadata.core_attn_metadata
     core.page_table = torch.zeros((4, 1), **ints)
@@ -176,10 +190,18 @@ def test_prefill_attention_packed_matches_legacy(page_slots):
     backend.forward_metadata.sparse_prefill_cache = cache
     q = torch.randn((4, 1, 64, 512), device="cuda", dtype=torch.bfloat16) * 0.1
     sink = torch.zeros(64, device="cuda", dtype=torch.float32)
-    for method in (backend._forward_prefill_sparse, backend._forward_prefill_sparse_q8kv8):
+    for method in (
+        backend._forward_prefill_sparse,
+        backend._forward_prefill_sparse_q8kv8,
+    ):
         kwargs = dict(
-            q=q, layer_id=0, compress_ratio=ratio, forward_batch=None,
-            token_to_kv_pool=pool, core_attn_metadata=core, attn_sink=sink,
+            q=q,
+            layer_id=0,
+            compress_ratio=ratio,
+            forward_batch=None,
+            token_to_kv_pool=pool,
+            core_attn_metadata=core,
+            attn_sink=sink,
         )
         pool.get_extra_key_layout = lambda _: view.spec.layout_id
         actual = method(**kwargs)

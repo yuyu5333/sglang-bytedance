@@ -97,7 +97,10 @@ class SparsePrefillWorkspace:
         buffer = self._buffers.get(dtype)
         current_capacity = buffer.shape[0] if buffer is not None else 0
         if num_tokens > current_capacity:
-            if torch.device(self.device).type == "cuda" and torch.cuda.is_current_stream_capturing():
+            if (
+                torch.device(self.device).type == "cuda"
+                and torch.cuda.is_current_stream_capturing()
+            ):
                 raise RuntimeError(
                     f"sparse prefill workspace needs {num_tokens} {dtype} rows, "
                     f"reserved {current_capacity}; reserve during graph warmup"

@@ -93,8 +93,13 @@ def _stage_kernel(
 
 @triton.jit
 def _gather_kernel(
-    src, ids, out, OUT_STRIDE: tl.constexpr, ID_STRIDE: tl.constexpr,
-    NUM_SLOTS: tl.constexpr, PAGE_SLOTS: tl.constexpr,
+    src,
+    ids,
+    out,
+    OUT_STRIDE: tl.constexpr,
+    ID_STRIDE: tl.constexpr,
+    NUM_SLOTS: tl.constexpr,
+    PAGE_SLOTS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     loc = tl.load(ids + row * ID_STRIDE).to(tl.int64)
@@ -121,7 +126,8 @@ def _validate_indices(view: PackedMainKVView, indices: torch.Tensor) -> None:
     if not view.storage.is_cuda or torch.version.cuda is None:
         raise ValueError("packed Main KV staging requires NVIDIA CUDA")
     if indices.device != view.storage.device or indices.dtype not in (
-        torch.int32, torch.int64
+        torch.int32,
+        torch.int64,
     ):
         raise ValueError("indices must be int32/int64 on the cache device")
 
@@ -141,17 +147,27 @@ def stage_packed_main_kv(
     if workspace.pages.device != view.storage.device:
         raise ValueError("workspace and cache must be on the same device")
     if lengths is not None and (
-        lengths.shape != (rows,) or lengths.dtype != torch.int32
+        lengths.shape != (rows,)
+        or lengths.dtype != torch.int32
         or lengths.device != indices.device
     ):
         raise ValueError("lengths must be int32 [query_rows] on the cache device")
     if rows and width:
         _stage_kernel[(rows, width)](
-            view.storage, indices, lengths, workspace.pages, workspace.indices,
-            indices.stride(0), width, workspace.width,
-            view.storage.shape[0] * view.spec.page_slots, view.spec.page_slots,
-            lengths is not None, lengths.stride(0) if lengths is not None else 1,
-            workspace.pages.stride(0), num_warps=4,
+            view.storage,
+            indices,
+            lengths,
+            workspace.pages,
+            workspace.indices,
+            indices.stride(0),
+            width,
+            workspace.width,
+            view.storage.shape[0] * view.spec.page_slots,
+            view.spec.page_slots,
+            lengths is not None,
+            lengths.stride(0) if lengths is not None else 1,
+            workspace.pages.stride(0),
+            num_warps=4,
         )
     return workspace.cache, workspace.indices[:rows, :width]
 
@@ -166,13 +182,19 @@ def gather_packed_main_kv(
     if (
         out.shape != (token_ids.numel(), 1, 512)
         or out.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
-        or out.device != view.storage.device or out.stride(-1) != 1
+        or out.device != view.storage.device
+        or out.stride(-1) != 1
     ):
         raise ValueError("gather output must be BF16/FP8 [num_tokens, 1, 512]")
     if token_ids.numel():
         _gather_kernel[(token_ids.numel(),)](
-            view.storage, token_ids, out, out.stride(0), token_ids.stride(0),
-            view.storage.shape[0] * view.spec.page_slots, view.spec.page_slots,
+            view.storage,
+            token_ids,
+            out,
+            out.stride(0),
+            token_ids.stride(0),
+            view.storage.shape[0] * view.spec.page_slots,
+            view.spec.page_slots,
             num_warps=4,
         )
     return out

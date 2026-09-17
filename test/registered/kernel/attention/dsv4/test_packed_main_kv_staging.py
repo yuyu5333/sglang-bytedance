@@ -29,9 +29,7 @@ register_cuda_ci(est_time=30, stage="base-b-kernel-unit", runner_config="1-gpu-l
 
 def make_caches(page_slots):
     torch.manual_seed(31)
-    values = torch.randn(
-        (2, page_slots, 512), dtype=torch.bfloat16, device="cuda"
-    )
+    values = torch.randn((2, page_slots, 512), dtype=torch.bfloat16, device="cuda")
     values[0, :4] = 0
     values[0, 4] *= 0.001
     values[0, 5] *= 100
@@ -42,9 +40,12 @@ def make_caches(page_slots):
         (2, KVLayout.V4.page_bytes(page_slots)), dtype=torch.uint8, device="cuda"
     )
     fused_store_cache(
-        input=decoded, cache=legacy,
+        input=decoded,
+        cache=legacy,
         indices=torch.arange(2 * page_slots, dtype=torch.int32, device="cuda"),
-        page_size=page_slots, type="flashmla", layout=KVLayout.V4,
+        page_size=page_slots,
+        type="flashmla",
+        layout=KVLayout.V4,
     )
     return view, decoded, legacy
 
@@ -59,16 +60,22 @@ class TestPackedMainKVStaging(CustomTestCase):
             with self.subTest(page_slots=p):
                 view, decoded, legacy = make_caches(p)
                 ws = MainKVStagingWorkspace(torch.device("cuda"), 64, query_tile=2)
-                ids = torch.tensor(
-                    [0, 1, 4, 5, p - 1, p, 2 * p - 1, -1, 2 * p, p],
-                    dtype=torch.int32, device="cuda",
-                ).repeat(13)[:128].view(2, 64)
+                ids = (
+                    torch.tensor(
+                        [0, 1, 4, 5, p - 1, p, 2 * p - 1, -1, 2 * p, p],
+                        dtype=torch.int32,
+                        device="cuda",
+                    )
+                    .repeat(13)[:128]
+                    .view(2, 64)
+                )
                 original = ids.clone()
                 lengths = torch.tensor([64, 17], dtype=torch.int32, device="cuda")
                 _, remap = stage_packed_main_kv(view, ids, lengths, ws)
                 expected_remap = torch.arange(128, device="cuda").view(2, 64)
                 valid = (
-                    (ids >= 0) & (ids < 2 * p)
+                    (ids >= 0)
+                    & (ids < 2 * p)
                     & (torch.arange(64, device="cuda") < lengths[:, None])
                 )
                 torch.testing.assert_close(
@@ -79,14 +86,19 @@ class TestPackedMainKVStaging(CustomTestCase):
                 selected[~valid.flatten()] = 0
                 expected = torch.zeros_like(ws.pages)
                 fused_store_cache(
-                    input=selected, cache=expected,
+                    input=selected,
+                    cache=expected,
                     indices=torch.arange(128, dtype=torch.int32, device="cuda"),
-                    page_size=256, type="flashmla", layout=KVLayout.V4,
+                    page_size=256,
+                    type="flashmla",
+                    layout=KVLayout.V4,
                 )
                 # 比较完整物理页，包含清零的第八 scale 字节与 padding。
                 self.assertTrue(torch.equal(ws.pages, expected))
                 self.assertEqual(ws.cache.stride(0), KVLayout.V4.page_bytes(256))
-                self.assertEqual(ws.cache.untyped_storage().data_ptr(), ws.pages.data_ptr())
+                self.assertEqual(
+                    ws.cache.untyped_storage().data_ptr(), ws.pages.data_ptr()
+                )
 
     def test_positional_gather_bf16_and_fp8(self):
         for p in (128, 256):
@@ -102,11 +114,15 @@ class TestPackedMainKVStaging(CustomTestCase):
                     out = torch.empty((ids.numel(), 1, 512), dtype=dtype, device="cuda")
                     gather_packed_main_kv(view, ids, out)
                     expected = reference(legacy, ids, p)
-                    self.assertTrue(torch.equal(out.view(torch.uint8), expected.view(torch.uint8)))
+                    self.assertTrue(
+                        torch.equal(out.view(torch.uint8), expected.view(torch.uint8))
+                    )
                     ids.fill_(-1)
                     gather_packed_main_kv(view, ids, out)
                     self.assertEqual(out.float().count_nonzero().item(), 0)
-                    ids.copy_(torch.tensor([0, 4, 5, p - 1, p, 2 * p - 1, p], device="cuda"))
+                    ids.copy_(
+                        torch.tensor([0, 4, 5, p - 1, p, 2 * p - 1, p], device="cuda")
+                    )
 
     def test_graph_replay_refreshes_data_indices_and_lengths(self):
         view, _, _ = make_caches(128)
@@ -137,8 +153,10 @@ class TestPackedMainKVStaging(CustomTestCase):
         ids = torch.zeros((1, 64), dtype=torch.int32, device="cuda")
         _, remap = stage_packed_main_kv(view, ids, None, ws)
         torch.testing.assert_close(
-            remap, torch.arange(64, dtype=torch.int32, device="cuda")[None, :],
-            atol=0, rtol=0,
+            remap,
+            torch.arange(64, dtype=torch.int32, device="cuda")[None, :],
+            atol=0,
+            rtol=0,
         )
         _, empty = stage_packed_main_kv(view, ids[:0], None, ws)
         self.assertEqual(empty.shape, (0, 64))

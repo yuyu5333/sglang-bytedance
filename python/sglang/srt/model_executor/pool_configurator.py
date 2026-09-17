@@ -1066,9 +1066,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
 
             # Each PDMux backend owns its scratch. DSpark's SWA-only draft
             # backend has no Main KV consumer and allocates no staging pages.
-            owners = 1 + (
-                get_disagg().sm_group_num if get_disagg().enable_pdmux else 0
-            )
+            owners = 1 + (get_disagg().sm_group_num if get_disagg().enable_pdmux else 0)
             self.main_staging_fixed_bytes = owners * staging_workspace_bytes(
                 getattr(cfg.hf_text_config, "index_topk", 512)
             )
