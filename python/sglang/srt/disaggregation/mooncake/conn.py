@@ -56,6 +56,10 @@ from sglang.srt.disaggregation.utils import (
 )
 from sglang.srt.distributed.parallel_state import get_mooncake_transfer_engine
 from sglang.srt.environ import envs
+from sglang.srt.mem_cache.kv_region_layout import (
+    decode_kv_region_registration,
+    encode_kv_region_registration,
+)
 from sglang.srt.observability.mooncake_trace import (
     MooncakeRequestStage,
     mooncake_trace_func,
@@ -157,10 +161,17 @@ class KVArgsRegisterInfo:
     staging_base_ptr: int = 0
     staging_total_size: int = 0
     staging: Optional[StagingRegisterInfo] = None
+    dst_kv_region_layouts: Optional[List[dict]] = None
+    dst_kv_item_lens: Optional[List[int]] = None
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
+        layouts, item_lens = decode_kv_region_registration(
+            msg[19] if len(msg) > 19 else None, len(msg[4]) // 8
+        )
         return cls(
+            dst_kv_region_layouts=layouts,
+            dst_kv_item_lens=item_lens,
             room=str(msg[0].decode("ascii")),
             endpoint=msg[1].decode("ascii"),
             dst_port=int(msg[2].decode("ascii")),
@@ -201,7 +212,7 @@ class KVArgsRegisterInfo:
             dst_dcp_rank=(
                 int(msg[17].decode("ascii")) if len(msg) > 17 and msg[17] != b"" else 0
             ),
-            # Note: always put the staging field at the final
+            # Keep the staging slot IDs at frame 18 for older peers.
             staging=StagingRegisterInfo.from_zmq_fields(msg, 14, slot_ids_index=18),
         )
 
@@ -2271,7 +2282,14 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     continue
                 mooncake_session_id = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
-                    decode_kv_args = KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
+                    try:
+                        decode_kv_args = KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
+                        self.validate_peer_kv_regions(decode_kv_args)
+                    except ValueError as exc:
+                        self.rejected_kv_peers[mooncake_session_id] = str(exc)
+                        logger.error("Reject KV peer %s: %s", mooncake_session_id, exc)
+                        continue
+                    self.rejected_kv_peers.pop(mooncake_session_id, None)
                     decode_kv_args.requires_dcp_relayout = self.requires_dcp_relayout(
                         decode_kv_args.dst_dcp_size,
                         decode_kv_args.dst_dcp_rank,
@@ -2308,6 +2326,12 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     self.transfer_infos[room][mooncake_session_id] = (
                         TransferInfo.from_zmq(waiting_req_bytes)
                     )
+                    if mooncake_session_id in self.rejected_kv_peers:
+                        self.conclude_failure(
+                            bootstrap_room=room,
+                            failure_reason=self.rejected_kv_peers[mooncake_session_id],
+                        )
+                        continue
                     # NOTE: after bootstrapping we can mark the req as waiting for input
                     if len(self.transfer_infos[room]) == required_dst_info_num:
                         self.resolve_kv_replica_factor(self.transfer_infos[room])
@@ -2691,6 +2715,7 @@ class MooncakeKVReceiver(MooncakeFailureExceptionMixin, CommonKVReceiver):
                             dst_dcp_size,
                             dst_dcp_rank,
                             packed_staging_slot_layer_ids,
+                            encode_kv_region_registration(self.kv_mgr.kv_args),
                         ]
                     )
             except zmq.ZMQError:

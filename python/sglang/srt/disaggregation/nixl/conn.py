@@ -49,6 +49,10 @@ from sglang.srt.disaggregation.utils import (
     slice_dsa_tail_dst_ptrs_for_pp,
 )
 from sglang.srt.environ import envs
+from sglang.srt.mem_cache.kv_region_layout import (
+    decode_kv_region_registration,
+    encode_kv_region_registration,
+)
 from sglang.srt.runtime_context import get_device, get_parallel, get_schedule
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils.common import run_with_deadline
@@ -249,10 +253,14 @@ class KVArgsRegisterInfo:
     kv_xfer_segments: Optional[List[_KVXferPreparedSegment]] = None
     staging_base_ptr: int = 0
     staging_total_size: int = 0
+    dst_kv_region_layouts: Optional[List[dict]] = None
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
         dst_kv_ptrs = list(struct.unpack(f"{len(msg[5]) // 8}Q", msg[5]))
+        layouts, layout_item_lens = decode_kv_region_registration(
+            msg[23] if len(msg) > 23 else None, len(dst_kv_ptrs)
+        )
         dst_kv_mem_kinds = (
             _unpack_kv_mem_kinds(msg[17], len(dst_kv_ptrs))
             if len(msg) > 17
@@ -269,6 +277,8 @@ class KVArgsRegisterInfo:
                 "dst_kv_item_lens length mismatch: "
                 f"got {len(dst_kv_item_lens)}, expected {len(dst_kv_ptrs)}"
             )
+        if layouts is not None and layout_item_lens != dst_kv_item_lens:
+            raise ValueError("KV region item lengths disagree with NIXL strides")
         dst_state_data_ptrs = (
             unpack_int_lists(msg[7], "Q") if len(msg) > 7 and msg[7] != b"" else []
         )
@@ -291,6 +301,7 @@ class KVArgsRegisterInfo:
         )
 
         return cls(
+            dst_kv_region_layouts=layouts,
             room=str(msg[0].decode("ascii")),
             endpoint=msg[1].decode("ascii"),
             dst_port=int(msg[2].decode("ascii")),
@@ -1027,6 +1038,7 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
         peer_info.kv_xfer_segments = prepared_segments
 
     def _prepare_payload_xfer(self, peer_info: KVArgsRegisterInfo):
+        region_pairs = self.validate_peer_kv_regions(peer_info)
         # If prefill does not run speculative decoding (the usual case),
         # decode with speculative decoding will have more kv items.
         # Prefill having more kv items is impossible.
@@ -1110,12 +1122,16 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
                 else self._num_slots_src
             )
 
-            pairs = build_transfer_entry_pairs(
-                self.kv_args.kv_layer_ids,
-                peer_info.dst_kv_layer_ids,
-                n_src,
-                n_dst,
-                allow_positional_fallback=self.pp_size == 1,
+            pairs = (
+                region_pairs
+                if region_pairs is not None
+                else build_transfer_entry_pairs(
+                    self.kv_args.kv_layer_ids,
+                    peer_info.dst_kv_layer_ids,
+                    n_src,
+                    n_dst,
+                    allow_positional_fallback=self.pp_size == 1,
+                )
             )
             dst_indices = [j for _, j in pairs]
             dst_kv_ptrs = [peer_info.dst_kv_ptrs[j] for j in dst_indices]
@@ -1551,6 +1567,7 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
                 raise Exception("NIXL memory registration failed for state tensors")
 
     def _add_remote_peer(self, decode_kv_args: KVArgsRegisterInfo):
+        self.validate_peer_kv_regions(decode_kv_args)
         agent_name = decode_kv_args.agent_name
         if agent_name in self.decode_kv_args_table:
             logger.info(f"Peer {agent_name} was already registered, ignoring.")
@@ -3001,9 +3018,15 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
                 agent_name = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
                     # Register new peer and save KV base pointers.
-                    self._add_remote_peer(
-                        KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
-                    )
+                    try:
+                        self._add_remote_peer(
+                            KVArgsRegisterInfo.from_zmq(waiting_req_bytes)
+                        )
+                    except ValueError as exc:
+                        self.rejected_kv_peers[agent_name] = str(exc)
+                        logger.error("Reject KV peer %s: %s", agent_name, exc)
+                        continue
+                    self.rejected_kv_peers.pop(agent_name, None)
                     logger.debug(f"Register KVArgs from {agent_name} successfully")
                     continue
                 room = int(room)
@@ -3012,6 +3035,12 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
                 self.transfer_infos[room][agent_name] = TransferInfo.from_zmq(
                     waiting_req_bytes
                 )
+                if agent_name in self.rejected_kv_peers:
+                    self.conclude_failure(
+                        bootstrap_room=room,
+                        failure_reason=self.rejected_kv_peers[agent_name],
+                    )
+                    continue
                 required_dst_info_num = self.transfer_infos[room][
                     agent_name
                 ].required_dst_info_num
@@ -3349,6 +3378,7 @@ class NixlKVReceiver(CommonKVReceiver):
                             packed_kv_layer_ids,
                             str(self.kv_mgr.dcp_size).encode("ascii"),
                             str(self.kv_mgr.dcp_rank).encode("ascii"),
+                            encode_kv_region_registration(self.kv_mgr.kv_args),
                         ]
                     )
             except zmq.ZMQError:

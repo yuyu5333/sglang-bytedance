@@ -256,8 +256,13 @@ class PrefillBootstrapQueue:
                 hf_text_config=self.scheduler.model_config.hf_text_config,
             )
         )
-        kv_data_ptrs, kv_data_lens, kv_item_lens = (
-            self.token_to_kv_pool.get_contiguous_buf_infos()
+        from sglang.srt.mem_cache.kv_region_layout import (
+            get_pool_transfer_info,
+            merge_draft_region_layouts,
+        )
+
+        kv_data_ptrs, kv_data_lens, kv_item_lens, kv_region_layouts = (
+            get_pool_transfer_info(self.token_to_kv_pool)
         )
         kv_args.prefill_end_layer = (
             kv_args.prefill_start_layer + len(kv_data_ptrs)
@@ -285,6 +290,9 @@ class PrefillBootstrapQueue:
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
         kv_args.kv_item_lens = kv_item_lens
+        kv_args.kv_region_layouts = merge_draft_region_layouts(
+            kv_region_layouts, None, num_draft_entries
+        )
         kv_args.num_draft_entries = num_draft_entries
         kv_args.kv_layer_ids = build_kv_layer_ids(
             token_to_kv_pool=self.token_to_kv_pool,
@@ -292,6 +300,8 @@ class PrefillBootstrapQueue:
             num_draft_entries=num_draft_entries,
             num_hidden_layers=self.scheduler.model_config.num_hidden_layers,
         )
+        if kv_region_layouts is not None:
+            kv_args.kv_layer_ids = [r["source_layer_id"] for r in kv_region_layouts]
         if not self.is_mla_backend:
             kv_args.kv_head_num = self.token_to_kv_pool.head_num
             kv_args.total_kv_head_num = (

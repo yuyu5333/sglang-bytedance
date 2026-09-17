@@ -561,8 +561,13 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             if self.scheduler.enable_hisparse
             else self.token_to_kv_pool
         )
-        kv_data_ptrs, kv_data_lens, kv_item_lens = (
-            transfer_kv_pool.get_contiguous_buf_infos()
+        from sglang.srt.mem_cache.kv_region_layout import (
+            get_pool_transfer_info,
+            merge_draft_region_layouts,
+        )
+
+        kv_data_ptrs, kv_data_lens, kv_item_lens, kv_region_layouts = (
+            get_pool_transfer_info(transfer_kv_pool)
         )
         kv_data_mem_kinds = (
             ["DRAM"] * len(kv_data_ptrs)
@@ -596,6 +601,9 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         kv_args.kv_data_ptrs = kv_data_ptrs
         kv_args.kv_data_lens = kv_data_lens
         kv_args.kv_item_lens = kv_item_lens
+        kv_args.kv_region_layouts = merge_draft_region_layouts(
+            kv_region_layouts, None, num_draft_entries
+        )
         kv_args.num_draft_entries = num_draft_entries
         kv_args.kv_layer_ids = build_kv_layer_ids(
             token_to_kv_pool=self.token_to_kv_pool,
@@ -603,6 +611,8 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             num_draft_entries=num_draft_entries,
             num_hidden_layers=self.scheduler.model_config.num_hidden_layers,
         )
+        if kv_region_layouts is not None:
+            kv_args.kv_layer_ids = [r["source_layer_id"] for r in kv_region_layouts]
         if self.transfer_backend == TransferBackend.NIXL:
             kv_args.kv_data_mem_kinds = kv_data_mem_kinds
         kv_args.page_size = self.token_to_kv_pool.page_size

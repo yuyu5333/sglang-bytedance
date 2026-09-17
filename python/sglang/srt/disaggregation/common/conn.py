@@ -37,6 +37,12 @@ from sglang.srt.layers.dp_attention import (
     get_attention_dp_rank,
     get_attention_dp_size,
 )
+from sglang.srt.mem_cache.kv_region_layout import (
+    match_kv_region_layouts,
+    parse_kv_region_layouts,
+    validate_kv_region_registration,
+    validate_kv_region_topology,
+)
 from sglang.srt.runtime_context import (
     get_disagg,
     get_parallel,
@@ -104,6 +110,7 @@ class PrefillServerInfo:
     follow_bootstrap_room: bool
     enable_dsa_cache_layer_split: bool = False
     dsv41_spec_layout: Optional[dict] = None
+    kv_region_layouts_by_pp: Optional[dict] = None
 
     # PD true-retraction rebootstrap: the prefill's HTTP API port. The decode
     # already knows the prefill host (the bootstrap_addr host), so it can POST
@@ -171,6 +178,12 @@ class CommonKVManager(BaseKVManager):
         self.kv_args = args
         self.kv_cache_dtype_str = args.kv_cache_dtype_str
         self.dsv41_spec_layout = get_dsv41_spec_layout(args)
+        validate_kv_region_registration(
+            getattr(args, "kv_region_layouts", None),
+            args.kv_item_lens,
+            len(args.kv_data_ptrs),
+        )
+        self.rejected_kv_peers: Dict[str, str] = {}
         self.kv_item_lens_sum = sum(args.kv_item_lens)
         self.state_item_lens_sum = sum(x for comp in args.state_item_lens for x in comp)
         self.is_mla_backend = is_mla_backend
@@ -857,6 +870,20 @@ class CommonKVManager(BaseKVManager):
                 f"PD retract rebootstrap /generate request errored for rid={rid}.",
             )
 
+    def validate_peer_kv_regions(self, peer):
+        local = getattr(self.kv_args, "kv_region_layouts", None)
+        remote = getattr(peer, "dst_kv_region_layouts", None)
+        validate_kv_region_registration(
+            remote, getattr(peer, "dst_kv_item_lens", None), len(peer.dst_kv_ptrs)
+        )
+        pairs = match_kv_region_layouts(local, remote)
+        if pairs is not None:
+            if peer.dst_kv_layer_ids != [r["source_layer_id"] for r in remote]:
+                raise ValueError("KV region source layers disagree with PD layer ids")
+            if getattr(peer, "dst_dcp_size", 1) != 1:
+                raise ValueError("Main KV page regions do not support DCP relayout")
+        return pairs
+
     def try_ensure_parallel_info(self, bootstrap_addr: str) -> bool:
         """Single non-blocking attempt to fetch and cache prefill parallel info.
         Returns True if info is available (cached or freshly fetched)."""
@@ -901,6 +928,10 @@ class CommonKVManager(BaseKVManager):
                 f"Both servers must use the same --kv-cache-dtype value."
             )
 
+        validate_kv_region_topology(
+            getattr(self.kv_args, "kv_region_layouts", None),
+            info.kv_region_layouts_by_pp,
+        )
         local_layout = self.dsv41_spec_layout
         if local_layout is not None or info.dsv41_spec_layout is not None:
             if local_layout != info.dsv41_spec_layout:
@@ -1084,6 +1115,7 @@ class CommonKVManager(BaseKVManager):
             "page_size": self.kv_args.page_size,
             "kv_cache_dtype": self.kv_cache_dtype_str,
             "dsv41_spec_layout": self.dsv41_spec_layout,
+            "kv_region_layouts": getattr(self.kv_args, "kv_region_layouts", None),
             "load_balance_method": get_parallel().load_balance_method,
             "enable_dsa_cache_layer_split": get_parallel().enable_dsa_cache_layer_split,
             # Self-register the HTTP API port so the decode can derive the PD
@@ -1938,6 +1970,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         self.page_size = None
         self.kv_cache_dtype: Optional[str] = None
         self.dsv41_spec_layout: Optional[dict] = None
+        self.kv_region_layouts_by_pp: dict = {}
         self.follow_bootstrap_room: Optional[bool] = None
         self.enable_dsa_cache_layer_split: Optional[bool] = None
         self.prefill_http_port: Optional[int] = None
@@ -2009,6 +2042,20 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         kv_cache_dtype = data["kv_cache_dtype"]
         prefill_http_port = data.get("prefill_http_port")
         dsv41_spec_layout = data.get("dsv41_spec_layout")
+        kv_region_layouts = data.get("kv_region_layouts")
+
+        try:
+            parse_kv_region_layouts(kv_region_layouts)
+            stage = str(pp_rank)
+            prior = self.kv_region_layouts_by_pp
+            if stage in prior and prior[stage] != kv_region_layouts:
+                raise ValueError("KV region layout differs across prefill ranks")
+            if prior and any(
+                (v is None) != (kv_region_layouts is None) for v in prior.values()
+            ):
+                raise ValueError("KV region layout metadata missing on a prefill rank")
+        except ValueError as exc:
+            return web.Response(text=str(exc), status=400)
 
         if self._registered_count and self.dsv41_spec_layout != dsv41_spec_layout:
             return web.Response(
@@ -2016,6 +2063,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 status=400,
             )
         self.dsv41_spec_layout = dsv41_spec_layout
+        self.kv_region_layouts_by_pp[stage] = kv_region_layouts
 
         if self.attn_tp_size is None:
             self.attn_tp_size = attn_tp_size
@@ -2108,6 +2156,11 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 page_size=self.page_size,
                 kv_cache_dtype=self.kv_cache_dtype,
                 dsv41_spec_layout=self.dsv41_spec_layout,
+                kv_region_layouts_by_pp=(
+                    self.kv_region_layouts_by_pp
+                    if any(v is not None for v in self.kv_region_layouts_by_pp.values())
+                    else None
+                ),
                 follow_bootstrap_room=(
                     self.follow_bootstrap_room
                     if self.follow_bootstrap_room is not None
@@ -2119,6 +2172,8 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             payload = dataclasses.asdict(info)
             if info.dsv41_spec_layout is None:
                 payload.pop("dsv41_spec_layout")
+            if info.kv_region_layouts_by_pp is None:
+                payload.pop("kv_region_layouts_by_pp")
             return web.json_response(payload, status=200)
 
         if not self._is_ready():

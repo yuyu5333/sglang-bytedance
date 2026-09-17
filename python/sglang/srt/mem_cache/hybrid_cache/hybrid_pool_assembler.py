@@ -597,9 +597,12 @@ def _dsv4_low_ratio_entries(
     Prefixes end at an even page boundary. Ratio-2 compression starts a new
     pair there, so its request-scoped ring is rebuilt rather than cached.
     """
-    import torch
-
     entries = []
+    transfer_regions = (
+        kvcache.get_kv_transfer_regions()
+        if getattr(kvcache, "has_kv_region_layouts", False)
+        else []
+    )
     for ratio, names in (
         (
             1,
@@ -623,48 +626,37 @@ def _dsv4_low_ratio_entries(
             continue
         kv_pool = kvcache.kv_pools[ratio]
         index_pool = kvcache.index_pools[ratio]
-        assert page_size % ratio == 0
-        slots_per_page = page_size // ratio
-        assert slots_per_page % index_pool.page_size == 0
-        index_pages_per_full_page = slots_per_page // index_pool.page_size
         layer_mapping = {
             source - kvcache.start_layer: index for index, source in enumerate(sources)
         }
-        regions = [(names[0], kv_pool, kv_pool.kv_buffer)]
-        if index_pool.index_k_with_scale_buffer is not None:
-            index_regions = [(names[1], index_pool.index_k_with_scale_buffer)]
-        else:
-            index_regions = [
-                (names[1], index_pool.index_k_payload_buffer),
-                (names[2], index_pool.index_k_scale_buffer),
+        for kind, name in (
+            ("kv", names[0]),
+            ("indexer", names[1]),
+            ("indexer_payload", names[1]),
+            ("indexer_scale", names[2]),
+        ):
+            regions = [
+                r
+                for r in transfer_regions
+                if r.layout.compression_ratio == ratio and r.layout.kind == kind
             ]
-        for name, buffers in index_regions:
-            # A FULL page contains several contiguous 64-slot FP4 index pages.
-            # Drop only the extra partial padding row beyond the FULL address space.
-            rows = []
-            for buffer in buffers:
-                full_pages = buffer.shape[0] // index_pages_per_full_page
-                rows.append(
-                    buffer[: full_pages * index_pages_per_full_page]
-                    .view(torch.uint8)
-                    .reshape(full_pages, -1)
-                )
-            regions.append((name, index_pool, rows))
-        for name, device_pool, buffers in regions:
+            if not regions:
+                continue
+            buffers = [r.buffer for r in regions]
             entries.append(
                 build_pool_entry(
                     name=name,
                     host_pool=DeepSeekV4PagedHostPool(
                         pool_name=str(name),
                         device_buffers=buffers,
-                        item_bytes=buffers[0].shape[1] * buffers[0].element_size(),
+                        item_bytes=regions[0].layout.page_bytes,
                         num_host_pages=num_host_pages,
                         slot_page_size=page_size,
                         layout=get_memory().hicache_mem_layout,
                         allocator_type=_get_allocator_type(),
                         page_aligned_only=True,
                     ),
-                    device_pool=device_pool,
+                    device_pool=kv_pool if kind == "kv" else index_pool,
                     layer_mapping=layer_mapping,
                     transfer_layer_num=transfer_layer_num,
                 )
@@ -920,6 +912,13 @@ def build_deepseek_v4_hicache_stack(
         _dsv4_low_ratio_entries(kvcache, page_size, num_host_pages, transfer_layer_num)
     )
 
+    storage_layout_namespace = None
+    if getattr(kvcache, "has_kv_region_layouts", False):
+        from sglang.srt.mem_cache.kv_region_layout import kv_region_namespace
+
+        storage_layout_namespace = kv_region_namespace(
+            [r.layout for r in kvcache.get_kv_transfer_regions()]
+        )
     host_pool_group = HostPoolGroup(entries)
     cache_controller = HybridCacheController(
         params.token_to_kv_pool_allocator,
@@ -939,6 +938,7 @@ def build_deepseek_v4_hicache_stack(
         transfer_layer_num=transfer_layer_num,
         enable_storage_metrics=enable_storage_metrics,
         host_memory_mode=get_memory().hicache_host_memory_mode,
+        storage_layout_namespace=storage_layout_namespace,
     )
     return host_pool_group, cache_controller
 

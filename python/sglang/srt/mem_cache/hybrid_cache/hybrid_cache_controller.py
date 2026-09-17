@@ -124,7 +124,9 @@ class HybridCacheController(BaseHiCacheController):
         transfer_layer_num: Optional[int] = None,
         enable_storage_metrics: bool = False,
         host_memory_mode: str = "cache",
+        storage_layout_namespace: Optional[str] = None,
     ):
+        self.storage_layout_namespace = storage_layout_namespace
         startup_storage_backend = storage_backend
         self.extra_host_mem_release_queues: dict[PoolName, Queue[torch.Tensor]] = {}
         super().__init__(

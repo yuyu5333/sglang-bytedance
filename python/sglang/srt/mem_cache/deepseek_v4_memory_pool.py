@@ -33,6 +33,7 @@ from sglang.srt.mem_cache.dsv41_main_kv_layout import (
     validate_dsv41_packed_main_kv_spec,
 )
 from sglang.srt.mem_cache.memory_pool import KVCache
+from sglang.srt.mem_cache.kv_region_layout import KVRegionLayout, KVTransferRegion
 from sglang.srt.runtime_context import get_exec, get_spec
 from sglang.srt.utils import ceil_div, is_hip
 
@@ -1286,12 +1287,12 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         data_lens: List[int] = []
         item_lens: List[int] = []
 
-        if any(
-            isinstance(pool, DeepSeekV41PackedMainKVPool)
-            for pool in self.kv_pools.values()
-        ):
-            raise NotImplementedError(
-                "packed Main KV transfer descriptors are introduced with PR2"
+        if self.has_kv_region_layouts:
+            regions = self.get_kv_transfer_regions()
+            return (
+                [r.buffer.data_ptr() for r in regions],
+                [r.buffer.nbytes for r in regions],
+                [r.layout.page_bytes for r in regions],
             )
 
         if self._unified_kv_fp8:
@@ -1359,6 +1360,78 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
                 item_lens.append(buf[0].nbytes * index_pages_per_full_page)
 
         return data_ptrs, data_lens, item_lens
+
+    @property
+    def has_kv_region_layouts(self) -> bool:
+        return any(getattr(self, "sources_by_ratio", {}).get(ratio) for ratio in (1, 2))
+
+    def get_kv_transfer_regions(self) -> List[KVTransferRegion]:
+        """FULL-page regions in PD registration order, shared with HiCache."""
+        if self._unified_kv:
+            raise ValueError("Main KV region descriptors require separate pools")
+        regions = []
+        for ratio, pool in self.kv_pools.items():
+            sources = self.sources_by_ratio.get(ratio, [])
+            if not sources:
+                continue
+            slots = self.page_size // ratio
+
+            def append(buffers, kind, layout_id, pages_per_full=1):
+                if len(buffers) != len(sources):
+                    raise ValueError("KV region source mapping does not cover buffers")
+                for source, buffer in zip(sources, buffers):
+                    # Indexer pools have one extra 64-slot padding page. FULL
+                    # transfers cannot address that partial trailing page.
+                    full_pages = buffer.shape[0] // pages_per_full
+                    rows = (
+                        buffer[: full_pages * pages_per_full]
+                        .view(torch.uint8)
+                        .reshape(full_pages, -1)
+                    )
+                    regions.append(
+                        KVTransferRegion(
+                            rows,
+                            KVRegionLayout(
+                                schema_version=1,
+                                kind=kind,
+                                layout_id=layout_id,
+                                compression_ratio=ratio,
+                                global_page_size=self.page_size,
+                                page_slots=slots,
+                                page_bytes=rows.shape[1],
+                                source_layer_id=source,
+                            ),
+                        )
+                    )
+
+            append(pool.kv_buffer, "kv", pool.kv_layout.value)
+            indexer = self.index_pools.get(ratio)
+            if indexer is None:
+                continue
+            if slots % indexer.page_size:
+                raise ValueError("Indexer pages do not tile a FULL page")
+            pages_per_full = slots // indexer.page_size
+            if indexer.index_k_with_scale_buffer is not None:
+                append(
+                    indexer.index_k_with_scale_buffer,
+                    "indexer",
+                    "indexer_fp8_v1",
+                    pages_per_full,
+                )
+            else:
+                append(
+                    indexer.index_k_payload_buffer,
+                    "indexer_payload",
+                    "indexer_fp4_block32_v1",
+                    pages_per_full,
+                )
+                append(
+                    indexer.index_k_scale_buffer,
+                    "indexer_scale",
+                    "indexer_fp4_block32_v1",
+                    pages_per_full,
+                )
+        return regions
 
     def get_unified_swa_ring_buf_infos(self) -> Tuple[List[int], List[int], List[int]]:
         # StateType.SWA_RING transfers [0, swa_pages) of each unified_kv layer;

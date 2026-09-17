@@ -565,6 +565,14 @@ class HiCacheController:
             self.storage_backend = StorageBackendFactory.create_backend(
                 storage_backend, self.storage_config, self.storage_host_pool
             )
+            if getattr(self, "storage_layout_namespace", None):
+                from sglang.srt.mem_cache.storage_layout_namespace import (
+                    LayoutNamespacedStorage,
+                )
+
+                self.storage_backend = LayoutNamespacedStorage(
+                    self.storage_backend, self.storage_layout_namespace
+                )
             self.storage_backend.register_mem_pool_host(self.storage_host_pool)
 
             self.enable_storage = True
