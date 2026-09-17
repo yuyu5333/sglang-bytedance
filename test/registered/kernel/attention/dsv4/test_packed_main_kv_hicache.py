@@ -16,6 +16,15 @@ register_cuda_ci(est_time=30, stage="base-b-kernel-unit", runner_config="1-gpu-l
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
+@pytest.fixture(autouse=True)
+def transfer_stream():
+    # CacheController runs its copies on a dedicated stream.
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        yield
+    stream.synchronize()
+
+
 @pytest.mark.parametrize(
     "layout,io",
     [
@@ -91,12 +100,23 @@ def test_packed_full_page_roundtrip(layout, io, request):
             buffer[1].copy_(page)
             buffer[2].fill_(211)
             expected.append(page.cpu())
-        host.backup_from_device_all_layer(entry.device_pool, host_ids, source_ids, io)
+        # Match HybridCacheController's write/load index placement.
+        write_host_ids = (
+            host_ids.cpu()
+            if io == "direct" or host.can_use_write_back_jit
+            else host_ids
+        )
+        write_source_ids = source_ids.cpu() if io == "direct" else source_ids
+        read_host_ids = host_ids.cpu() if io == "direct" else host_ids
+        read_target_ids = target_ids.cpu() if io == "direct" else target_ids
+        host.backup_from_device_all_layer(
+            entry.device_pool, write_host_ids, write_source_ids, io
+        )
         torch.cuda.synchronize()
         for i, buffer in enumerate(host.device_buffers):
             buffer[1].zero_()  # reused source page cannot supply the restored bytes
             host.load_to_device_per_layer(
-                entry.device_pool, host_ids, target_ids, i, io
+                entry.device_pool, read_host_ids, read_target_ids, i, io
             )
         torch.cuda.synchronize()
         for i, buffer in enumerate(host.device_buffers):
