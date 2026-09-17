@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
         ("page_first_direct", "direct"),
     ],
 )
-def test_packed_full_page_roundtrip(layout, io):
+def test_packed_full_page_roundtrip(layout, io, request):
     set_global_server_args_for_scheduler(ServerArgs(model_path="dummy", page_size=256))
     pool = DeepSeekV4TokenToKVPool(
         max_num_reqs=2,
@@ -57,6 +57,17 @@ def test_packed_full_page_roundtrip(layout, io):
         assembler, "get_memory", return_value=SimpleNamespace(hicache_mem_layout=layout)
     ):
         entries = assembler._dsv4_low_ratio_entries(pool, 256, 3, 5)
+
+    def release_registered_host_pages():
+        from sglang.srt.mem_cache.pool_host.common import _cuda_host_unregister
+
+        torch.cuda.synchronize()
+        for entry in entries:
+            buffers = entry.host_pool.kv_buffer
+            for buffer in buffers if isinstance(buffers, list) else [buffers]:
+                _cuda_host_unregister(buffer)
+
+    request.addfinalizer(release_registered_host_pages)
     assert len(entries) == 4  # CUDA C1/C2 Main and fused FP4 indexer pages
     assert {
         r.layout.layout_id
