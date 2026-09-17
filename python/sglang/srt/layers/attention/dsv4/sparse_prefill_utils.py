@@ -79,14 +79,14 @@ class SparsePrefillWorkspace:
     """Backend-owned scratch storage for sparse prefill KV dequantization.
 
     The workspace contents are fully overwritten before every attention call,
-    so token buckets and compression ratios can safely share one buffer. Sparse
-    prefill executes eagerly and serially on the supported paths, which makes it
-    safe to replace the scratch allocation when a larger extent is needed.
+    so token buckets and compression ratios can share storage. Dtypes retain
+    separate allocations. Graph warmup must reserve the required capacity;
+    capture never replaces a buffer or silently switches its dtype.
     """
 
     def __init__(self, device: torch.device):
         self.device = device
-        self._buffer: Optional[torch.Tensor] = None
+        self._buffers: dict[torch.dtype, torch.Tensor] = {}
 
     def get(
         self,
@@ -94,15 +94,21 @@ class SparsePrefillWorkspace:
         dtype: torch.dtype = torch.bfloat16,
     ) -> torch.Tensor:
         assert num_tokens > 0
-        current_capacity = self._buffer.shape[0] if self._buffer is not None else 0
-        current_dtype = self._buffer.dtype if self._buffer is not None else None
-        if num_tokens > current_capacity or dtype != current_dtype:
-            self._buffer = torch.empty(
+        buffer = self._buffers.get(dtype)
+        current_capacity = buffer.shape[0] if buffer is not None else 0
+        if num_tokens > current_capacity:
+            if torch.device(self.device).type == "cuda" and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    f"sparse prefill workspace needs {num_tokens} {dtype} rows, "
+                    f"reserved {current_capacity}; reserve during graph warmup"
+                )
+            buffer = torch.empty(
                 (num_tokens, 1, WORKSPACE_DIM),
                 dtype=dtype,
                 device=self.device,
             )
-        return self._buffer[:num_tokens]
+            self._buffers[dtype] = buffer
+        return buffer[:num_tokens]
 
 
 def combined_topk_width(topk: int, window_size: int) -> int:

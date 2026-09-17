@@ -1232,6 +1232,15 @@ class DeepseekV4AttnBackend(
         self.dsv41_main_kv_consumer = getattr(
             kernel, "dsv41_main_kv_consumer", "auto"
         )
+        self.main_kv_staging_workspace = None
+        if self.dsv41_main_kv_consumer == "staged" and self.low_ratios:
+            from sglang.srt.mem_cache.dsv41_staging_workspace import (
+                MainKVStagingWorkspace,
+            )
+
+            self.main_kv_staging_workspace = MainKVStagingWorkspace(
+                self.device, self.index_topk
+            )
         if self.dsv41_main_kv_consumer == "direct":
             capabilities = _get_flashmla_capabilities()
             if (
@@ -3904,7 +3913,10 @@ class DeepseekV4AttnBackend(
             # the sparse chunk cache does not read.
             if (
                 forward_batch.forward_mode.is_extend_without_speculative()
-                and packed_main_view is None
+                and (
+                    packed_main_view is None
+                    or self.dsv41_main_kv_consumer == "staged"
+                )
                 and not get_platform().is_sm120
                 and self.forward_metadata.late_layer_tail is None
                 and token_to_kv_pool.request_window is None
@@ -4002,6 +4014,16 @@ class DeepseekV4AttnBackend(
                 else:
                     from sgl_kernel.flash_mla import flash_mla_with_kvcache
 
+                if (
+                    packed_main_view is not None
+                    and self.dsv41_main_kv_consumer == "staged"
+                ):
+                    return self._forward_staged_main(
+                        q, swa_k_cache, swa_page_indices, swa_topk_lengths,
+                        packed_main_view, extra_indices, extra_topk_lengths,
+                        attn_sink,
+                    ).squeeze(1)
+
                 _maybe_precompute_flashmla_sched_meta(
                     flashmla_metadata,
                     q=q,
@@ -4067,6 +4089,71 @@ class DeepseekV4AttnBackend(
 
         raise NotImplementedError("ragged attention")
 
+    def _forward_staged_main(
+        self, q, swa_cache, swa_indices, swa_lengths, main_view, main_indices,
+        main_lengths, attn_sink,
+    ):
+        """Convert selected Main slots and run V4 attention in bounded tiles."""
+        from sgl_kernel.flash_mla import flash_mla_with_kvcache
+
+        from sglang.kernels.ops.attention.dsv4.packed_main_kv_staging import (
+            stage_packed_main_kv,
+        )
+
+        workspace = self.main_kv_staging_workspace
+        assert workspace is not None
+        # Runtime represents each decode/verify/prefill token as one query row.
+        assert q.shape[1] == 1 and main_indices.shape[1] == 1
+        output = q.new_empty((*q.shape[:-1], self.head_dim_v))
+        for start in range(0, q.shape[0], workspace.query_tile):
+            end = min(start + workspace.query_tile, q.shape[0])
+            lengths = None if main_lengths is None else main_lengths[start:end]
+            cache, remap = stage_packed_main_kv(
+                main_view, main_indices[start:end, 0], lengths, workspace
+            )
+            # A fresh schedule belongs to this tile and these lengths. During
+            # capture its scheduler kernel is recorded, so replay sees updates.
+            tile_output = flash_mla_with_kvcache(
+                q=q[start:end],
+                k_cache=swa_cache,
+                head_dim_v=self.head_dim_v,
+                block_table=None,
+                cache_seqlens=None,
+                tile_scheduler_metadata=_create_flashmla_metadata(),
+                softmax_scale=self.softmax_scale,
+                is_fp8_kvcache=True,
+                indices=swa_indices[start:end],
+                topk_length=None if swa_lengths is None else swa_lengths[start:end],
+                attn_sink=attn_sink,
+                extra_k_cache=cache,
+                extra_indices_in_kvcache=remap.unsqueeze(1),
+                extra_topk_length=lengths,
+            )[0]
+            output[start:end].copy_(tile_output)
+        return output
+
+    def _gather_prefill_main(self, pool, layer_id, token_ids, out, *, q8=False):
+        """Keep positional prefill indexing independent of the cache format."""
+        layout = pool.get_extra_key_layout(layer_id)
+        if layout.is_packed_main_kv:
+            from sglang.kernels.ops.attention.dsv4.packed_main_kv_staging import (
+                gather_packed_main_kv,
+            )
+
+            assert self.dsv41_main_kv_consumer == "staged"
+            return gather_packed_main_kv(
+                pool.get_extra_key_view(layer_id), token_ids, out
+            )
+        kwargs = dict(page_size=pool.get_extra_key_page_size(layer_id), out=out)
+        if q8:
+            assert layout is KVLayout.V4
+            return gather_dequant_requant_fp8_paged(
+                pool.get_extra_key_buffer(layer_id), token_ids, **kwargs
+            )
+        return dequantize_k_cache_paged(
+            pool.get_extra_key_buffer(layer_id), token_ids, layout=layout, **kwargs
+        )
+
     def _forward_prefill_sparse(
         self,
         q: torch.Tensor,
@@ -4113,7 +4200,6 @@ class DeepseekV4AttnBackend(
             swa_slice = workspace
         else:
             extra_page_size = token_to_kv_pool.get_extra_key_page_size(layer_id)
-            extra_k_cache = token_to_kv_pool.get_extra_key_buffer(layer_id)
             if compress_ratio == 128:
                 assert core_attn_metadata.c128_page_indices is not None
                 cache.ensure_c128(core_attn_metadata.c128_page_indices)
@@ -4142,12 +4228,8 @@ class DeepseekV4AttnBackend(
             swa_slice = workspace[n_compressed:]
 
         if compressed_slice is not None:
-            dequantize_k_cache_paged(
-                extra_k_cache,
-                flat_token_ids,
-                page_size=extra_page_size,
-                out=compressed_slice,
-                layout=token_to_kv_pool.get_extra_key_layout(layer_id),
+            self._gather_prefill_main(
+                token_to_kv_pool, layer_id, flat_token_ids, compressed_slice
             )
         dequantize_k_cache_paged(
             token_to_kv_pool.get_swa_key_buffer_radix(layer_id),
@@ -4294,7 +4376,6 @@ class DeepseekV4AttnBackend(
             swa_slice = workspace
         else:
             extra_page_size = token_to_kv_pool.get_extra_key_page_size(layer_id)
-            extra_k_cache = token_to_kv_pool.get_extra_key_buffer(layer_id)
 
             if compress_ratio == 128:
                 assert core_attn_metadata.c128_page_indices is not None
@@ -4328,11 +4409,8 @@ class DeepseekV4AttnBackend(
         # The Q8KV8 gather reads the 584-byte V4 layout only (its kernel is SM90).
         assert token_to_kv_pool.get_swa_key_layout() is KVLayout.V4
         if compressed_slice is not None:
-            gather_dequant_requant_fp8_paged(
-                extra_k_cache,
-                flat_token_ids,
-                page_size=extra_page_size,
-                out=compressed_slice,
+            self._gather_prefill_main(
+                token_to_kv_pool, layer_id, flat_token_ids, compressed_slice, q8=True
             )
 
         gather_dequant_requant_fp8_paged(

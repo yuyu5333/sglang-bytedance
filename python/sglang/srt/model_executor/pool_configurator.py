@@ -1054,6 +1054,24 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
                 self._dsv4_compressed_kv_layout,
                 self._dsv41_main_kv_layout_specs,
             ) = layout_resolver()
+        self.main_staging_fixed_bytes = 0
+        if (
+            self._dsv41_main_kv_layout_specs
+            and getattr(get_exec().kernel, "dsv41_main_kv_consumer", "auto") == "staged"
+            and any(r in (1, 2) for r in self.compression_ratios)
+        ):
+            from sglang.srt.mem_cache.dsv41_staging_workspace import (
+                staging_workspace_bytes,
+            )
+
+            # Each PDMux backend owns its scratch. DSpark's SWA-only draft
+            # backend has no Main KV consumer and allocates no staging pages.
+            owners = 1 + (
+                get_disagg().sm_group_num if get_disagg().enable_pdmux else 0
+            )
+            self.main_staging_fixed_bytes = owners * staging_workspace_bytes(
+                getattr(cfg.hf_text_config, "index_topk", 512)
+            )
         self.is_speculative = get_spec().speculative_algorithm is not None
         self.online_c128_mtp_max_draft_tokens = max_speculative_num_draft_tokens() or 0
         self.attn_dp_size = kvc.ps.attn_dp_size
@@ -1531,6 +1549,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             + swa_fixed_bytes
             + swa_ring_fixed_bytes
             + c4_state_fixed_bytes
+            + self.main_staging_fixed_bytes
         )
         available_bytes_for_tokens = max(available_bytes - fixed_bytes, 0)
         full_token = int(available_bytes_for_tokens / self.bytes_per_full_token)
@@ -1553,6 +1572,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             f"swa_fixed={swa_fixed_bytes / (1 << 30):.2f} GB, "
             f"swa_ring_fixed={swa_ring_fixed_bytes / (1 << 30):.2f} GB, "
             f"c4_state_fixed={c4_state_fixed_bytes / (1 << 30):.2f} GB, "
+            f"main_staging_fixed={self.main_staging_fixed_bytes / (1 << 20):.4f} MiB, "
             f"full_token={sizes.full_max_total_num_tokens}"
         )
         return self._to_config(sizes)
