@@ -109,10 +109,15 @@ class TestDSV41PackedMainKVLayout(CustomTestCase):
         from sglang.srt.model_executor.cuda_graph_config import Backend
 
         config = SimpleNamespace(
-            dsv41_main_kv_layout="packed_fp4", dsv41_main_kv_consumer="staged",
-            dsv4_attn_backend="flashmla", enable_encoder_swa_bounded_replay=False,
-            enable_decoder_swa_bounded_replay=False, speculative_algorithm=None,
-            enable_hisparse=False, enable_two_batch_overlap=False, pp_size=1,
+            dsv41_main_kv_layout="packed_fp4",
+            dsv41_main_kv_consumer="staged",
+            dsv4_attn_backend="flashmla",
+            enable_encoder_swa_bounded_replay=False,
+            enable_decoder_swa_bounded_replay=False,
+            speculative_algorithm=None,
+            enable_hisparse=False,
+            enable_two_batch_overlap=False,
+            pp_size=1,
             disaggregation_mode="null",
             cuda_graph_config=SimpleNamespace(
                 prefill=SimpleNamespace(backend=Backend.DISABLED, max_seq_len=None)
@@ -129,7 +134,10 @@ class TestDSV41PackedMainKVLayout(CustomTestCase):
             validate_deepseek_v41_features(object())
             for layout in ("auto", "flashmla_fp8"):
                 config.dsv41_main_kv_layout = layout
-                with self.subTest(layout=layout), self.assertRaisesRegex(ValueError, "requires"):
+                with (
+                    self.subTest(layout=layout),
+                    self.assertRaisesRegex(ValueError, "requires"),
+                ):
                     validate_deepseek_v41_features(object())
             config.dsv41_main_kv_layout = "packed_fp4"
             platform.is_sm90 = False

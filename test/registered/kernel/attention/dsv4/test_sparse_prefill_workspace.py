@@ -23,8 +23,14 @@ def test_workspace_dtype_capacity_and_capture():
     graph.replay()
     torch.testing.assert_close(bf16[:64], torch.full_like(bf16[:64], 3))
     # Isolate the capture guard without intentionally invalidating a live graph.
-    with patch("torch.cuda.is_current_stream_capturing", return_value=True) as capturing:
-        for rows, dtype in ((257, torch.bfloat16), (65, torch.float8_e4m3fn), (8, torch.float16)):
+    with patch(
+        "torch.cuda.is_current_stream_capturing", return_value=True
+    ) as capturing:
+        for rows, dtype in (
+            (257, torch.bfloat16),
+            (65, torch.float8_e4m3fn),
+            (8, torch.float16),
+        ):
             with pytest.raises(RuntimeError, match="reserve during graph warmup"):
                 ws.get(rows, dtype)
         assert capturing.call_count == 3
