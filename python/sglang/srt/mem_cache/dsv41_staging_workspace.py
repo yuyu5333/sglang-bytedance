@@ -42,8 +42,10 @@ class MainKVStagingWorkspace:
             device=device,
         )
         # This is an API view, not an AoS interpretation of the physical cache.
-        self.cache = self.pages[:, : STAGING_PAGE_SLOTS * 584].view(
-            pages, STAGING_PAGE_SLOTS, 1, 584
+        # Explicit strides also preserve the padded page stride for a single page.
+        self.cache = self.pages.as_strided(
+            (pages, STAGING_PAGE_SLOTS, 1, 584),
+            (self.pages.stride(0), 584, 584, 1),
         )
         self.indices = torch.empty(
             (query_tile, self.width), dtype=torch.int32, device=device
