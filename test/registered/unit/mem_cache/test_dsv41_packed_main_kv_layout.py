@@ -322,8 +322,17 @@ class TestDSV41PackedMainKVLayout(CustomTestCase):
         )
         with self.assertRaisesRegex(TypeError, "legacy FlashMLA"):
             pool.get_extra_key_buffer(1)
-        with self.assertRaisesRegex(NotImplementedError, "transfer descriptors"):
-            pool.get_contiguous_buf_infos()
+        ptrs, lengths, item_bytes = pool.get_contiguous_buf_infos()
+        regions = pool.get_kv_transfer_regions()
+        self.assertEqual(ptrs, [r.buffer.data_ptr() for r in regions])
+        self.assertEqual(lengths, [r.buffer.nbytes for r in regions])
+        self.assertEqual(item_bytes, [r.layout.page_bytes for r in regions])
+        main_regions = [r for r in regions if r.layout.kind == "kv"]
+        self.assertEqual(
+            [(r.layout.source_layer_id, r.layout.page_bytes) for r in main_regions],
+            [(3, 98304), (1, 49152)],
+        )
+        self.assertTrue(all(r.layout.global_page_size == 256 for r in regions))
 
         packed_pool = pool.kv_pools[2]
         with patch.object(packed_pool, "set_key_buffer_fused") as writer:
