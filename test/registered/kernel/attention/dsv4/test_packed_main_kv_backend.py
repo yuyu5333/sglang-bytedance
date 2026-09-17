@@ -87,8 +87,11 @@ def make_case(rows, heads, page_slots):
     def reference():
         from sgl_kernel.flash_mla import flash_mla_with_kvcache
 
-        # Fresh scheduler reads the current lengths. Positive OOB is masked by
-        # the baseline cache reader, just as it is by the adapter.
+        # The packed adapter promises bounds masking. The legacy SM90 reader
+        # requires -1 for OOB slots, so normalize its reference input explicitly.
+        reference_ids = torch.where(
+            (ids >= 0) & (ids < 2 * page_slots), ids, -1
+        )
         return flash_mla_with_kvcache(
             q=q.unsqueeze(1),
             k_cache=swa.as_strided((2, 128, 1, 584), (swa.stride(0), 584, 584, 1)),
@@ -100,7 +103,7 @@ def make_case(rows, heads, page_slots):
             extra_k_cache=legacy.as_strided(
                 (2, page_slots, 1, 584), (legacy.stride(0), 584, 584, 1)
             ),
-            extra_indices_in_kvcache=ids.unsqueeze(1), extra_topk_length=lengths,
+            extra_indices_in_kvcache=reference_ids.unsqueeze(1), extra_topk_length=lengths,
         )[0].squeeze(1)
 
     return backend, view, legacy, ids, lengths, run, reference
