@@ -9,7 +9,6 @@ import triton.language as tl
 from sglang.kernels.ops.attention.dsv4.dequant_k_cache import _e2m1_code_to_fp32
 from sglang.srt.mem_cache.dsv41_main_kv_layout import PackedMainKVView
 from sglang.srt.mem_cache.dsv41_staging_workspace import (
-    STAGING_PAGE_SLOTS,
     MainKVStagingWorkspace,
 )
 
@@ -28,7 +27,7 @@ def _load_legacy_nope(src, loc, valid, tile, PAGE_SLOTS: tl.constexpr):
             tl.pointer_type(tl.float8e4nv)
         ),
         valid,
-        other=0,
+        other=0.0,
     ).to(tl.float32)
     value = (_e2m1_code_to_fp32(code) * scale).to(tl.bfloat16).to(tl.float32)
     # store.cuh uses max(amax, 1e-4) / 448, NOT max(amax / 448, 1e-4).
