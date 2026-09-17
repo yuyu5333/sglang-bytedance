@@ -1318,7 +1318,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 657:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TWO_CTA_N128_MXFP4<3>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_N128_MXFP4<3>, 8>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN64Of128>));
       INVOKE_GEMM_WITH_CONFIG_AS(
@@ -1328,7 +1328,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 658:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_TWO_CTA_N128_MXFP4<4>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_N128_MXFP4<4>, 8>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN64Of128>));
       INVOKE_GEMM_WITH_CONFIG_AS(
@@ -1338,7 +1338,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 659:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_C128_N64_MXFP4<3>>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_C128_N64_MXFP4<3>, 8>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
               128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
@@ -1346,7 +1346,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 660:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_C128_N64_MXFP4<4>>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_TWO_CTA_C128_N64_MXFP4<4>, 8>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
               128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
