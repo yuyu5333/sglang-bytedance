@@ -574,21 +574,23 @@ struct SM90_WEIGHT_SWIZZLE_MXFP4 {
   };
 };
 
-template <class BaseConfig>
+template <class BaseConfig, int Fragment = 0>
 struct SM90_SHORT_EPILOGUE_MXFP4 {
   using Base = typename BaseConfig::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     using OldEpilogue = typename Base::CollectiveEpilogue;
     using OldPolicy = typename OldEpilogue::DispatchPolicy;
+    static constexpr int FragmentSize = Fragment == 0 ? OldPolicy::FragmentSize : Fragment;
+    static_assert(Fragment == 0 || Fragment == 8);
     using Policy = cutlass::epilogue::Sm90PtrArrayTmaWarpSpecialized<
-        2, 1, OldPolicy::FragmentSize, OldPolicy::ReuseSmemC, OldPolicy::DelayTmaStore, 2>;
+        2, 1, FragmentSize, OldPolicy::ReuseSmemC, OldPolicy::DelayTmaStore, 2>;
     using Operation = cutlass::epilogue::fusion::PtrArrayPerTokenScaledAcc<
         typename OldEpilogue::ElementD, float, float>;
     using Callbacks = cutlass::epilogue::fusion::FusionCallbacks<
         Policy, Operation, typename OldEpilogue::CtaTileMNK, typename OldEpilogue::EpilogueTile>;
     using CollectiveEpilogue =
         tensorrt_llm::cutlass_extensions::epilogue::collective::Sm90MixedInputPtrArrayTmaWarpSpecializedEpilogue<
-            2, 1, OldPolicy::FragmentSize, OldPolicy::ReuseSmemC, OldPolicy::DelayTmaStore, 2,
+            2, 1, FragmentSize, OldPolicy::ReuseSmemC, OldPolicy::DelayTmaStore, 2,
             typename OldEpilogue::CtaTileMNK,
             typename OldEpilogue::EpilogueTile,
             typename OldEpilogue::ElementC,
@@ -609,6 +611,8 @@ struct SM90_SHORT_EPILOGUE_MXFP4 {
         typename Base::CollectiveMainloopScaleOnly,
         CollectiveEpilogue,
         typename Base::PrecomputedTileScheduler>;
+    static_assert(sizeof(typename GemmKernelScaleOnly::SharedStorage) + 1024 <=
+                  228 * 1024 / GemmKernelScaleOnly::MinBlocksPerMultiprocessor);
     using GemmScaleOnly = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
   };
 };
@@ -1254,7 +1258,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 655:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_THREE_CTA_N64_MXFP4<3>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_THREE_CTA_N64_MXFP4<3>, 8>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
               128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
@@ -1262,7 +1266,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
     case 656:
-      INVOKE_GEMM_WITH_CONFIG_AS((SM90_THREE_CTA_N64_MXFP4<4>));
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_THREE_CTA_N64_MXFP4<4>, 8>));
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
               128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
