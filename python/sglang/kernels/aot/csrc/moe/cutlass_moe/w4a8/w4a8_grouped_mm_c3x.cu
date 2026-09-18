@@ -451,7 +451,7 @@ struct SM90_TWO_CTA_PINGPONG_MXFP4 {
 
 template <int Stages, int Channels = 64, int Ctas = 3, int Rows = 64>
 struct SM90_FIXED_RF_N64_MXFP4 {
-  using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<
+  using Base = typename SM90_GLOBAL_ACTIVATION_TMA_MXFP4<
       SM90_PRECOMPUTED_MXFP4<Channels, Rows, 128, 1, 1, false>>::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
     static constexpr auto ExpertRows = Rows == 128 ? sgl_kernel::swg_detail::ExpertRowPolicy::MainN128
