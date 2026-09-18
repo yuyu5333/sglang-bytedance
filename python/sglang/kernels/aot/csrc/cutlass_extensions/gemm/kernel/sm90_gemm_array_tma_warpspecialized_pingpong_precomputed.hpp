@@ -115,6 +115,13 @@ struct PingpongCtaCount<Mainloop, std::void_t<decltype(Mainloop::CtasPerSm)>> {
   static constexpr int value = Mainloop::CtasPerSm;
 };
 
+template <class Mainloop, class = void>
+struct FixedRegisterProducerWarp : std::false_type {};
+
+template <class Mainloop>
+struct FixedRegisterProducerWarp<Mainloop, std::void_t<decltype(Mainloop::FixedRegisterProducer)>>
+    : std::bool_constant<Mainloop::FixedRegisterProducer> {};
+
 template <class CollectiveMainloop, class = void>
 struct UseTailMmaHandoff {
   static constexpr bool value = false;
@@ -212,8 +219,12 @@ class GemmUniversalPrecomputedScheduler<
 
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = 2;
+  static constexpr bool UseFixedRegisterProducer = FixedRegisterProducerWarp<CollectiveMainloop>::value;
+  static_assert(!UseFixedRegisterProducer || cute::size(ClusterShape{}) == 1);
+  static_assert(!UseFixedRegisterProducer || !UseIndependentTmaProducers<CollectiveMainloop>::value);
   static constexpr uint32_t MaxThreadsPerBlock =
-      CUTE_STATIC_V(size(TiledMma{})) + (NumMmaWarpGroups * NumThreadsPerWarpGroup);
+      (UseFixedRegisterProducer ? 32 : CUTE_STATIC_V(size(TiledMma{}))) +
+      (NumMmaWarpGroups * NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = PingpongCtaCount<CollectiveMainloop>::value;
   static constexpr uint32_t NumProducerThreads = CollectiveMainloop::NumProducerThreadEvents;
 
@@ -563,7 +574,10 @@ class GemmUniversalPrecomputedScheduler<
     int warp_idx_in_warp_group = warp_idx % NumWarpsPerWarpGroup;
     int warp_group_thread_idx = thread_idx % NumThreadsPerWarpGroup;
     int mma_thread_idx = thread_idx % size(TiledMma{});
-    auto warp_group_idx = canonical_warp_group_idx();
+    int const physical_warp_group_idx = canonical_warp_group_idx();
+    int const warp_group_idx = UseFixedRegisterProducer
+                                  ? (physical_warp_group_idx == 2 ? 0 : physical_warp_group_idx + 1)
+                                  : physical_warp_group_idx;
     auto warp_group_role = WarpGroupRole(warp_group_idx);
     auto producer_warp_role = ProducerWarpRole(warp_idx_in_warp_group);
     int lane_predicate = cute::elect_one_sync();
@@ -660,6 +674,9 @@ class GemmUniversalPrecomputedScheduler<
     // separately
     CollectiveMainloop collective_mainloop;
     CollectiveEpilogue collective_epilogue(params.epilogue, shared_storage.tensors.epilogue);
+    if constexpr (UseFixedRegisterProducer) {
+      assert(!collective_epilogue.is_producer_load_needed());
+    }
 
     // Wait for all thread blocks in the Cluster
     cluster_wait_fn();
@@ -712,7 +729,9 @@ class GemmUniversalPrecomputedScheduler<
     auto k_tile_count = size<3>(gA_mkl);
 
     if (warp_group_role == WarpGroupRole::Producer) {
-      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      if constexpr (!UseFixedRegisterProducer) {
+        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+      }
 
       // Mainloop Producer Warp
       if (is_mainloop_producer) {
@@ -925,7 +944,9 @@ class GemmUniversalPrecomputedScheduler<
     }  // Producer Warp Group End
 
     else if (warp_group_role == WarpGroupRole::Consumer0 || warp_group_role == WarpGroupRole::Consumer1) {
-      cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+      if constexpr (!UseFixedRegisterProducer) {
+        cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+      }
 
       // Index of warp group within consumer warp groups
       int consumer_warp_group_idx = warp_group_role == WarpGroupRole::Consumer0 ? 0 : 1;
