@@ -449,12 +449,13 @@ struct SM90_TWO_CTA_PINGPONG_MXFP4 {
   };
 };
 
-template <int Stages, int Channels = 64, int Ctas = 3>
+template <int Stages, int Channels = 64, int Ctas = 3, int Rows = 64>
 struct SM90_FIXED_RF_N64_MXFP4 {
   using Base = SM90_GLOBAL_ACTIVATION_TMA_MXFP4<
-      SM90_PRECOMPUTED_MXFP4<Channels, 64, 128, 1, 1, false>>::Cutlass3xW4A8Gemm;
+      SM90_PRECOMPUTED_MXFP4<Channels, Rows, 128, 1, 1, false>>::Cutlass3xW4A8Gemm;
   struct Cutlass3xW4A8Gemm : Base {
-    static constexpr auto ExpertRows = sgl_kernel::swg_detail::ExpertRowPolicy::MainN64;
+    static constexpr auto ExpertRows = Rows == 128 ? sgl_kernel::swg_detail::ExpertRowPolicy::MainN128
+                                                  : sgl_kernel::swg_detail::ExpertRowPolicy::MainN64;
     using OldMainloop = typename Base::CollectiveMainloopScaleOnly;
     using Policy = cutlass::gemm::MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
         Stages, typename OldMainloop::DispatchPolicy::ClusterShape, typename OldMainloop::KernelSchedule>;
@@ -485,7 +486,9 @@ struct SM90_FIXED_RF_N64_MXFP4 {
         typename Base::CollectiveEpilogue,
         typename Base::PrecomputedTileScheduler>;
     static_assert(Stages == 3 || Stages == 4);
-    static_assert((Channels == 64 && Ctas == 3) || (Channels == 128 && Ctas == 2));
+    static_assert((Channels == 64 && Rows == 64 && Ctas == 3) ||
+                  (Channels == 128 && Rows == 64 && Ctas == 2) ||
+                  (Channels == 64 && Rows == 128 && Ctas == 2));
     static_assert(GemmKernelScaleOnly::MaxThreadsPerBlock == 288);
     static_assert(GemmKernelScaleOnly::MinBlocksPerMultiprocessor == Ctas);
     static_assert(sizeof(typename GemmKernelScaleOnly::SharedStorage) + 1024 <= 228 * 1024 / Ctas);
@@ -1245,6 +1248,26 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       INVOKE_GEMM_WITH_CONFIG_AS(
           (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
       return;
+    case 665:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_FIXED_RF_N64_MXFP4<3, 64, 2, 128>, 8>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN64Of128>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
+    case 666:
+      INVOKE_GEMM_WITH_CONFIG_AS((SM90_SHORT_EPILOGUE_MXFP4<SM90_FIXED_RF_N64_MXFP4<4, 64, 2, 128>, 8>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_TWO_CTA_PINGPONG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN64Of128>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_PRECOMPUTED_MXFP4<
+              128, 32, 512, 1, 1, false, sgl_kernel::swg_detail::ExpertRowPolicy::TailN32Of64>>));
+      INVOKE_GEMM_WITH_CONFIG_AS(
+          (SM90_GLOBAL_ACTIVATION_TMA_MXFP4<SM90_N16_K256_SWG_MXFP4<sgl_kernel::swg_detail::ExpertRowPolicy::TailN16>>));
+      return;
     default:
       TORCH_CHECK(
           false,
@@ -1252,7 +1275,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           swg_config,
           "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 364, 391, 392, 393, 401, 402, 403, 404, 405, "
           "441, 448, 449, 460, 470, 471, 473, 474, 475, 476, 483, 503, 518, 574, 575, 584, "
-          "608, 616, 645, 649, 661, 662, 663, 664");
+          "608, 616, 645, 649, 661, 662, 663, 664, 665, 666");
   }
 }
 
