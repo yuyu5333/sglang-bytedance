@@ -63,11 +63,11 @@ class Mxfp4FlashinferCutlassMoEMethod:
         params_dtype,
         **extra_weight_attrs,
     ):
-        # Both CUTLASS paths require dimensions aligned to 128.
-        if hidden_size % 128 != 0 or intermediate_size_per_partition % 128 != 0:
+        # Load native TP shards; align the intermediate after loading.
+        if hidden_size % 128 != 0 or intermediate_size_per_partition % 32 != 0:
             raise ValueError(
-                "Mxfp4FlashinferCutlassMoEMethod requires hidden_size and "
-                "intermediate_size_per_partition to be multiples of 128 "
+                "Mxfp4FlashinferCutlassMoEMethod requires hidden_size % 128 "
+                "and intermediate_size_per_partition % 32 "
                 f"(got hidden={hidden_size}, "
                 f"intermediate={intermediate_size_per_partition})."
             )
@@ -127,6 +127,23 @@ class Mxfp4FlashinferCutlassMoEMethod:
 
         if getattr(layer, "_mega_moe_weights_built", False):
             return
+
+        from sglang.srt.layers.quantization.mxfp4_padding import (
+            pad_mxfp4_moe_intermediate,
+        )
+
+        padded = pad_mxfp4_moe_intermediate(
+            layer.w13_weight.data,
+            layer.w2_weight.data,
+            layer.w13_weight_scale_inv.data,
+            layer.w2_weight_scale_inv.data,
+        )
+        for name, tensor in zip(
+            ("w13_weight", "w2_weight", "w13_weight_scale_inv", "w2_weight_scale_inv"),
+            padded,
+        ):
+            getattr(layer, name).data = tensor
+        del padded
 
         arch = "SM120" if self._use_mxfp8_act_scaling else "SM90"
         precision = (

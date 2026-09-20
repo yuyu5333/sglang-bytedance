@@ -234,16 +234,16 @@ class CutlassMxfp4A8FusedMoeRunner:
     def __call__(
         self,
         a: torch.Tensor,
-        w1_q: torch.Tensor,
-        w2_q: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        w1_fused: torch.Tensor,
-        w2_fused: torch.Tensor,
-        w1_scale_fused: torch.Tensor,
-        w2_scale_fused: torch.Tensor,
-        w1_residual_fused: torch.Tensor,
-        w2_residual_fused: torch.Tensor,
+        w1_q: Optional[torch.Tensor],
+        w2_q: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        w1_fused: Optional[torch.Tensor],
+        w2_fused: Optional[torch.Tensor],
+        w1_scale_fused: Optional[torch.Tensor],
+        w2_scale_fused: Optional[torch.Tensor],
+        w1_residual_fused: Optional[torch.Tensor],
+        w2_residual_fused: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         a_strides1: torch.Tensor,
@@ -264,20 +264,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         swiglu_limit: Optional[float] = None,
     ) -> torch.Tensor:
         assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-        assert w1_q.dtype == torch.int8
-        assert w2_q.dtype == torch.int8
-        assert a.shape[1] // 2 == w1_q.shape[2], "Hidden size mismatch w1"
-        assert w1_q.shape[2] * 2 == w2_q.shape[1], "Hidden size mismatch w2"
-        assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
-        assert w1_q.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
-        assert w1_q.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
-
-        num_local_experts = w1_q.size(0)
-        m = a.size(0)
-        k = w1_q.size(2) * 2
-        n = w2_q.size(2) * 2
         topk = topk_ids.size(1)
-        device = a.device
 
         if apply_router_weight_on_input:
             assert topk == 1, (
@@ -318,8 +305,18 @@ class CutlassMxfp4A8FusedMoeRunner:
 
         assert w1_fused.dtype == torch.int8
         assert w2_fused.dtype == torch.int8
+        assert a.shape[1] // 2 == w1_fused.shape[2], "Hidden size mismatch w1"
+        assert w1_fused.shape[2] * 2 == w2_fused.shape[1], "Hidden size mismatch w2"
+        assert w1_fused.shape[0] == w2_fused.shape[0], "Expert number mismatch"
+        num_local_experts = w1_fused.size(0)
+        m = a.size(0)
+        k = w1_fused.size(2) * 2
+        n = w2_fused.size(2) * 2
+        device = a.device
         assert w1_scale_fused.dtype == torch.uint8
         assert w2_scale_fused.dtype == torch.uint8
+        assert w1_scale_fused.shape[0] == num_local_experts
+        assert w2_scale_fused.shape[0] == num_local_experts
         assert w1_residual_fused.shape == (num_local_experts,)
         assert w2_residual_fused.shape == (num_local_experts,)
 
