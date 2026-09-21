@@ -641,7 +641,7 @@ void fused_per_token_quant_fp8(
   TORCH_CHECK(
       expert_offsets.numel() == num_experts + 1 && expert_offsets.scalar_type() == at::kInt,
       "expert_offsets must be int32 [E + 1]");
-  TORCH_CHECK(num_experts >= 1 && num_experts <= 256, "num_experts must be in [1, 256]");
+  TORCH_CHECK(num_experts >= 1 && num_experts <= 1024, "num_experts must be in [1, 1024]");
   TORCH_CHECK(
       input.device() == output_q.device() && input.device() == output_s.device() &&
           input.device() == residual.device() && input.device() == expert_offsets.device(),
@@ -684,7 +684,7 @@ void fused_per_token_quant_fp8_shuffled(
   TORCH_CHECK(
       expert_offsets.numel() == num_experts + 1 && expert_offsets.scalar_type() == at::kInt,
       "expert_offsets must be int32 [E + 1]");
-  TORCH_CHECK(num_experts >= 1 && num_experts <= 256, "num_experts must be in [1, 256]");
+  TORCH_CHECK(num_experts >= 1 && num_experts <= 1024, "num_experts must be in [1, 1024]");
   TORCH_CHECK(
       input.device() == permutation.device() && input.device() == output_q.device() &&
           input.device() == output_s.device() && input.device() == residual.device() &&

@@ -171,8 +171,8 @@ __global__ void fused_swiglu_quant_fp8_kernel(
     scale = max_value / FP8_E4M3_MAX;
     scale_inv = scale == 0.0f ? 0.0f : 1.0f / scale;
 
-    // upper_bound(expert_offsets, token) - 1. This handles empty experts and
-    // both the E=1 and E=256 production configurations without a host read.
+    // upper_bound(expert_offsets, token) - 1. This handles empty experts
+    // without a fixed-size expert table or a host read.
     int lo = 0;
     int hi = static_cast<int>(num_experts);
     while (lo + 1 < hi) {
@@ -233,7 +233,7 @@ void fused_swiglu_quant_fp8(
   TORCH_CHECK(
       expert_offsets.numel() == num_experts + 1 && expert_offsets.scalar_type() == at::kInt,
       "expert_offsets must be int32 [E + 1]");
-  TORCH_CHECK(num_experts >= 1 && num_experts <= 256, "num_experts must be in [1, 256]");
+  TORCH_CHECK(num_experts >= 1 && num_experts <= 1024, "num_experts must be in [1, 1024]");
 
   if (num_tokens == 0) return;
   constexpr int kThreads = 256;
