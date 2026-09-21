@@ -195,16 +195,34 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
 
     @staticmethod
-    def _fused_configs(num_tokens: int) -> Tuple[int, int]:
+    def _fused_configs(
+        num_tokens: int,
+        hidden_size: Optional[int] = None,
+        intermediate_size: Optional[int] = None,
+    ) -> Tuple[int, int]:
         if num_tokens <= 64:
-            return 100, 100
-        if num_tokens == 2048:
-            return 313, 313
-        if num_tokens == 4096:
-            return 320, 334
-        if num_tokens >= 8192:
-            return 322, 334
-        return 101, 101
+            configs = (100, 100)
+        elif num_tokens == 2048:
+            configs = (313, 313)
+        elif num_tokens == 4096:
+            configs = (320, 334)
+        elif num_tokens >= 8192:
+            configs = (322, 334)
+        else:
+            configs = (101, 101)
+
+        # Precomputed configs consume complete K=512 tiles. A TP shard such as
+        # V4.1's padded intermediate=384 needs the K=128 SWG path for GEMM2.
+        # Check each reduction dimension independently to retain valid GEMM1
+        # configurations and avoid reading a partial tile's scale values.
+        return tuple(
+            (
+                101
+                if size is not None and size % 512 and config not in (100, 101)
+                else config
+            )
+            for config, size in zip(configs, (hidden_size, intermediate_size))
+        )
 
     def _apply_shuffle_mul_sum_fp32_factors(
         self,
@@ -407,7 +425,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         c1_width = n * 2
         c1 = self._empty("c1", (m * topk, c1_width), torch.bfloat16, device)
         c2 = self._empty("c2", (m * topk, k), torch.bfloat16, device)
-        gemm1_config, gemm2_config = self._fused_configs(m)
+        gemm1_config, gemm2_config = self._fused_configs(m, k, n)
 
         intermediate_q = self._empty(
             "intermediate_q", (m * topk, n), torch.float8_e4m3fn, device
