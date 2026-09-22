@@ -1,10 +1,13 @@
 # DeepSelect CUDA kernels (vendored)
 
-The kernels under `cuda_kernels/` are vendored from the official DeepSelect
-repository (commit `382d62a`, MIT License). The shared sources (`config.h`,
-`common_parts.cuh`, `utils.cuh`, `bit_utils.cuh`, and the three
-`topk_select.{h,cuh}` files) differ from upstream only in trailing
-whitespace; `csrc/api.cpp` is the SGLang adaptation layer.
+> This copy is vendored from the official DeepSelect repository (commit
+> `382d62a`, MIT License). The shared sources (`config.h`,
+> `common_parts.cuh`, `utils.cuh`, `bit_utils.cuh`, and the three
+> `topk_select.{h,cuh}` files) differ from upstream only in trailing
+> whitespace, and the `v3_cluster` instantiations are split into `sm90/`
+> and `sm100/` subdirectories (upstream keeps all 16 files in one flat
+> directory); everything else is unmodified. `../api.cpp` is the SGLang
+> adaptation layer.
 
 ## Instantiations
 
