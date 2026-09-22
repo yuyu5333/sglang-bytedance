@@ -42,6 +42,8 @@ class Mxfp4CutlassMoEMethod:
         # The cutlass MXFP4A8 path calls its kernel directly from apply(), so no
         # MoeRunner abstraction is constructed (mirrors W4AFp8MoEMethod).
         self.moe_runner_config = moe_runner_config
+        # FusedMoE exposes this optional runner for overlap hooks.
+        self.runner = None
 
     def create_weights(
         self,
