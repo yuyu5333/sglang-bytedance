@@ -28,8 +28,20 @@ repo, and regeneration rewrites these directories wholesale.
     these only on SM100/SM103 (`major == 10`, vocab >= 512Ki). Compiled
     only for `sm_100a` and `sm_103a`.
 
+Both cluster paths are selected only for bf16 input with `batch <= 6` and
+`topk <= 1024`, in addition to the arch and vocab conditions above (see
+the dispatch in `../api.cpp`).
+
+On CUDA toolkits older than 12.9, `sm_100a`/`sm_103a` are unavailable, so
+every DeepSelect source (shared and `sm100/` alike) compiles for `sm_90a`
+only; the `sm100/` objects are then dead code kept in for link closure,
+since `api.cpp` references their symbols unconditionally.
+
 `elements_per_segment` is fixed at 512 upstream and not encoded in the
-filenames; all other template arguments are (see the official generator for
+filenames. The cluster size is encoded too, but only when it is not 1: the
+generator appends `_cluster_N` solely for N != 1, so the v3/ and v3_fp32/
+filenames (all cluster 1) encode every template argument except
+`elements_per_segment` and the cluster size (see the official generator for
 the name mapping).
 
 ## Picking up upstream tuning changes

@@ -399,6 +399,26 @@ if ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.0")
     list(SORT DEEPSELECT_SHARED_CUDA_SOURCES)
     list(SORT DEEPSELECT_SM90_CUDA_SOURCES)
     list(SORT DEEPSELECT_SM100_CUDA_SOURCES)
+    # A flat upstream regeneration of v3_cluster/instantiations would match
+    # none of the sm90//sm100/ globs; fail at configure time with the fix.
+    file(GLOB DEEPSELECT_FLAT_CLUSTER_SOURCES CONFIGURE_DEPENDS
+        "csrc/deepselect/cuda_kernels/v3_cluster/instantiations/*.cu"
+    )
+    if(DEEPSELECT_FLAT_CLUSTER_SOURCES)
+        message(FATAL_ERROR "DeepSelect cluster instantiations found flat in "
+            "csrc/deepselect/cuda_kernels/v3_cluster/instantiations/ but the "
+            "build compiles only the sm90/ and sm100/ subdirectories. Move "
+            "*_cluster_8.cu into sm90/ and *_cluster_16.cu into sm100/ "
+            "without editing file content (see "
+            "csrc/deepselect/cuda_kernels/README.md). "
+            "Offending files: ${DEEPSELECT_FLAT_CLUSTER_SOURCES}")
+    endif()
+    if(NOT DEEPSELECT_SM90_CUDA_SOURCES OR NOT DEEPSELECT_SM100_CUDA_SOURCES)
+        message(FATAL_ERROR "DeepSelect cluster instantiation directories "
+            "sm90/ and sm100/ must both be non-empty; re-run the upstream "
+            "generator and split as documented in "
+            "csrc/deepselect/cuda_kernels/README.md")
+    endif()
     set(DEEPSELECT_SOURCES
         "csrc/deepselect/api.cpp"
         ${DEEPSELECT_SHARED_CUDA_SOURCES}
@@ -406,6 +426,12 @@ if ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.0")
         ${DEEPSELECT_SM100_CUDA_SOURCES}
     )
     set(DEEPSELECT_CUDA_ARCH_FLAGS
+        "-gencode=arch=compute_90a,code=sm_90a"
+    )
+    # The 8-CTA cluster variants dispatch only on SM90 (api.cpp selects
+    # cluster size 8 only for major == 9), so they never take the 100a/103a
+    # entries appended to DEEPSELECT_CUDA_ARCH_FLAGS below.
+    set(DEEPSELECT_SM90_CLUSTER_ARCH_FLAGS
         "-gencode=arch=compute_90a,code=sm_90a"
     )
     # Default for the 16-CTA cluster instantiations: toolkits without SM100
@@ -467,7 +493,7 @@ if ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.0")
         COMPILE_OPTIONS "${DEEPSELECT_CUDA_ARCH_FLAGS}"
     )
     set_source_files_properties(${DEEPSELECT_SM90_CUDA_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "-gencode=arch=compute_90a,code=sm_90a"
+        COMPILE_OPTIONS "${DEEPSELECT_SM90_CLUSTER_ARCH_FLAGS}"
     )
     set_source_files_properties(${DEEPSELECT_SM100_CUDA_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${DEEPSELECT_SM100_CLUSTER_ARCH_FLAGS}"
