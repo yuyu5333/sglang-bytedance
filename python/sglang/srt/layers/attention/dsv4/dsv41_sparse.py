@@ -262,5 +262,11 @@ class DeepseekV41Indexer(nn.Module):
     ) -> torch.Tensor:
         """q [t, H, d], k [n, d], weights [t, H] -> [t, n], summed over all heads."""
         s = torch.einsum("bhd,nd->bhn", q, k)
-        s = (s.relu() * weights.unsqueeze(-1)).sum(dim=1)
+        # Inference owns this temporary. Reuse it instead of keeping three
+        # [rows, heads, keys] tensors live; each can reach the 1 GiB row budget.
+        # Keep separate BF16 operations so both rounding boundaries are unchanged.
+        if torch.is_grad_enabled():
+            s = (s.relu() * weights.unsqueeze(-1)).sum(dim=1)
+        else:
+            s = s.relu_().mul_(weights.unsqueeze(-1)).sum(dim=1)
         return s.float()
