@@ -15,6 +15,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _preprocess_fused_weights(weight, raw_scale):
+    from flashinfer.fused_moe import (
+        preprocess_moe_weights_for_sm90_mixed_gemm_humming,
+    )
+
+    # Humming's payload rewrite expands FP4 codes and scales into int64 indices.
+    # Bound those load-time temporaries by processing independent experts.
+    outputs = None
+    for start in range(0, weight.shape[0], 32):
+        stop = min(start + 32, weight.shape[0])
+        chunk = preprocess_moe_weights_for_sm90_mixed_gemm_humming(
+            weight[start:stop], raw_scale[start:stop]
+        )
+        if outputs is None:
+            outputs = tuple(
+                tensor.new_empty((weight.shape[0], *tensor.shape[1:]))
+                for tensor in chunk
+            )
+        for output, tensor in zip(outputs, chunk):
+            output[start:stop].copy_(tensor)
+        del chunk, tensor
+    return outputs
+
+
 class Mxfp4CutlassMoEMethod:
     """MXFP4A8 (weight E2M1 + block=32 E8M0 scale, activation FP8 e4m3) MoE
     method for sglang's own CUTLASS w4a8 grouped-GEMM backend (SM90/Hopper).
@@ -184,10 +208,6 @@ class Mxfp4CutlassMoEMethod:
         if getattr(layer, "_cutlass_mxfp4_source_versions", None) == source_versions:
             return
 
-        from flashinfer.fused_moe import (
-            preprocess_moe_weights_for_sm90_mixed_gemm_humming,
-        )
-
         from sglang.srt.layers.mxfp4a8_utils import repack_hf_mxfp4_to_kernel
         from sglang.srt.layers.quantization.marlin_utils_fp4 import (
             _normalize_scale_tensor,
@@ -236,7 +256,7 @@ class Mxfp4CutlassMoEMethod:
             )
             for stem in ("w13", "w2"):
                 weight, offset, residual = (
-                    preprocess_moe_weights_for_sm90_mixed_gemm_humming(
+                    _preprocess_fused_weights(
                         getattr(layer, f"{stem}_weight").data.view(torch.uint8),
                         _raw_e8m0_bytes(
                             getattr(layer, f"{stem}_weight_scale_inv").data
