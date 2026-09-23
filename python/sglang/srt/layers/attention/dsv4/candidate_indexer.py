@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, List, NamedTuple, Optional, Union
 
 import msgspec
 import torch
@@ -19,6 +19,47 @@ if TYPE_CHECKING:
 class CandidateMetadata:
     """Base of an implementation's published state on
     ``DSV4Metadata.candidate_metadata``."""
+
+
+class _CandidateTopK(NamedTuple):
+    values: torch.Tensor
+    indices: torch.Tensor
+    fused_publication: bool
+
+
+def _get_deepselect_topk(
+    scores: torch.Tensor,
+) -> Optional[Callable[..., tuple[Optional[torch.Tensor], torch.Tensor]]]:
+    if not scores.is_cuda:
+        return None
+    try:
+        from sglang.kernels.ops.deep_select import (
+            is_deepselect_supported,
+            topk,
+        )
+    except (ImportError, OSError):
+        return None
+    return topk if is_deepselect_supported(scores.device) else None
+
+
+def _can_fuse_candidate_blocks(
+    logits: torch.Tensor,
+    compress_lens: Union[torch.Tensor, int],
+    block_size: int,
+) -> bool:
+    return (
+        logits.is_cuda
+        and logits.dtype == torch.float32
+        and logits.dim() == 2
+        and logits.shape[0] > 0
+        and logits.stride(1) == 1
+        and torch.is_tensor(compress_lens)
+        and compress_lens.device == logits.device
+        and compress_lens.dtype in (torch.int32, torch.int64)
+        and compress_lens.is_contiguous()
+        and compress_lens.numel() == logits.shape[0]
+        and 0 < block_size <= 1024
+    )
 
 
 @dataclass(frozen=True)
@@ -109,19 +150,51 @@ def _candidate_block_topk(
     compress_lens: Union[torch.Tensor, int],
     topk_blocks: int,
     block_size: int,
-) -> torch.return_types.topk:
+) -> _CandidateTopK:
     width = logits.size(-1)
+    num_blocks = (width + block_size - 1) // block_size
+    selected = min(topk_blocks, num_blocks)
+    deepselect_topk = _get_deepselect_topk(logits) if selected > 0 else None
+    if deepselect_topk is not None and _can_fuse_candidate_blocks(
+        logits, compress_lens, block_size
+    ):
+        from sglang.kernels.ops.attention.dsv4.candidate_blocks import (
+            candidate_block_scores,
+        )
+
+        scores = candidate_block_scores(
+            logits, compress_lens.reshape(-1), block_size=block_size
+        )
+        values, indices = deepselect_topk(
+            scores, selected, indices_type=torch.int32
+        )
+        assert values is not None
+        return _CandidateTopK(
+            values=values, indices=indices, fused_publication=True
+        )
+
     padding = -width % block_size
     scores = F.pad(logits, (0, padding), value=-torch.inf) if padding else logits
     scores = scores.unflatten(-1, (-1, block_size)).amax(dim=-1)
-    num_blocks = scores.size(-1)
 
     last = (compress_lens - 1) // block_size
     scores = scores.masked_fill(
         torch.arange(num_blocks, device=logits.device) == last, torch.inf
     )
 
-    return scores.topk(min(topk_blocks, num_blocks), dim=-1)
+    if deepselect_topk is not None:
+        values, indices = deepselect_topk(
+            scores, selected, indices_type=torch.int32
+        )
+        assert values is not None
+        return _CandidateTopK(
+            values=values, indices=indices, fused_publication=False
+        )
+
+    top = scores.topk(selected, dim=-1)
+    return _CandidateTopK(
+        values=top.values, indices=top.indices, fused_publication=False
+    )
 
 
 def select_candidate_block_ids(
@@ -162,9 +235,18 @@ def select_candidate_blocks(
         topk_blocks=topk_blocks,
         block_size=block_size,
     )
-    width = logits.shape[-1]
-    num_blocks = (width + block_size - 1) // block_size
-    keep = torch.zeros(
-        (*logits.shape[:-1], num_blocks), dtype=torch.bool, device=logits.device
-    ).scatter_(-1, top.indices, top.values > -torch.inf)
-    return keep.repeat_interleave(block_size, dim=-1)[..., :width]
+    if top.fused_publication:
+        from sglang.kernels.ops.attention.dsv4.candidate_blocks import (
+            publish_candidate_block_mask,
+        )
+
+        return publish_candidate_block_mask(
+            indices=top.indices,
+            values=top.values,
+            width=logits.shape[-1],
+            block_size=block_size,
+        )
+    blocks = top.indices.to(torch.int32).masked_fill_(~(top.values > -torch.inf), -1)
+    return candidate_block_mask(
+        blocks=blocks, width=logits.shape[-1], block_size=block_size
+    )

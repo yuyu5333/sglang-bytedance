@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -80,6 +81,98 @@ class TestPrefillCandidateBlocks(CustomTestCase):
             candidate_block_mask(blocks=blocks, width=24, block_size=8),
             select_candidate_blocks(**kwargs),
         )
+
+    def test_deepselect_receives_reduced_block_scores(self):
+        calls = []
+
+        def fake_deepselect(scores, topk, *, indices_type):
+            calls.append((scores.clone(), topk, indices_type))
+            top = torch.topk(scores, topk, dim=-1, sorted=False)
+            return top.values, top.indices.to(indices_type)
+
+        logits = torch.arange(48, dtype=torch.float32).reshape(2, 24)
+        lengths = torch.tensor([[17], [24]], dtype=torch.int32)
+        with (
+            patch(
+                "sglang.srt.layers.attention.dsv4.candidate_indexer."
+                "_get_deepselect_topk",
+                return_value=fake_deepselect,
+            ),
+            patch(
+                "sglang.srt.layers.attention.dsv4.candidate_indexer."
+                "_can_fuse_candidate_blocks",
+                return_value=False,
+            ),
+        ):
+            blocks = select_candidate_block_ids(logits, lengths, 2, 8)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(tuple(calls[0][0].shape), (2, 3))
+        self.assertEqual(calls[0][1:], (2, torch.int32))
+        self.assertEqual(blocks.dtype, torch.int32)
+
+    def test_deepselect_routes_through_fused_reduction_and_publication(self):
+        calls = []
+        logits = torch.arange(48, dtype=torch.float32).reshape(2, 24)
+        lengths = torch.tensor([[17], [24]], dtype=torch.int32)
+        expected = select_candidate_blocks(logits, lengths, 2, 8)
+
+        def fake_scores(input_logits, seq_lens, block_size):
+            calls.append(("scores", input_logits.shape, seq_lens.shape, block_size))
+            scores = input_logits.unflatten(-1, (-1, block_size)).amax(dim=-1)
+            last = (seq_lens[:, None] - 1) // block_size
+            return scores.masked_fill(
+                torch.arange(scores.shape[1]) == last, torch.inf
+            )
+
+        def fake_deepselect(scores, topk, *, indices_type):
+            calls.append(("topk", scores.shape, topk, indices_type))
+            top = scores.topk(topk, dim=-1, sorted=False)
+            return top.values, top.indices.to(indices_type)
+
+        def fake_publish(indices, values, width, block_size):
+            calls.append(("publish", indices.shape, values.shape, width, block_size))
+            blocks = indices.masked_fill(~(values > -torch.inf), -1)
+            return candidate_block_mask(blocks, width, block_size)
+
+        with (
+            patch(
+                "sglang.srt.layers.attention.dsv4.candidate_indexer."
+                "_get_deepselect_topk",
+                return_value=fake_deepselect,
+            ),
+            patch(
+                "sglang.srt.layers.attention.dsv4.candidate_indexer."
+                "_can_fuse_candidate_blocks",
+                return_value=True,
+            ),
+            patch(
+                "sglang.kernels.ops.attention.dsv4.candidate_blocks."
+                "candidate_block_scores",
+                side_effect=fake_scores,
+            ),
+            patch(
+                "sglang.kernels.ops.attention.dsv4.candidate_blocks."
+                "publish_candidate_block_mask",
+                side_effect=fake_publish,
+            ),
+        ):
+            actual = select_candidate_blocks(logits, lengths, 2, 8)
+
+        torch.testing.assert_close(actual, expected)
+        self.assertEqual([call[0] for call in calls], ["scores", "topk", "publish"])
+
+    def test_deepselect_falls_back_when_unavailable(self):
+        logits = torch.arange(24, dtype=torch.float32).reshape(1, 24)
+        kwargs = dict(logits=logits, compress_lens=24, topk_blocks=2, block_size=8)
+        expected = select_candidate_block_ids(**kwargs)
+        with patch(
+            "sglang.srt.layers.attention.dsv4.candidate_indexer."
+            "_get_deepselect_topk",
+            return_value=None,
+        ):
+            actual = select_candidate_block_ids(**kwargs)
+        torch.testing.assert_close(actual, expected)
 
 
 if __name__ == "__main__":
