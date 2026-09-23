@@ -437,6 +437,9 @@ def cutlass_mxfp4a8_moe_deepep_normal(
         topk_weights,
         topk,
         c2.shape[1],
+        # DeepEP models apply routed_scaling_factor after the cross-rank
+        # combine, so this rank-local reduction must remain unscaled.
+        1.0,
         BLOCK_SIZE=512,
     )
 
@@ -466,6 +469,7 @@ def cutlass_mxfp4a8_moe_deepep_ll(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     swiglu_limit: Optional[float] = None,
+    expected_m: Optional[int] = None,
 ) -> torch.Tensor:
     """MXFP4A8 DeepEP-low-latency fused MoE. Mirrors
     ``cutlass_w4a8_moe_deepep_ll`` with MXFP4 weights and ``chunk_size=32``.
@@ -516,6 +520,7 @@ def cutlass_mxfp4a8_moe_deepep_ll(
         masked_m=masked_m,
         output_scale=a1_scale,
         output=gateup_input,
+        expected_rows=expected_m,
     )
     c1 = torch.empty((num_experts, m, n * 2), device=device, dtype=torch.bfloat16)
     c2 = torch.empty((num_experts, m, k), device=device, dtype=torch.bfloat16)

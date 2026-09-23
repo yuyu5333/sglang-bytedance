@@ -6,11 +6,18 @@ from typing import TYPE_CHECKING
 import torch
 from torch.nn import Module, Parameter
 
+from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 from sglang.srt.utils import log_info_on_rank0, set_weight_attrs
 from sglang.srt.utils.common import is_sm90_supported
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.token_dispatcher import CombineInput, DispatchOutput
+    from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        DeepEPLLDispatchOutput,
+        DeepEPNormalDispatchOutput,
+        DispatchOutput,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +98,7 @@ class Mxfp4CutlassMoEMethod:
             )
         self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size_per_partition
-        self._use_legacy = layer.moe_ep_size > 1
+        self._use_legacy = layer.moe_ep_size > 1 and not get_moe_a2a_backend().is_none()
 
         # Packed E2M1 weights: two 4-bit codes per int8 byte.
         w13_weight = torch.nn.Parameter(
@@ -182,6 +189,8 @@ class Mxfp4CutlassMoEMethod:
         self.problem_sizes2 = torch.empty(
             (num_experts, 3), dtype=torch.int32, device=device
         )
+        self.a1_scale = torch.empty(1, dtype=torch.float32, device=device)
+        self.a2_scale = torch.empty(1, dtype=torch.float32, device=device)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         """Convert the fp4-expert checkpoint weights into the sglang CUTLASS
@@ -235,6 +244,13 @@ class Mxfp4CutlassMoEMethod:
             hidden_size=self.hidden_size,
             intermediate_size=layer.w2_weight.shape[-1] * 2,
         )
+        if hasattr(layer, "dispatcher"):
+            layer.dispatcher.set_quant_config(
+                {
+                    "normal_dispatcher_output_dtype": "bf16",
+                    "low_latency_dispatcher_output_dtype": "fp8",
+                }
+            )
 
         def _raw_e8m0_bytes(scale: torch.Tensor) -> torch.Tensor:
             if scale.dtype == torch.float8_e8m0fnu:
@@ -245,23 +261,20 @@ class Mxfp4CutlassMoEMethod:
                 return scale.view(torch.uint8).contiguous()
             return scale.to(torch.float8_e8m0fnu).view(torch.uint8).contiguous()
 
-        # EP1 stores only the fused layout. Keeping both full weight layouts
-        # exceeds H20 memory for V4.1 TP8 after intermediate padding.
+        # Standard dispatch stores only the fused layout, including EP with
+        # local expert IDs and -1 sentinels. A2A dispatchers keep the legacy
+        # layout consumed by their dedicated normal/low-latency entry points.
         if not self._use_legacy:
             log_info_on_rank0(
                 logger,
-                f"Preparing DSv4 MXFP4 experts for CUTLASS SM90 W4A8 fused EP1 "
+                f"Preparing DSv4 MXFP4 experts for CUTLASS SM90 W4A8 fused "
                 f"(intermediate={self.intermediate_size_per_partition}, "
                 f"padded={layer.w2_weight.shape[-1] * 2}, layer={self.prefix})...",
             )
             for stem in ("w13", "w2"):
-                weight, offset, residual = (
-                    _preprocess_fused_weights(
-                        getattr(layer, f"{stem}_weight").data.view(torch.uint8),
-                        _raw_e8m0_bytes(
-                            getattr(layer, f"{stem}_weight_scale_inv").data
-                        ),
-                    )
+                weight, offset, residual = _preprocess_fused_weights(
+                    getattr(layer, f"{stem}_weight").data.view(torch.uint8),
+                    _raw_e8m0_bytes(getattr(layer, f"{stem}_weight_scale_inv").data),
                 )
                 fused_weight = Parameter(
                     weight.view(torch.int8).contiguous(), requires_grad=False
@@ -358,3 +371,89 @@ class Mxfp4CutlassMoEMethod:
             swiglu_limit=self.moe_runner_config.swiglu_limit,
         )
         return StandardCombineInput(hidden_states=output)
+
+    def apply_deepep_normal(
+        self,
+        layer: DeepEPMoE,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ) -> torch.Tensor:
+        from sglang.srt.layers.moe.cutlass_mxfp4a8_moe import (
+            cutlass_mxfp4a8_moe_deepep_normal,
+        )
+
+        hidden_states = dispatch_output.hidden_states
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+        if hidden_states.dtype != torch.bfloat16:
+            raise RuntimeError(
+                "CUTLASS MXFP4 DeepEP normal requires BF16 dispatcher output, "
+                f"but got {hidden_states.dtype}."
+            )
+        if hidden_states.shape[0] == 0:
+            return hidden_states
+
+        return cutlass_mxfp4a8_moe_deepep_normal(
+            hidden_states,
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            dispatch_output.topk_weights,
+            dispatch_output.topk_ids,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            swiglu_limit=self.moe_runner_config.swiglu_limit,
+        )
+
+    def apply_deepep_ll(
+        self,
+        layer: DeepEPMoE,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ) -> torch.Tensor:
+        hidden_states, hidden_scales, topk_ids, _, masked_m, expected_m = (
+            dispatch_output
+        )
+        if hidden_scales is None:
+            raise RuntimeError(
+                "CUTLASS MXFP4 DeepEP low-latency requires FP8 dispatcher "
+                "output with per-token-group scales."
+            )
+
+        from sglang.srt.layers.moe.cutlass_mxfp4a8_moe import (
+            cutlass_mxfp4a8_moe_deepep_ll,
+        )
+
+        return cutlass_mxfp4a8_moe_deepep_ll(
+            hidden_states,
+            hidden_scales,
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_ids,
+            masked_m,
+            self.a_strides1,
+            self.b_strides1,
+            self.c_strides1,
+            self.a_strides2,
+            self.b_strides2,
+            self.c_strides2,
+            self.s_strides13,
+            self.s_strides2,
+            self.expert_offsets,
+            self.problem_sizes1,
+            self.problem_sizes2,
+            self.a1_scale,
+            self.a2_scale,
+            swiglu_limit=self.moe_runner_config.swiglu_limit,
+            expected_m=expected_m,
+        )

@@ -217,3 +217,32 @@ def test_mxfp4a8_moe_mm_single_expert(m, k, n):
 def test_mxfp4a8_moe_mm_multi_expert(counts, k, n, capture_safe):
     c, c_ref = run_mxfp4a8_moe_mm(counts, k, n, "cuda", capture_safe=capture_safe)
     torch.testing.assert_close(c, c_ref, rtol=1e-2, atol=0.1)
+
+
+@pytest.mark.skipif(
+    not is_hopper(),
+    reason="CUTLASS MXFP4A8 fused MoE is only supported on sm90",
+)
+def test_fused_ep_reduction_skips_nonlocal_routes():
+    from sglang.srt.layers.moe.cutlass_mxfp4a8_fused_moe import (
+        CutlassMxfp4A8FusedMoeRunner,
+    )
+
+    c2 = torch.tensor([[2.0, 4.0], [8.0, 16.0]], dtype=torch.bfloat16, device="cuda")
+    c_map = torch.tensor([0, -1, 1, -1], dtype=torch.int32, device="cuda")
+    factors = torch.tensor([0.25, 0.75, 0.5, 0.5], device="cuda")
+    output = torch.empty((2, 2), dtype=torch.bfloat16, device="cuda")
+
+    CutlassMxfp4A8FusedMoeRunner()._apply_shuffle_mul_sum_fp32_factors(
+        c2,
+        output,
+        c_map,
+        factors,
+        routed_scaling_factor=2.0,
+        topk=2,
+    )
+
+    expected = torch.tensor(
+        [[1.0, 2.0], [8.0, 16.0]], dtype=torch.bfloat16, device="cuda"
+    )
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)

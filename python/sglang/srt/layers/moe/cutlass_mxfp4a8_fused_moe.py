@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """CUTLASS MXFP4A8 fused MoE runner.
 
-For EP=1 this runner uses the explicit fused MXFP4A8 SM90 grouped GEMM entry with
-load-time-interleaved weights, folded E8M0 offsets, and per-token FP8 activation
-scales. EP keeps the complete legacy MXFP4A8 protocol.
+For standard dispatch this runner uses the explicit fused MXFP4A8 SM90 grouped
+GEMM entry with load-time-interleaved weights, folded E8M0 offsets, and
+per-token FP8 activation scales. Non-local EP routes are represented by ``-1``
+and contribute zero to the rank-local output. Other A2A dispatch formats keep
+the complete legacy MXFP4A8 protocol.
 
   * ``prepare_moe_input`` builds expert offsets, GEMM problem sizes, and both
     permutations in one CUDA path.
@@ -67,8 +69,12 @@ def _apply_shuffle_mul_sum_fp32_factors_kernel(
     for j in tl.range(0, topk):
         token_major_idx = token * topk + j
         src_row = tl.load(perm_ptr + token_major_idx).to(tl.int64)
+        valid_route = src_row >= 0
+        src_row = tl.maximum(src_row, 0)
         vals = tl.load(
-            input_ptr + src_row * row_stride + offs, mask=mask, other=0.0
+            input_ptr + src_row * row_stride + offs,
+            mask=mask & valid_route,
+            other=0.0,
         ).to(tl.float32)
         factor = tl.load(factors_ptr + token_major_idx).to(tl.float32)
         acc += vals * factor * routed_scaling_factor
@@ -294,14 +300,14 @@ class CutlassMxfp4A8FusedMoeRunner:
         topk = topk_ids.size(1)
 
         if apply_router_weight_on_input:
-            assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1"
-            )
+            assert (
+                topk == 1
+            ), "apply_router_weight_on_input is only implemented for topk=1"
 
-        # The AOT prepare/apply path does not materialize valid c_map entries for
-        # the EP sentinel (-1 -> num_local_experts). Keep the legacy Triton path
-        # for EP until the sentinel handling is added to prepare_moe_input.
-        if get_parallel().moe_ep_size > 1:
+        # A2A dispatch formats retain their dedicated legacy entry points. The
+        # standard EP path supplies fused weights and local expert IDs with -1
+        # sentinels, which are handled below.
+        if get_parallel().moe_ep_size > 1 and w1_fused is None:
             from sglang.srt.layers.moe.cutlass_mxfp4a8_moe import cutlass_mxfp4a8_moe
 
             return cutlass_mxfp4a8_moe(
@@ -330,6 +336,12 @@ class CutlassMxfp4A8FusedMoeRunner:
                 swiglu_limit,
             )
 
+        assert w1_fused is not None
+        assert w2_fused is not None
+        assert w1_scale_fused is not None
+        assert w2_scale_fused is not None
+        assert w1_residual_fused is not None
+        assert w2_residual_fused is not None
         assert w1_fused.dtype == torch.int8
         assert w2_fused.dtype == torch.int8
         assert a.shape[1] // 2 == w1_fused.shape[2], "Hidden size mismatch w1"
@@ -355,6 +367,12 @@ class CutlassMxfp4A8FusedMoeRunner:
         c_map = self._empty("c_map", (topk_ids.numel(),), torch.int32, device)
         prepare_inputs_in_core = m <= 64
         if not prepare_inputs_in_core:
+            if get_parallel().moe_ep_size > 1:
+                # The metadata kernels write only locally-routed entries. Keep
+                # unused input rows safe for quantization and mark non-local
+                # output routes so the final reduction contributes zero.
+                a_map.zero_()
+                c_map.fill_(-1)
             if get_cutlass_w4a8_moe_mm_data_with_permutation is None:
                 prepare_moe_input(
                     topk_ids_i32,
@@ -445,8 +463,46 @@ class CutlassMxfp4A8FusedMoeRunner:
         core_op = torch.ops.sgl_kernel.cutlass_mxfp4a8_fused_moe_core.default
 
         # #region debug-point A-B-C:prefill-core-entry
-        if os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1" and m >= 1024 and get_parallel().tp_rank == 0:
-            import json, time, urllib.request; urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"post-fix","hypothesisId":"A-B-C","location":"cutlass_mxfp4a8_fused_moe.py:core-entry","msg":"[DEBUG] fused core entry","ts":int(time.time()*1000),"data":{"m":m,"topk":topk,"num_experts":num_local_experts,"gemm1_config":gemm1_config,"gemm2_config":gemm2_config,"a_map_ptr":a_map.data_ptr(),"c_map_ptr":c_map.data_ptr(),"c1_ptr":c1.data_ptr(),"c2_ptr":c2.data_ptr(),"w1_ptr":w1_fused.data_ptr(),"topk_min":int(topk_ids_i32.min().item()),"topk_max":int(topk_ids_i32.max().item()),"allocated":torch.cuda.memory_allocated(),"reserved":torch.cuda.memory_reserved()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
+        if (
+            os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1"
+            and m >= 1024
+            and get_parallel().tp_rank == 0
+        ):
+            import json, time, urllib.request
+
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    "http://127.0.0.1:7777/event",
+                    data=json.dumps(
+                        {
+                            "sessionId": "cutlass-prefill-illegal-access",
+                            "runId": "post-fix",
+                            "hypothesisId": "A-B-C",
+                            "location": "cutlass_mxfp4a8_fused_moe.py:core-entry",
+                            "msg": "[DEBUG] fused core entry",
+                            "ts": int(time.time() * 1000),
+                            "data": {
+                                "m": m,
+                                "topk": topk,
+                                "num_experts": num_local_experts,
+                                "gemm1_config": gemm1_config,
+                                "gemm2_config": gemm2_config,
+                                "a_map_ptr": a_map.data_ptr(),
+                                "c_map_ptr": c_map.data_ptr(),
+                                "c1_ptr": c1.data_ptr(),
+                                "c2_ptr": c2.data_ptr(),
+                                "w1_ptr": w1_fused.data_ptr(),
+                                "topk_min": int(topk_ids_i32.min().item()),
+                                "topk_max": int(topk_ids_i32.max().item()),
+                                "allocated": torch.cuda.memory_allocated(),
+                                "reserved": torch.cuda.memory_reserved(),
+                            },
+                        }
+                    ).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=2,
+            ).read()
         # #endregion
         core_op(
             c1,
@@ -490,8 +546,36 @@ class CutlassMxfp4A8FusedMoeRunner:
             active_expert_ids,
         )
         # #region debug-point B:prefill-core-exit
-        if os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1" and m >= 1024 and get_parallel().tp_rank == 0:
-            import json, time, urllib.request; torch.cuda.synchronize(); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"post-fix","hypothesisId":"B","location":"cutlass_mxfp4a8_fused_moe.py:core-exit","msg":"[DEBUG] fused core synchronized","ts":int(time.time()*1000),"data":{"m":m,"w1_ptr":w1_fused.data_ptr(),"c2_ptr":c2.data_ptr()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
+        if (
+            os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1"
+            and m >= 1024
+            and get_parallel().tp_rank == 0
+        ):
+            import json, time, urllib.request
+
+            torch.cuda.synchronize()
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    "http://127.0.0.1:7777/event",
+                    data=json.dumps(
+                        {
+                            "sessionId": "cutlass-prefill-illegal-access",
+                            "runId": "post-fix",
+                            "hypothesisId": "B",
+                            "location": "cutlass_mxfp4a8_fused_moe.py:core-exit",
+                            "msg": "[DEBUG] fused core synchronized",
+                            "ts": int(time.time() * 1000),
+                            "data": {
+                                "m": m,
+                                "w1_ptr": w1_fused.data_ptr(),
+                                "c2_ptr": c2.data_ptr(),
+                            },
+                        }
+                    ).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=2,
+            ).read()
         # #endregion
 
         output = self._empty("output", tuple(a.shape), a.dtype, device)
@@ -500,8 +584,37 @@ class CutlassMxfp4A8FusedMoeRunner:
             c2, output, c_map, factors, float(routed_scaling_factor), topk
         )
         # #region debug-point A-C:prefill-apply-exit
-        if os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1" and m >= 1024 and get_parallel().tp_rank == 0:
-            import json, time, urllib.request; torch.cuda.synchronize(); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"post-fix","hypothesisId":"A-C","location":"cutlass_mxfp4a8_fused_moe.py:apply-exit","msg":"[DEBUG] final reduction synchronized","ts":int(time.time()*1000),"data":{"m":m,"w1_ptr":w1_fused.data_ptr(),"c2_ptr":c2.data_ptr(),"output_ptr":output.data_ptr()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
+        if (
+            os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1"
+            and m >= 1024
+            and get_parallel().tp_rank == 0
+        ):
+            import json, time, urllib.request
+
+            torch.cuda.synchronize()
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    "http://127.0.0.1:7777/event",
+                    data=json.dumps(
+                        {
+                            "sessionId": "cutlass-prefill-illegal-access",
+                            "runId": "post-fix",
+                            "hypothesisId": "A-C",
+                            "location": "cutlass_mxfp4a8_fused_moe.py:apply-exit",
+                            "msg": "[DEBUG] final reduction synchronized",
+                            "ts": int(time.time() * 1000),
+                            "data": {
+                                "m": m,
+                                "w1_ptr": w1_fused.data_ptr(),
+                                "c2_ptr": c2.data_ptr(),
+                                "output_ptr": output.data_ptr(),
+                            },
+                        }
+                    ).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=2,
+            ).read()
         # #endregion
         return output
 

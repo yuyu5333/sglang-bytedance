@@ -297,6 +297,7 @@ __global__ void prepare_moe_input_and_quant_fp8_shuffled_kernel(
   }
 
   const int expert = topk_ids[route];
+  const bool valid_expert = static_cast<unsigned int>(expert) < static_cast<unsigned int>(num_experts);
   __shared__ int route_destination;
   if (tid == 0) {
     route_destination = 0;
@@ -306,7 +307,10 @@ __global__ void prepare_moe_input_and_quant_fp8_shuffled_kernel(
   int local_destination = 0;
   for (int i = tid; i < num_routes; i += blockDim.x) {
     const int other_expert = topk_ids[i];
-    local_destination += other_expert < expert || (other_expert == expert && i < route);
+    const bool other_valid =
+        static_cast<unsigned int>(other_expert) < static_cast<unsigned int>(num_experts);
+    local_destination +=
+        other_valid && (other_expert < expert || (other_expert == expert && i < route));
   }
   if (local_destination != 0) {
     atomicAdd(&route_destination, local_destination);
@@ -314,10 +318,16 @@ __global__ void prepare_moe_input_and_quant_fp8_shuffled_kernel(
   __syncthreads();
 
   if (tid == 0) {
-    input_permutation[route_destination] = route / topk;
-    output_permutation[route] = route_destination;
+    if (valid_expert) {
+      input_permutation[route_destination] = route / topk;
+      output_permutation[route] = route_destination;
+    } else {
+      output_permutation[route] = -1;
+    }
   }
   __syncthreads();
+
+  if (!valid_expert) return;
 
   const T* token_input = input + (route / topk) * hidden_dim;
   DST_DTYPE* token_output = output_q + route_destination * hidden_dim;

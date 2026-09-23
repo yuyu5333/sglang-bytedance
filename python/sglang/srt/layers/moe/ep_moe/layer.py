@@ -32,6 +32,7 @@ from sglang.srt.layers.moe.topk import (
 )
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8 import Fp8Config
+from sglang.srt.layers.quantization.mxfp4_cutlass_moe import Mxfp4CutlassMoEMethod
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
 from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph import (
     eager_on_graph,
@@ -103,7 +104,10 @@ class DeepEPMoE(FusedMoE):
             and quant_config is not None
             and quant_config.get_name() == "humming"
         )
-        if get_moe_a2a_backend().is_deepep_v2():
+        self.use_mxfp4_cutlass = isinstance(self.quant_method, Mxfp4CutlassMoEMethod)
+        if self.use_mxfp4_cutlass:
+            self.deprecate_flag = False
+        elif get_moe_a2a_backend().is_deepep_v2():
             self.deprecate_flag = True
         elif is_humming:
             self.deprecate_flag = True
@@ -143,9 +147,9 @@ class DeepEPMoE(FusedMoE):
             and not _is_npu
             and not _is_hip
         ):
-            assert deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM, (
-                "Unquantized DeepEP MoE requires DeepGEMM BF16"
-            )
+            assert (
+                deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            ), "Unquantized DeepEP MoE requires DeepGEMM BF16"
             self.deprecate_flag = True
         else:
             self.deprecate_flag = False
@@ -153,7 +157,11 @@ class DeepEPMoE(FusedMoE):
         if self.deprecate_flag:
             return
 
-        if isinstance(quant_config, Fp8Config):
+        if self.use_mxfp4_cutlass:
+            self.use_block_quant = False
+            self.use_fp8_w8a8 = False
+            self.use_w4afp8 = False
+        elif isinstance(quant_config, Fp8Config):
             self.use_block_quant = getattr(self.quant_method, "block_quant", False)
             self.use_fp8_w8a8 = True
             self.fp8_dtype = torch.float8_e4m3fn
@@ -175,9 +183,9 @@ class DeepEPMoE(FusedMoE):
             and quant_config is not None
         ):
             # AMD HIP and NPU support low_latency DeepEP without DeepGEMM.
-            assert deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM, (
-                f"DeepEP {self.deepep_mode} mode requires deep_gemm"
-            )
+            assert (
+                deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            ), f"DeepEP {self.deepep_mode} mode requires deep_gemm"
 
     def _a2a_forward_with_output_impl(
         self,
@@ -223,9 +231,9 @@ class DeepEPMoE(FusedMoE):
     ):
         # DeepEP NORMAL mode is not capturable; run it as an eager node.
         if is_in_breakable_cuda_graph():
-            assert TopKOutputChecker.format_is_standard(topk_output), (
-                "Only standard topk output is supported for breakable cuda graph"
-            )
+            assert TopKOutputChecker.format_is_standard(
+                topk_output
+            ), "Only standard topk output is supported for breakable cuda graph"
             output = torch.empty_like(hidden_states)
             self.a2a_forward_with_output(
                 hidden_states,
@@ -236,9 +244,9 @@ class DeepEPMoE(FusedMoE):
             )
             return output
         if is_in_tc_piecewise_cuda_graph():
-            assert TopKOutputChecker.format_is_standard(topk_output), (
-                "Only standard topk output is supported for piecewise cuda graph"
-            )
+            assert TopKOutputChecker.format_is_standard(
+                topk_output
+            ), "Only standard topk output is supported for piecewise cuda graph"
             return moe_forward_piecewise_cuda_graph_impl(
                 hidden_states,
                 topk_output.topk_weights,
@@ -294,11 +302,15 @@ class DeepEPMoE(FusedMoE):
                 )
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8(dispatch_output)
+            elif self.use_mxfp4_cutlass:
+                output = self.forward_cutlass_mxfp4(dispatch_output)
             else:
                 assert False, "forward_deepgemm_contiguous is deprecated"
         elif DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
             if self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
+            elif self.use_mxfp4_cutlass:
+                output = self.forward_cutlass_mxfp4_masked(dispatch_output)
             else:
                 assert False, "forward_deepgemm_masked is deprecated"
 
@@ -345,6 +357,28 @@ class DeepEPMoE(FusedMoE):
     ):
         assert self.moe_runner_config.activation in ("silu", "situ")
         assert isinstance(self.quant_method, W4AFp8MoEMethod)
+        return self.quant_method.apply_deepep_ll(
+            layer=self,
+            dispatch_output=dispatch_output,
+        )
+
+    def forward_cutlass_mxfp4(
+        self,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ):
+        assert self.moe_runner_config.activation in ("silu", "situ")
+        assert isinstance(self.quant_method, Mxfp4CutlassMoEMethod)
+        return self.quant_method.apply_deepep_normal(
+            layer=self,
+            dispatch_output=dispatch_output,
+        )
+
+    def forward_cutlass_mxfp4_masked(
+        self,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ):
+        assert self.moe_runner_config.activation in ("silu", "situ")
+        assert isinstance(self.quant_method, Mxfp4CutlassMoEMethod)
         return self.quant_method.apply_deepep_ll(
             layer=self,
             dispatch_output=dispatch_output,
