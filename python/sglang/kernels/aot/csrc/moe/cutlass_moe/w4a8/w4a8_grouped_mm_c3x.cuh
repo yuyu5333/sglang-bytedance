@@ -656,7 +656,11 @@ void cutlass_w4a8_group_gemm_caller(
         stream);
   }
 
-  status = gemm.run(stream, nullptr, true);
+  // MXFP4 uses runner-owned staging buffers across consecutive MoE layers.
+  // PDL may overlap those launches and let the next layer overwrite staging
+  // that the preceding layer still consumes. Preserve normal stream ordering
+  // for MXFP4; the INT4 path has independent storage and keeps PDL enabled.
+  status = gemm.run(stream, nullptr, !Gemm::UsePreMmaE8M0Scale);
   if (status != cutlass::Status::kSuccess) {
     cudaError_t ce = cudaGetLastError();
     if constexpr (Gemm::UsePreMmaE8M0Scale) {
