@@ -104,6 +104,9 @@ class CutlassMxfp4A8FusedMoeRunner:
         self._workspace: Dict[
             Tuple[str, Tuple[int, ...], torch.dtype, int], torch.Tensor
         ] = {}
+        self._graph_workspace: Dict[
+            Tuple[str, Tuple[int, ...], torch.dtype, int], torch.Tensor
+        ] = {}
 
     def _empty(
         self,
@@ -116,10 +119,15 @@ class CutlassMxfp4A8FusedMoeRunner:
         numel = 1
         for dim in shape:
             numel *= dim
-        tensor = self._workspace.get(key)
+        workspace = (
+            self._graph_workspace
+            if torch.cuda.is_current_stream_capturing()
+            else self._workspace
+        )
+        tensor = workspace.get(key)
         if tensor is None or tensor.device != device or tensor.numel() < numel:
             tensor = torch.empty((numel,), dtype=dtype, device=device)
-            self._workspace[key] = tensor
+            workspace[key] = tensor
         return tensor[:numel].view(shape)
 
     def _compact_moe_metadata(
@@ -438,7 +446,7 @@ class CutlassMxfp4A8FusedMoeRunner:
 
         # #region debug-point A-B-C:prefill-core-entry
         if os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1" and m >= 1024 and get_parallel().tp_rank == 0:
-            import json, time, urllib.request; urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"pre-fix","hypothesisId":"A-B-C","location":"cutlass_mxfp4a8_fused_moe.py:core-entry","msg":"[DEBUG] fused core entry","ts":int(time.time()*1000),"data":{"m":m,"topk":topk,"num_experts":num_local_experts,"gemm1_config":gemm1_config,"gemm2_config":gemm2_config,"a_map_ptr":a_map.data_ptr(),"c_map_ptr":c_map.data_ptr(),"c1_ptr":c1.data_ptr(),"c2_ptr":c2.data_ptr(),"w1_ptr":w1_fused.data_ptr(),"topk_min":int(topk_ids_i32.min().item()),"topk_max":int(topk_ids_i32.max().item()),"allocated":torch.cuda.memory_allocated(),"reserved":torch.cuda.memory_reserved()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
+            import json, time, urllib.request; urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"post-fix","hypothesisId":"A-B-C","location":"cutlass_mxfp4a8_fused_moe.py:core-entry","msg":"[DEBUG] fused core entry","ts":int(time.time()*1000),"data":{"m":m,"topk":topk,"num_experts":num_local_experts,"gemm1_config":gemm1_config,"gemm2_config":gemm2_config,"a_map_ptr":a_map.data_ptr(),"c_map_ptr":c_map.data_ptr(),"c1_ptr":c1.data_ptr(),"c2_ptr":c2.data_ptr(),"w1_ptr":w1_fused.data_ptr(),"topk_min":int(topk_ids_i32.min().item()),"topk_max":int(topk_ids_i32.max().item()),"allocated":torch.cuda.memory_allocated(),"reserved":torch.cuda.memory_reserved()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
         # #endregion
         core_op(
             c1,
@@ -483,7 +491,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
         # #region debug-point B:prefill-core-exit
         if os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1" and m >= 1024 and get_parallel().tp_rank == 0:
-            import json, time, urllib.request; torch.cuda.synchronize(); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"pre-fix","hypothesisId":"B","location":"cutlass_mxfp4a8_fused_moe.py:core-exit","msg":"[DEBUG] fused core synchronized","ts":int(time.time()*1000),"data":{"m":m,"w1_ptr":w1_fused.data_ptr(),"c2_ptr":c2.data_ptr()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
+            import json, time, urllib.request; torch.cuda.synchronize(); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"post-fix","hypothesisId":"B","location":"cutlass_mxfp4a8_fused_moe.py:core-exit","msg":"[DEBUG] fused core synchronized","ts":int(time.time()*1000),"data":{"m":m,"w1_ptr":w1_fused.data_ptr(),"c2_ptr":c2.data_ptr()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
         # #endregion
 
         output = self._empty("output", tuple(a.shape), a.dtype, device)
@@ -493,7 +501,7 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
         # #region debug-point A-C:prefill-apply-exit
         if os.getenv("SGLANG_CUTLASS_PREFILL_DEBUG") == "1" and m >= 1024 and get_parallel().tp_rank == 0:
-            import json, time, urllib.request; torch.cuda.synchronize(); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"pre-fix","hypothesisId":"A-C","location":"cutlass_mxfp4a8_fused_moe.py:apply-exit","msg":"[DEBUG] final reduction synchronized","ts":int(time.time()*1000),"data":{"m":m,"w1_ptr":w1_fused.data_ptr(),"c2_ptr":c2.data_ptr(),"output_ptr":output.data_ptr()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
+            import json, time, urllib.request; torch.cuda.synchronize(); urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"cutlass-prefill-illegal-access","runId":"post-fix","hypothesisId":"A-C","location":"cutlass_mxfp4a8_fused_moe.py:apply-exit","msg":"[DEBUG] final reduction synchronized","ts":int(time.time()*1000),"data":{"m":m,"w1_ptr":w1_fused.data_ptr(),"c2_ptr":c2.data_ptr(),"output_ptr":output.data_ptr()}}).encode(), headers={"Content-Type":"application/json"}), timeout=2).read()
         # #endregion
         return output
 
