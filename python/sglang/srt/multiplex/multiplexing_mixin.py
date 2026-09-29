@@ -50,6 +50,16 @@ def merge_completed_split_prefill(
     return prefill_batch
 
 
+def stash_pdmux_chunked_request(scheduler: Scheduler) -> None:
+    """Commit a finished token chunk before PDMux schedules its continuation."""
+    chunked_req = scheduler.chunked_req
+    if (
+        chunked_req is not None
+        and chunked_req.extend_range.end > len(chunked_req.prefix_indices)
+    ):
+        scheduler.stash_chunked_request(chunked_req)
+
+
 class SchedulerMultiplexMixin:
     def init_pdmux(self: Scheduler):
         # The current split prefill batch
@@ -231,6 +241,7 @@ class SchedulerMultiplexMixin:
                         self.process_batch_result(
                             self.split_prefill_batch, prefill_result
                         )
+                        stash_pdmux_chunked_request(self)
                         running_batch = merge_completed_split_prefill(
                             running_batch,
                             self.split_prefill_batch,
