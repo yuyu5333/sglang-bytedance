@@ -11,6 +11,25 @@ from sglang.test.ci.ci_register import register_cuda_ci
 register_cuda_ci(est_time=10, stage="base-b", runner_config="1-gpu-large")
 
 
+@pytest.mark.parametrize(
+    ("chunked_prefill_size", "max_prefill_tokens", "expected"),
+    [
+        pytest.param(-1, 16384, 16384, id="pdmux_disables_chunked_prefill"),
+        pytest.param(8192, 16384, 8192, id="chunked_prefill_limit"),
+        pytest.param(-1, -1, 1, id="invalid_limits_fall_back_to_one"),
+    ],
+)
+def test_resolve_mhc_prewarm_token_limit(
+    chunked_prefill_size, max_prefill_tokens, expected
+):
+    assert (
+        mhc._resolve_mhc_prewarm_token_limit(
+            chunked_prefill_size, max_prefill_tokens
+        )
+        == expected
+    )
+
+
 @pytest.fixture
 def stated_tp_group():
     """Provide a TP-group placeholder for kernels with mocked symmetric memory."""

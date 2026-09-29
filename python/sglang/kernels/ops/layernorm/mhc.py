@@ -872,6 +872,15 @@ def get_mhc_pre_token_count_representatives(
     return tuple(sorted(reps.values()))
 
 
+def _resolve_mhc_prewarm_token_limit(
+    chunked_prefill_size: int, max_prefill_tokens: int
+) -> int:
+    """Resolve a positive MHC prewarm limit when chunked prefill is disabled."""
+    if chunked_prefill_size > 0:
+        return chunked_prefill_size
+    return max(1, max_prefill_tokens)
+
+
 def prewarm_mhc_pre(
     residual: torch.Tensor,
     fn: torch.Tensor,
@@ -895,7 +904,10 @@ def prewarm_mhc_pre(
     from sglang.srt.runtime_context import get_schedule
 
     hc_mult, hidden_size = residual.shape[-2], residual.shape[-1]
-    max_num_tokens = get_schedule().chunked_prefill_size
+    schedule = get_schedule()
+    max_num_tokens = _resolve_mhc_prewarm_token_limit(
+        schedule.chunked_prefill_size, schedule.max_prefill_tokens
+    )
     buckets = get_mhc_pre_token_count_representatives(
         max_num_tokens, hc_mult * hidden_size
     )
