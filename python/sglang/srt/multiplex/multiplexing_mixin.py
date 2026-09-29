@@ -30,6 +30,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def merge_completed_split_prefill(
+    running_batch: Optional[ScheduleBatch],
+    prefill_batch: ScheduleBatch,
+    chunked_req,
+) -> Optional[ScheduleBatch]:
+    """Merge only requests whose scheduler-level prefill is complete.
+
+    PDMux's layer-wise split is independent of scheduler-level token chunking.
+    A middle chunk has completed all model layers but must remain parked in
+    ``Scheduler.chunked_req`` until its next token chunk is admitted.
+    """
+    prefill_batch.filter_batch(chunked_req_to_exclude=chunked_req)
+    if prefill_batch.is_empty():
+        return running_batch
+    if running_batch is not None and not running_batch.is_empty():
+        running_batch.merge_batch(prefill_batch)
+        return running_batch
+    return prefill_batch
+
+
 class SchedulerMultiplexMixin:
     def init_pdmux(self: Scheduler):
         # The current split prefill batch
@@ -211,10 +231,11 @@ class SchedulerMultiplexMixin:
                         self.process_batch_result(
                             self.split_prefill_batch, prefill_result
                         )
-                        if running_batch and not running_batch.is_empty():
-                            running_batch.merge_batch(self.split_prefill_batch)
-                        else:
-                            running_batch = self.split_prefill_batch
+                        running_batch = merge_completed_split_prefill(
+                            running_batch,
+                            self.split_prefill_batch,
+                            self.chunked_req,
+                        )
                         self.running_batch = running_batch
 
                         self.split_prefill_batch = None
