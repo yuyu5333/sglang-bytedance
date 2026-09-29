@@ -290,14 +290,12 @@ crate-type = ["cdylib"]
         with TemporaryDirectory() as directory:
             root = Path(directory)
             workspace = self._workspace(root)
-            context = rust_extension._BuildContext("source", "fingerprint", "target")
             with (
                 mock.patch.object(
                     rust_extension, "_import_bundled_extension", return_value=None
                 ),
-                mock.patch.object(
-                    rust_extension, "_build_context", return_value=context
-                ),
+                mock.patch.object(rust_extension, "_discover_crate") as discover,
+                mock.patch.object(rust_extension, "_build_context") as fingerprint,
                 mock.patch.object(rust_extension, "_cargo_build") as cargo_build,
             ):
                 with self.assertRaisesRegex(
@@ -309,6 +307,8 @@ crate-type = ["cdylib"]
                         workspace=workspace,
                         cache_dir=root / "cache",
                     )
+            discover.assert_not_called()
+            fingerprint.assert_not_called()
             cargo_build.assert_not_called()
 
     def test_force_skips_bundled_import_and_rebuilds_cached_artifact(self):
