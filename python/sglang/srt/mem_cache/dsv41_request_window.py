@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional
 
 import msgspec
@@ -34,6 +35,13 @@ class WindowLayout(msgspec.Struct, frozen=True):
         self.history_loc.copy_(other.history_loc)
         self.history_valid.copy_(other.history_valid)
         self.commit_mask.copy_(other.commit_mask)
+
+
+@dataclass
+class _StreamContext:
+    workspace: Optional[object] = None
+    layout: Optional[WindowLayout] = None
+    prepared: Optional[tuple[int, bool]] = None
 
 
 def _first_row_offsets(
@@ -172,48 +180,77 @@ class RequestWindow:
             dtype=torch.int64,
             device=self.state.kv_buffer[0].device,
         )
-        self.workspace = None
+        self._contexts = {}
+        self._unbound_context = _StreamContext()
+        self._workspace_rows = workspace_rows
         if workspace_rows:
-            self._ensure_workspace(workspace_rows)
-        self.layout = None
-        self.prepared = None
+            self._ensure_workspace(self._unbound_context, workspace_rows)
 
-    def _ensure_workspace(self, rows: int) -> None:
-        if self.workspace is not None and self.workspace.size >= rows:
+    def _stream_key(self):
+        device = self.state.kv_buffer[0].device
+        if device.type != "cuda":
+            return None
+        return int(torch.cuda.current_stream(device).cuda_stream)
+
+    def _context(self) -> _StreamContext:
+        key = self._stream_key()
+        context = self._contexts.get(key)
+        if context is not None:
+            return context
+        if self._unbound_context is not None:
+            context = self._unbound_context
+            self._unbound_context = None
+        else:
+            context = _StreamContext()
+            if self._workspace_rows:
+                self._ensure_workspace(context, self._workspace_rows)
+        self._contexts[key] = context
+        return context
+
+    def _ensure_workspace(self, context: _StreamContext, rows: int) -> None:
+        if context.workspace is not None and context.workspace.size >= rows:
             return
         assert not _capturing(), "request-window workspace must be sized before capture"
         size = ((rows + self.page_size - 1) // self.page_size) * self.page_size
-        self.workspace = self.pool_factory(size, 1)
+        context.workspace = self.pool_factory(size, 1)
 
     def reset(self, slots):
         loc = slots.to(torch.int64)[:, None] * self.capacity + torch.arange(
             self.capacity, device=slots.device
         )
         self.tags[:, loc.flatten()] = -1
-        self.prepared = None
+        for context in self._contexts.values():
+            context.prepared = None
+        if self._unbound_context is not None:
+            self._unbound_context.prepared = None
 
     def activate(self, layout):
-        if self.layout is layout:
+        context = self._context()
+        if context.layout is layout:
             return
-        self.layout = layout
-        self.prepared = None
-        if self.workspace is None:
-            self._ensure_workspace(layout.size)
-        elif self.workspace.size < layout.size:
+        context.layout = layout
+        context.prepared = None
+        if context.workspace is None:
+            self._ensure_workspace(context, layout.size)
+        elif context.workspace.size < layout.size:
             # Captured graphs hold the workspace address; growing it strands them.
             raise RuntimeError(
-                f"request-window workspace too small: {self.workspace.size} rows "
+                f"request-window workspace too small: {context.workspace.size} rows "
                 f"for a layout of {layout.size}"
             )
 
     def initialize_dummy_history(self):
-        layout = self.layout
+        context = self._context()
+        layout = context.layout
         self.tags.fill_(-1)
         loc = layout.history_req * self.capacity + layout.history_pos % self.capacity
         for buf in self.state.kv_buffer:
             buf.zero_()
         self.tags[:, loc] = layout.history_pos
-        self.prepared = None
+        for stream_context in self._contexts.values():
+            stream_context.prepared = None
+        if self._unbound_context is not None:
+            self._unbound_context.prepared = None
 
     def _history_src(self, layout):
         return torch.where(
@@ -225,10 +262,11 @@ class RequestWindow:
     def buffer(self, layer):
         # The runner's capture scope includes eager warmups before CUDA capture
         # starts, so the phase is part of the key: leaving the scope revalidates.
+        context = self._context()
         in_capture = get_is_capture_mode() or _capturing()
         prepared_key = (layer, in_capture)
-        if self.prepared != prepared_key:
-            layout = self.layout
+        if context.prepared != prepared_key:
+            layout = context.layout
             if layout is None:
                 raise RuntimeError("request-window metadata was not activated")
             src = self._history_src(layout)
@@ -242,17 +280,17 @@ class RequestWindow:
                     )
             copy_packed_tokens(
                 self.state.kv_buffer[layer],
-                self.workspace.kv_buffer[0],
+                context.workspace.kv_buffer[0],
                 src,
                 layout.history_loc,
                 page_size=self.page_size,
                 layout=self.state.kv_layout,
             )
-            self.prepared = prepared_key
-        return self.workspace.kv_buffer[0]
+            context.prepared = prepared_key
+        return context.workspace.kv_buffer[0]
 
     def commit(self, layer):
-        layout = self.layout
+        layout = self._context().layout
         dst = torch.where(
             layout.commit_mask,
             layout.req * self.capacity + layout.pos % self.capacity,
