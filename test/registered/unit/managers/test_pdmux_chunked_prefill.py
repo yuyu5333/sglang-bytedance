@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import torch
+
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.multiplex.multiplexing_mixin import (
     merge_completed_split_prefill,
@@ -56,10 +58,29 @@ def test_middle_chunk_is_stashed_before_its_continuation():
     scheduler = Mock()
     scheduler.chunked_req.prefix_indices = [1, 2]
     scheduler.chunked_req.extend_range.end = 5
+    scheduler.tp_worker.model_runner.token_to_kv_pool.request_window = None
 
     stash_pdmux_chunked_request(scheduler)
 
     scheduler.stash_chunked_request.assert_called_once_with(scheduler.chunked_req)
+
+
+def test_request_window_middle_chunk_keeps_request_owned_kv():
+    scheduler = Mock()
+    scheduler.chunked_req.prefix_indices = torch.tensor([1, 2])
+    scheduler.chunked_req.extend_range.end = 5
+    scheduler.chunked_req.kv.req_pool_idx = 1
+    scheduler.tp_worker.model_runner.token_to_kv_pool.request_window = object()
+    scheduler.req_to_token_pool.req_to_token = torch.tensor(
+        [[0, 0, 0, 0, 0], [10, 11, 12, 13, 14]]
+    )
+
+    stash_pdmux_chunked_request(scheduler)
+
+    scheduler.stash_chunked_request.assert_not_called()
+    assert torch.equal(
+        scheduler.chunked_req.prefix_indices, torch.tensor([10, 11, 12, 13, 14])
+    )
 
 
 def test_parked_chunk_without_new_kv_is_not_stashed():

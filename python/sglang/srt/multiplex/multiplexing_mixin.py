@@ -57,7 +57,19 @@ def stash_pdmux_chunked_request(scheduler: Scheduler) -> None:
         chunked_req is not None
         and chunked_req.extend_range.end > len(chunked_req.prefix_indices)
     ):
-        scheduler.stash_chunked_request(chunked_req)
+        token_to_kv_pool = scheduler.tp_worker.model_runner.token_to_kv_pool
+        if token_to_kv_pool.request_window is not None:
+            # Encoder-replay SWA is request-slot-local and is not represented in
+            # the radix tree. Adopting an intermediate chunk into radix can
+            # rebind FULL KV while leaving SWA ownership behind. Keep the row
+            # intact until the request finishes and only advance the scheduler's
+            # prefix view, matching ChunkCache semantics.
+            end = chunked_req.extend_range.end
+            chunked_req.prefix_indices = scheduler.req_to_token_pool.req_to_token[
+                chunked_req.kv.req_pool_idx, :end
+            ].to(dtype=torch.int64, copy=True)
+        else:
+            scheduler.stash_chunked_request(chunked_req)
 
 
 class SchedulerMultiplexMixin:
