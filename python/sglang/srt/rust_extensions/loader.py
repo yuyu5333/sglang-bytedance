@@ -86,8 +86,8 @@ def load_rust_extension(
 
     ``auto`` prefers a module bundled in an installed wheel. In a source tree,
     it ignores unverified in-package artifacts and uses the fingerprinted cache
-    before invoking Cargo. ``never`` explicitly trusts a bundled module, then
-    permits the cache but never invokes Cargo. ``force`` rebuilds from source.
+    before invoking Cargo. ``never`` only trusts a bundled module and never
+    inspects the source tree or invokes Cargo. ``force`` rebuilds from source.
     A same-name feature variant is always sourced from the fingerprinted cache.
     A distinctly named variant may be supplied by test infrastructure and is
     otherwise built into that cache after its bundled import misses.
@@ -119,6 +119,11 @@ def load_rust_extension(
         module = _import_bundled_extension(load_module)
         if module is not None:
             return module
+    if mode == "never":
+        raise ModuleNotFoundError(
+            f"{load_module} is not bundled, and Rust extension build mode is 'never'",
+            name=load_module,
+        )
 
     crate = _discover_crate(workspace, python_module)
     features = tuple(dict.fromkeys((*crate.features, *additional_features)))
@@ -139,13 +144,6 @@ def load_rust_extension(
     with _filesystem_lock(lock_path):
         if mode != "force" and extension_path.is_file():
             return _load_extension_from_path(load_module, extension_path)
-
-        if mode == "never":
-            raise ModuleNotFoundError(
-                f"{crate.python_module} is not bundled or cached, and Rust extension "
-                "build mode is 'never'",
-                name=crate.python_module,
-            )
 
         target_dir = cache_root / "targets" / context.target_fingerprint
         artifact = _cargo_build(
