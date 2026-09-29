@@ -41,6 +41,29 @@ _PP_EAGLE_SUPPORTED_ARCHITECTURES = frozenset(
 )
 
 
+def check_pdmux_compat(cfg: Any) -> None:
+    """Validate constraints that remain intrinsic to the PDMux event loop.
+
+    Scheduler-level chunked prefill is compatible with PDMux: each admitted
+    chunk is still executed as a layer-wise SPLIT_PREFILL batch. Keeping
+    chunking available is required for prompts whose transient SWA footprint
+    exceeds the paged SWA pool.
+    """
+    if not cfg.enable_pdmux:
+        return
+
+    assert cfg.pp_size == 1, (
+        "PD-Multiplexing is only supported with pipeline parallelism disabled "
+        "(pp_size=1)."
+    )
+    assert cfg.disaggregation_mode == "null", (
+        "PD-Multiplexing is not compatible with disaggregation mode."
+    )
+    assert cfg.disable_overlap_schedule, (
+        "PD-Multiplexing is not compatible with overlap schedule."
+    )
+
+
 def validate_response_store(server_args: Any) -> None:
     cfg = resolving_view(server_args)
     if cfg.enable_response_store and cfg.disaggregation_mode != "null":
@@ -189,19 +212,8 @@ def check_server_args(server_args: Any):
         )
 
     # Check pdmux
+    check_pdmux_compat(cfg)
     if cfg.enable_pdmux:
-        assert cfg.pp_size == 1, (
-            "PD-Multiplexing is only supported with pipeline parallelism disabled (pp_size=1)."
-        )
-        assert cfg.chunked_prefill_size == -1, (
-            "PD-Multiplexing is not compatible with chunked prefill."
-        )
-        assert cfg.disaggregation_mode == "null", (
-            "PD-Multiplexing is not compatible with disaggregation mode."
-        )
-        assert cfg.disable_overlap_schedule, (
-            "PD-Multiplexing is not compatible with overlap schedule."
-        )
 
         # NOTE: CUDA Green Context may encounter potential issues with CudaGraph on torch 2.7.x – 2.8.x, leading to performance degradation.
         import torch

@@ -74,6 +74,7 @@ from sglang.srt.arg_groups.serving_hook import (
 )
 from sglang.srt.arg_groups.speculative_hook import handle_speculative_decoding
 from sglang.srt.arg_groups.validation_hook import (
+    check_pdmux_compat,
     check_pipeline_parallel_compat,
     check_two_batch_overlap,
 )
@@ -3722,6 +3723,33 @@ class TestTwoBatchOverlapBackend(CustomTestCase):
         # require dp-attention there.
         args = self._args(moe_a2a_backend="deepep", enable_dp_attention=False)
         check_two_batch_overlap(args)
+
+
+class TestPDMuxCompatibility(CustomTestCase):
+    def _args(self, **overrides):
+        values = {
+            "enable_pdmux": True,
+            "pp_size": 1,
+            "chunked_prefill_size": 16384,
+            "disaggregation_mode": "null",
+            "disable_overlap_schedule": True,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_allows_chunked_prefill(self):
+        check_pdmux_compat(self._args())
+
+    def test_keeps_intrinsic_runtime_constraints(self):
+        invalid_cases = (
+            ({"pp_size": 2}, "pipeline parallelism"),
+            ({"disaggregation_mode": "prefill"}, "disaggregation mode"),
+            ({"disable_overlap_schedule": False}, "overlap schedule"),
+        )
+        for overrides, message in invalid_cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(AssertionError, message):
+                    check_pdmux_compat(self._args(**overrides))
 
 
 class TestDcpKvEventContract(CustomTestCase):
