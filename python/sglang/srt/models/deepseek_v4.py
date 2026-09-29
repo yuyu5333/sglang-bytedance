@@ -5139,6 +5139,116 @@ class DeepseekV4ForCausalLM(nn.Module):
             output.hidden_states_token_indices = tail.token_indices
         return output
 
+    @torch.no_grad()
+    def forward_split_prefill(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        split_interval: Tuple[int, int],
+        input_embeds: Optional[torch.Tensor] = None,
+    ) -> Optional[LogitsProcessorOutput]:
+        """Run one layer interval for PDMux split prefill.
+
+        PDMux interleaves these intervals with decode work. The mHC carry tensors
+        therefore live on ``forward_batch`` until the final interval.
+        """
+        if self.model.hc_pre_from_prev_sublayer:
+            raise NotImplementedError(
+                "PDMux split prefill does not support hc_pre_from_prev_sublayer"
+            )
+        if self.model.late_layer_start is not None:
+            raise NotImplementedError(
+                "PDMux split prefill does not support decoder SWA bounded replay"
+            )
+        if self.pp_group.world_size != 1:
+            raise NotImplementedError(
+                "PDMux split prefill does not support pipeline parallelism"
+            )
+
+        start, end = split_interval
+        if start == 0:
+            if (
+                self.vision is not None
+                and forward_batch.mm_inputs is not None
+                and any(x is not None for x in forward_batch.mm_inputs)
+            ):
+                if input_embeds is not None:
+                    raise ValueError("Cannot combine input_embeds and image inputs")
+                input_embeds = self._prepare_mm_embeddings(input_ids, forward_batch)
+            if self.vision is not None:
+                input_ids = input_ids.masked_fill(
+                    input_ids >= MM_PAD_SHIFT_VALUE, self.config.image_token_id
+                )
+            if input_embeds is None:
+                hidden_states = self.model.embed_tokens(input_ids)
+            else:
+                hidden_states = input_embeds
+            forward_batch.hidden_states = hidden_states.unsqueeze(1).repeat(
+                1, self.model.hc_mult, 1
+            )
+            forward_batch.residual = (None, None, None)
+            for attr in ("freqs_cis_c4", "freqs_cis_c128"):
+                if hasattr(forward_batch, attr):
+                    delattr(forward_batch, attr)
+        elif self.vision is not None:
+            input_ids = input_ids.masked_fill(
+                input_ids >= MM_PAD_SHIFT_VALUE, self.config.image_token_id
+            )
+
+        hidden_states = forward_batch.hidden_states
+        prev_residual, prev_post, prev_comb = forward_batch.residual
+        input_ids_global = getattr(forward_batch, "input_ids_global", input_ids)
+        use_fused = self.model.use_fused_mhc_post_pre
+        last_layer = None
+
+        with get_attn_tp_context().maybe_input_scattered(forward_batch):
+            for i in range(start, end):
+                layer = self.model.layers[i]
+                last_layer = layer
+                ctx = (
+                    nullcontext()
+                    if check_cuda_graph_backend(Phase.PREFILL, Backend.TC_PIECEWISE)
+                    else get_global_expert_distribution_recorder().with_current_layer(i)
+                )
+                with ctx:
+                    hidden_states, prev_residual, prev_post, prev_comb = layer(
+                        positions=positions,
+                        hidden_states=hidden_states,
+                        forward_batch=forward_batch,
+                        input_ids=input_ids,
+                        input_ids_global=input_ids_global,
+                        prev_residual=prev_residual,
+                        prev_post=prev_post,
+                        prev_comb=prev_comb,
+                    )
+
+        forward_batch.hidden_states = hidden_states
+        forward_batch.residual = (prev_residual, prev_post, prev_comb)
+        if end != self.model.config.num_hidden_layers:
+            return None
+
+        if use_fused and last_layer is not None:
+            hidden_states = last_layer.hc_post(
+                hidden_states, prev_residual, prev_post, prev_comb
+            )
+        pre_hc_head = hidden_states.flatten(1)
+        hidden_states = self.model.hc_head(
+            hidden_states,
+            self.model.hc_head_fn,
+            self.model.hc_head_scale,
+            self.model.hc_head_base,
+        )
+        hidden_states = self.model.norm(hidden_states)
+        forward_batch.hidden_states = hidden_states
+        return self.logits_processor(
+            input_ids,
+            hidden_states,
+            self.lm_head,
+            forward_batch,
+            hidden_states_before_norm=pre_hc_head,
+        )
+
     def _setup_fp8_wo_a_scales(self, is_nextn: bool) -> None:
         if _FP8_WO_A_UE8M0:
             from deep_gemm import transform_sf_into_required_layout
