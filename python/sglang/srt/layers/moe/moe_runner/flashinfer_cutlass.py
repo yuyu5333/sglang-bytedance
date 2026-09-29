@@ -195,6 +195,7 @@ def _slice_standard_dispatch_output(dispatch_output, topk_output, start: int, en
     hidden_states_scale = dispatch_output.hidden_states_scale
     if (
         hidden_states_scale is not None
+        and hidden_states_scale.ndim > 0
         and hidden_states_scale.shape[0] == dispatch_output.hidden_states.shape[0]
     ):
         hidden_states_scale = hidden_states_scale[start:end]
