@@ -5153,10 +5153,6 @@ class DeepseekV4ForCausalLM(nn.Module):
         PDMux interleaves these intervals with decode work. The mHC carry tensors
         therefore live on ``forward_batch`` until the final interval.
         """
-        if self.model.hc_pre_from_prev_sublayer:
-            raise NotImplementedError(
-                "PDMux split prefill does not support hc_pre_from_prev_sublayer"
-            )
         if self.model.late_layer_start is not None:
             raise NotImplementedError(
                 "PDMux split prefill does not support decoder SWA bounded replay"
@@ -5187,7 +5183,11 @@ class DeepseekV4ForCausalLM(nn.Module):
             forward_batch.hidden_states = hidden_states.unsqueeze(1).repeat(
                 1, self.model.hc_mult, 1
             )
-            forward_batch.residual = (None, None, None)
+            forward_batch.residual = (
+                (None, None, None, None)
+                if self.model.hc_pre_from_prev_sublayer
+                else (None, None, None)
+            )
             for attr in ("freqs_cis_c4", "freqs_cis_c128"):
                 if hasattr(forward_batch, attr):
                     delattr(forward_batch, attr)
@@ -5197,48 +5197,157 @@ class DeepseekV4ForCausalLM(nn.Module):
             )
 
         hidden_states = forward_batch.hidden_states
-        prev_residual, prev_post, prev_comb = forward_batch.residual
         input_ids_global = getattr(forward_batch, "input_ids_global", input_ids)
-        use_fused = self.model.use_fused_mhc_post_pre
         last_layer = None
 
         with get_attn_tp_context().maybe_input_scattered(forward_batch):
-            for i in range(start, end):
-                layer = self.model.layers[i]
-                last_layer = layer
-                ctx = (
-                    nullcontext()
-                    if check_cuda_graph_backend(Phase.PREFILL, Backend.TC_PIECEWISE)
-                    else get_global_expert_distribution_recorder().with_current_layer(i)
-                )
-                with ctx:
-                    hidden_states, prev_residual, prev_post, prev_comb = layer(
-                        positions=positions,
-                        hidden_states=hidden_states,
-                        forward_batch=forward_batch,
-                        input_ids=input_ids,
-                        input_ids_global=input_ids_global,
-                        prev_residual=prev_residual,
-                        prev_post=prev_post,
-                        prev_comb=prev_comb,
+            if self.model.hc_pre_from_prev_sublayer:
+                if is_cp_active(forward_batch):
+                    raise NotImplementedError(
+                        "PDMux split prefill does not support context parallelism"
                     )
+                if self.capture_aux_hidden_states:
+                    raise NotImplementedError(
+                        "PDMux split prefill does not support auxiliary hidden capture"
+                    )
+                prev_pre, precomputed_attn, combined_attn, normalized_attn = (
+                    forward_batch.residual
+                )
+                hash_ids = (
+                    self.model.engram_hasher(input_ids, forward_batch)
+                    if self.model.engram_hasher is not None
+                    else None
+                )
+                for i in range(start, end):
+                    layer = self.model.layers[i]
+                    engram = layer.engram
+                    if engram is not None:
+                        precomputed_attn = None
+                        combined_attn = None
+                        normalized_attn = None
+                        before_engram = hidden_states
+                        hidden_states = engram(
+                            hidden_states,
+                            hash_ids[:, engram.layer_hash_index],
+                            forward_batch,
+                            cp_all_tokens=False,
+                        )
+                        if (
+                            self.config.model_type == "deepseek_v41"
+                            and self.config.vision_n_layers > 0
+                        ):
+                            hidden_states = torch.where(
+                                (input_ids == self.config.image_token_id)[
+                                    :, None, None
+                                ],
+                                before_engram,
+                                hidden_states,
+                            )
+                    ctx = (
+                        nullcontext()
+                        if check_cuda_graph_backend(
+                            Phase.PREFILL, Backend.TC_PIECEWISE
+                        )
+                        else get_global_expert_distribution_recorder().with_current_layer(
+                            i
+                        )
+                    )
+                    next_norm = None
+                    next_input = []
+                    next_combined = (
+                        []
+                        if (
+                            self.config.model_type == "deepseek_v41"
+                            and (
+                                128 <= hidden_states.shape[0] <= 384
+                                or 4096 <= hidden_states.shape[0] <= 65536
+                            )
+                            and i + 1 < self.model.end_layer
+                            and self.model.layers[i + 1].engram is None
+                        )
+                        else None
+                    )
+                    if next_combined is not None and hidden_states.shape[0] >= 4096:
+                        next_norm = self.model.layers[i + 1].input_layernorm
+                    with ctx:
+                        hidden_states, prev_pre = layer.forward_hc_pre_from_prev(
+                            positions=positions,
+                            hidden_states=hidden_states,
+                            input_ids=input_ids,
+                            forward_batch=forward_batch,
+                            input_ids_global=input_ids_global,
+                            prev_pre=prev_pre,
+                            precomputed_attn=precomputed_attn,
+                            next_norm=next_norm,
+                            next_input=next_input,
+                            combined_attn=combined_attn,
+                            normalized_attn=normalized_attn,
+                            next_combined=next_combined,
+                        )
+                    precomputed_attn = next_input[0] if next_input else None
+                    combined_attn, normalized_attn = (
+                        next_combined[0] if next_combined else (None, None)
+                    )
+                forward_batch.residual = (
+                    prev_pre,
+                    precomputed_attn,
+                    combined_attn,
+                    normalized_attn,
+                )
+            else:
+                prev_residual, prev_post, prev_comb = forward_batch.residual
+                use_fused = self.model.use_fused_mhc_post_pre
+                for i in range(start, end):
+                    layer = self.model.layers[i]
+                    last_layer = layer
+                    ctx = (
+                        nullcontext()
+                        if check_cuda_graph_backend(
+                            Phase.PREFILL, Backend.TC_PIECEWISE
+                        )
+                        else get_global_expert_distribution_recorder().with_current_layer(
+                            i
+                        )
+                    )
+                    with ctx:
+                        hidden_states, prev_residual, prev_post, prev_comb = layer(
+                            positions=positions,
+                            hidden_states=hidden_states,
+                            forward_batch=forward_batch,
+                            input_ids=input_ids,
+                            input_ids_global=input_ids_global,
+                            prev_residual=prev_residual,
+                            prev_post=prev_post,
+                            prev_comb=prev_comb,
+                        )
+                forward_batch.residual = (prev_residual, prev_post, prev_comb)
 
         forward_batch.hidden_states = hidden_states
-        forward_batch.residual = (prev_residual, prev_post, prev_comb)
         if end != self.model.config.num_hidden_layers:
             return None
 
-        if use_fused and last_layer is not None:
-            hidden_states = last_layer.hc_post(
-                hidden_states, prev_residual, prev_post, prev_comb
-            )
         pre_hc_head = hidden_states.flatten(1)
-        hidden_states = self.model.hc_head(
-            hidden_states,
-            self.model.hc_head_fn,
-            self.model.hc_head_scale,
-            self.model.hc_head_base,
-        )
+        if self.model.hc_pre_from_prev_sublayer:
+            from sglang.kernels.ops.layernorm.mhc import hc_combine
+
+            hidden_states = hc_combine(
+                pre_hc_head.float(),
+                forward_batch.residual[0],
+                self.model.hc_mult,
+                hidden_states.dtype,
+            )
+        else:
+            if use_fused and last_layer is not None:
+                hidden_states = last_layer.hc_post(
+                    hidden_states, prev_residual, prev_post, prev_comb
+                )
+                pre_hc_head = hidden_states.flatten(1)
+            hidden_states = self.model.hc_head(
+                hidden_states,
+                self.model.hc_head_fn,
+                self.model.hc_head_scale,
+                self.model.hc_head_base,
+            )
         hidden_states = self.model.norm(hidden_states)
         forward_batch.hidden_states = hidden_states
         return self.logits_processor(
