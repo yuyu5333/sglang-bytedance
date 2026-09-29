@@ -148,6 +148,14 @@ DEFAULT_INDEX_TOPK = 512
 PAGE_INDEX_ALIGNED_SIZE = 64
 
 
+def _swa_cache_page_size(token_to_kv_pool) -> int:
+    """Return the physical SWA page size for paged or request-window KV."""
+    request_window = token_to_kv_pool.request_window
+    if request_window is not None:
+        return request_window.page_size
+    return token_to_kv_pool.swa_kv_pool.page_size
+
+
 @functools.lru_cache(maxsize=None)
 def _is_sm100_or_newer() -> bool:
     # DeepGEMM's fp8_fp4 mqa-logits kernels need SM100+; Hopper takes the torch indexer.
@@ -2461,7 +2469,7 @@ class DeepseekV4AttnBackend(
             req_to_token=self.req_to_token,
             full_to_swa=self.token_to_kv_pool.full_to_swa_index_mapping,
             swa_window_size=SWA_WINDOW,
-            swa_page_size=self.token_to_kv_pool.swa_kv_pool.page_size,
+            swa_page_size=_swa_cache_page_size(self.token_to_kv_pool),
             num_qo_tokens=num_qo_tokens,
             max_seq_len=max(seq_lens_cpu_list),
             total_swa=total_swa,
@@ -3725,7 +3733,7 @@ class DeepseekV4AttnBackend(
                     compress_ratio
                 )
 
-            swa_kv_page_size = token_to_kv_pool.swa_kv_pool.page_size
+            swa_kv_page_size = _swa_cache_page_size(token_to_kv_pool)
             assert swa_k_cache.ndim == 2
             # The kernel detects each cache's format from the last dim of this
             # view: 584 (V4), 528 (V4.1 fp8) or 288 (V4.1 fp4, extra cache only).
