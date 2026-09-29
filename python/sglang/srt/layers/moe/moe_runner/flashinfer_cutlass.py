@@ -190,6 +190,25 @@ def _activation_type(runner_config: MoeRunnerConfig):
     return activation
 
 
+def _slice_standard_dispatch_output(dispatch_output, topk_output, start: int, end: int):
+    """Slice token-major fields while preserving optional non-token metadata."""
+    hidden_states_scale = dispatch_output.hidden_states_scale
+    if (
+        hidden_states_scale is not None
+        and hidden_states_scale.shape[0] == dispatch_output.hidden_states.shape[0]
+    ):
+        hidden_states_scale = hidden_states_scale[start:end]
+    return dispatch_output._replace(
+        hidden_states=dispatch_output.hidden_states[start:end],
+        hidden_states_scale=hidden_states_scale,
+        topk_output=topk_output._replace(
+            topk_ids=topk_output.topk_ids[start:end],
+            topk_weights=topk_output.topk_weights[start:end],
+        ),
+        hidden_states_pre_quant=None,
+    )
+
+
 def _maybe_apply_routed_scaling_factor(
     output: torch.Tensor,
     quant_info: FlashInferCutlassMoeQuantInfo,
@@ -464,6 +483,25 @@ def _fused_experts_flashinfer_mxfp4_cutlass(
         )
     if use_wfp4afp8_humming and use_mxfp8_act_scaling:
         raise ValueError("SM90 Humming and SM120 MXFP8 scaling are mutually exclusive.")
+
+    max_tokens = envs.SGLANG_FLASHINFER_MXFP4_MOE_MAX_TOKENS.get()
+    if use_wfp4afp8_humming and max_tokens > 0 and x.shape[0] > max_tokens:
+        chunks = []
+        for start in range(0, x.shape[0], max_tokens):
+            end = min(start + max_tokens, x.shape[0])
+            chunk_dispatch = _slice_standard_dispatch_output(
+                dispatch_output,
+                topk_output,
+                start,
+                end,
+            )
+            chunks.append(
+                _fused_experts_flashinfer_mxfp4_cutlass(
+                    chunk_dispatch, quant_info, runner_config
+                ).hidden_states
+            )
+        return StandardCombineInput(hidden_states=torch.cat(chunks, dim=0))
+
     input_sf = None
     fc1_expert_weights = quant_info.w13_weight
     fc2_expert_weights = quant_info.w2_weight
