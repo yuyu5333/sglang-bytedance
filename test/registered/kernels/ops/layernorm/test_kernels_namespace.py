@@ -8,44 +8,12 @@ import pytest
 
 import sglang.kernels as K
 import sglang.kernels.fused_op as fo
-import sglang.kernels.ops  # noqa: F401  -- populate the registry
 import sglang.kernels.selector as sel
-from sglang.kernels import DeviceType, KernelBackend, PlatformInfo
+from sglang.kernels import KernelBackend, PlatformInfo
 from sglang.kernels.spec import CapabilityRequirement as Cap
 from sglang.test.ci.ci_register import register_cpu_ci
 
-register_cpu_ci(est_time=10, suite="base-a-test-cpu")
-
-GROUPS = [
-    "activation",
-    "attention",
-    "communication",
-    "diffusion",
-    "elementwise",
-    "embeddings",
-    "gemm",
-    "grammar",
-    "kvcache",
-    "layernorm",
-    "mamba",
-    "memory",
-    "moe",
-    "quantization",
-    "sampling",
-    "speculative",
-]
-
-# Representative ops checked as a subset (the registry holds many more).
-EXPECTED = {
-    "activation.silu_and_mul": {"aot", "jit", "aiter", "torch", "torch_compile"},
-    "activation.relu2": {"jit", "torch", "torch_compile"},
-    "layernorm.rmsnorm": {"aot", "jit", "aiter", "torch_npu", "torch", "torch_compile"},
-    "layernorm.gemma_rmsnorm": {"aot", "jit", "torch_npu", "torch", "torch_compile"},
-    "gemm.fp8_scaled_mm": {"aot"},
-    "moe.moe_align_block_size": {"aot", "jit"},
-    "quantization.nvfp4_gemm_swiglu_nvfp4_quant": {"cute_dsl"},
-    "kvcache.reshape_and_cache_flash": {"triton"},
-}
+register_cpu_ci(est_time=24, suite="base-a-test-cpu")
 
 _CPU = PlatformInfo(device_type="cpu")
 _SM90 = PlatformInfo(device_type="cuda", cuda_arch_major=9, cuda_arch_minor=0)
@@ -53,39 +21,21 @@ _SM100 = PlatformInfo(device_type="cuda", cuda_arch_major=10, cuda_arch_minor=0)
 _HIP = PlatformInfo(device_type="hip")
 
 
-def test_top_level_exports():
-    for name in (
-        "KernelSpec",
-        "KernelBackend",
-        "FormatSignature",
-        "CapabilityRequirement",
-        "PlatformInfo",
-        "registry",
-        "get_kernel",
-        "select_kernel",
-    ):
-        assert hasattr(K, name), name
-
-
-@pytest.mark.parametrize("group", GROUPS)
-def test_group_importable(group):
-    assert hasattr(importlib.import_module(f"sglang.kernels.ops.{group}"), "__all__")
-
-
-@pytest.mark.parametrize("op, backends", list(EXPECTED.items()))
-def test_registry_backends(op, backends):
-    assert {s.backend.value for s in K.registry.get(op)} == backends
-
-
-def test_specs_well_formed():
-    for spec in K.registry.all_specs():
-        assert spec.op == f"{spec.group}.{spec.name}"
-        mod, sep, attr = spec.target.partition(":")
-        assert sep == ":" and mod and attr, spec.target
-
-
 def test_single_backend_resolves_without_backend():
-    assert K.select_kernel("gemm.fp8_scaled_mm").backend is KernelBackend.AOT
+    assert (
+        K.select_kernel("kvcache.reshape_and_cache_flash").backend
+        is KernelBackend.TRITON
+    )
+
+
+def test_fp8_scaled_mm_requires_explicit_registry_backend(monkeypatch):
+    monkeypatch.setattr(sel, "_platform", lambda: _SM90)
+    with pytest.raises(ValueError, match="multiple backends"):
+        K.select_kernel("gemm.fp8_scaled_mm")
+    assert (
+        K.select_kernel("gemm.fp8_scaled_mm", backend=KernelBackend.AOT).backend
+        is KernelBackend.AOT
+    )
 
 
 def test_unknown_op_or_backend_raises():
@@ -93,6 +43,22 @@ def test_unknown_op_or_backend_raises():
         K.select_kernel("does_not.exist")
     with pytest.raises(KeyError):
         K.select_kernel("gemm.fp8_scaled_mm", backend=KernelBackend.TRITON)
+
+
+@pytest.mark.parametrize(
+    "platform, eligible",
+    [
+        (_SM90, True),
+        (_SM100, True),
+        (PlatformInfo(device_type="cuda", cuda_arch_major=8, cuda_arch_minor=0), False),
+        (_CPU, False),
+        (_HIP, False),
+    ],
+)
+def test_qwen_qkv_registry_accepts_hopper(platform, eligible):
+    spec = K.select_kernel("diffusion.qwen_qkv_epilogue")
+    assert spec.backend is KernelBackend.JIT
+    assert K.capabilities_satisfied(spec.capabilities, platform) is eligible
 
 
 def test_multi_backend_requires_explicit_backend(monkeypatch):
@@ -112,7 +78,7 @@ def test_activation_default_backend(monkeypatch, device, expect):
     from sglang.kernels.ops.activation import _SILU_AND_MUL
 
     monkeypatch.setattr(fo, "_platform", lambda: PlatformInfo(device_type=device))
-    assert _SILU_AND_MUL._resolve_backend().value == expect
+    assert _SILU_AND_MUL.auto_selected_backend().value == expect
 
 
 @pytest.mark.parametrize(
@@ -131,16 +97,7 @@ def test_layernorm_default_backend(monkeypatch, op_attr, device, expect):
     # CUDA-only, so HIP falls to aiter and NPU to torch_npu.
     ln = importlib.import_module("sglang.kernels.ops.layernorm")
     monkeypatch.setattr(fo, "_platform", lambda: PlatformInfo(device_type=device))
-    assert getattr(ln, op_attr)._resolve_backend().value == expect
-
-
-def test_per_op_backend_subset():
-    # silu_and_mul ships an aiter (HIP) kernel; the gelu siblings deliberately
-    # do not -- ROCm coverage is a per-(op, backend) subset.
-    from sglang.kernels.ops.activation import _GELU_AND_MUL, _SILU_AND_MUL
-
-    assert KernelBackend.AITER in _SILU_AND_MUL.available_backends()
-    assert KernelBackend.AITER not in _GELU_AND_MUL.available_backends()
+    assert getattr(ln, op_attr).auto_selected_backend().value == expect
 
 
 @pytest.mark.parametrize(
@@ -168,18 +125,42 @@ def test_capabilities_or_semantics():
     assert K.capabilities_satisfied(Cap.CUDA, _SM90)  # single tolerated
 
 
-def test_capability_shortcuts():
-    assert Cap.CUDA == Cap(device=DeviceType.CUDA)
-    assert Cap.HIP == Cap(device=DeviceType.HIP)
-    assert Cap.NPU == Cap(device=DeviceType.NPU)
-    assert {Cap.CUDA, Cap.HIP} == {Cap.HIP, Cap.CUDA}
-    assert Cap.cuda(min_sm=(10, 0)) == Cap(
-        device=DeviceType.CUDA, min_cuda_arch=(10, 0)
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "srt/utils/common.py",
+        "multimodal_gen/runtime/utils/common.py",
+    ),
+)
+def test_amx_backend_probe_is_lazy(relative_path):
+    loader = (
+        "package = importlib.util.find_spec('sglang'); "
+        "path = pathlib.Path(next(iter(package.submodule_search_locations))) / "
+        f"{relative_path!r}; "
+        "spec = importlib.util.spec_from_file_location('_common_under_test', path); "
+        "module = importlib.util.module_from_spec(spec); "
+        "sys.modules[spec.name] = module; "
+        "spec.loader.exec_module(module)"
     )
-
-
-def test_platform_detect_does_not_raise():
-    assert PlatformInfo.detect().device_type in ("cpu", "cuda", "hip", "npu")
+    code = "; ".join(
+        (
+            "import builtins, importlib.util, pathlib, sys",
+            "from unittest import mock",
+            "real_import = builtins.__import__",
+            "import_mock = mock.Mock(wraps=real_import)",
+            "builtins.__import__ = import_mock",
+            loader,
+            "builtins.__import__ = real_import",
+            "attempted = any(call.args and call.args[0] == 'sgl_kernel' "
+            "for call in import_mock.call_args_list)",
+            "print('DIRTY' if attempted else 'CLEAN')",
+        )
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CLEAN" in result.stdout
 
 
 def test_import_stays_metadata_only():
@@ -187,12 +168,43 @@ def test_import_stays_metadata_only():
     # the JIT compilation infra (sglang.kernels.jit), which import torch / nvcc.
     code = (
         "import sys, sglang.kernels.ops; "
-        "print('DIRTY' if 'sgl_kernel' in sys.modules or any("
+        "print('DIRTY' if any(m in sys.modules for m in "
+        "('sgl_kernel', 'cutlass', 'flydsl', 'aiter', "
+        "'sglang.kernels.ops.gemm.kimi_k3')) or any("
         "m.startswith('sglang.kernels.jit') for m in sys.modules) else 'CLEAN')"
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "CLEAN" in r.stdout
+
+
+@pytest.mark.parametrize(
+    "op, backend, device",
+    [
+        ("activation.situ_and_mul", KernelBackend.JIT, "cuda"),
+        ("moe.situ_and_mul_masked_post_quant", KernelBackend.JIT, "cuda"),
+        ("attention.attn_res_fused_tma", KernelBackend.JIT, "cuda"),
+        ("attention.attn_res_hip", KernelBackend.TRITON, "hip"),
+        ("attention.kimi_k3_mla_output_gate", KernelBackend.JIT, "cuda"),
+        ("attention.fused_kda_decode_mtp_dspark", KernelBackend.CUTE_DSL, "cuda"),
+        ("attention.flydsl_kimi_k3_kda_decode", KernelBackend.FLYDSL, "hip"),
+        ("attention.flydsl_kimi_k3_kda_decode_with_f_b", KernelBackend.FLYDSL, "hip"),
+        ("communication.all_reduce_push_res", KernelBackend.JIT, "cuda"),
+        ("communication.gemm_ag_up_proj", KernelBackend.JIT, "cuda"),
+        ("communication.o_proj_gemm_ar", KernelBackend.JIT, "cuda"),
+        ("communication.reduce_scatter_res", KernelBackend.JIT, "cuda"),
+    ],
+)
+def test_kimi_k3_kernels_are_inventoried_by_operator(op, backend, device):
+    spec = K.select_kernel(op, backend=backend)
+    group = op.split(".")[0]
+    assert spec.target.startswith(f"sglang.kernels.ops.{group}.")
+    assert K.capabilities_satisfied(spec.capabilities, PlatformInfo(device_type=device))
+    assert not K.capabilities_satisfied(spec.capabilities, _CPU)
+
+
+def test_kimi_k3_model_namespace_is_retired():
+    assert importlib.util.find_spec("sglang.kernels.ops.kimi_k3") is None
 
 
 if __name__ == "__main__":

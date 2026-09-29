@@ -27,6 +27,8 @@ _GROUPS = (
     "layernorm",
     "mamba",
     "memory",
+    "minicpm_sala",
+    "mm",
     "moe",
     "quantization",
     "sampling",
