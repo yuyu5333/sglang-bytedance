@@ -719,6 +719,12 @@ class TpModelWorker(BaseTpWorker):
 
     def forward_batch_split_prefill(self, batch: ScheduleBatch):
         if batch.split_index == 0:
+            if get_exec().features.enable_encoder_swa_bounded_replay:
+                from sglang.srt.model_executor.encoder_swa_replay import (
+                    run_encoder_swa_replay,
+                )
+
+                run_encoder_swa_replay(self, batch)
             forward_batch = ForwardBatch.init_new(
                 batch,
                 self.model_runner,
