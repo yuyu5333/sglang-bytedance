@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.model_executor.encoder_swa_replay import run_encoder_swa_replay
 from sglang.srt.multiplex.multiplexing_mixin import (
     merge_completed_split_prefill,
     stash_pdmux_chunked_request,
@@ -81,6 +82,22 @@ def test_request_window_middle_chunk_keeps_request_owned_kv():
     assert torch.equal(
         scheduler.chunked_req.prefix_indices, torch.tensor([10, 11, 12, 13, 14])
     )
+
+
+def test_encoder_swa_replay_resets_radix_hit_request():
+    worker = Mock()
+    window = worker.model_runner.token_to_kv_pool.request_window
+    batch = Mock()
+    batch.forward_mode.is_extend_without_speculative.return_value = True
+    batch.reqs = [Mock()]
+    batch.encoder_swa_reset = [False]
+    batch.req_pool_indices = torch.tensor([3])
+    batch.prefix_lens = [0]
+
+    run_encoder_swa_replay(worker, batch)
+
+    window.reset.assert_called_once()
+    assert torch.equal(window.reset.call_args.args[0], torch.tensor([3]))
 
 
 def test_parked_chunk_without_new_kv_is_not_stashed():

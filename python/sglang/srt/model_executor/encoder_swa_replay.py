@@ -13,9 +13,12 @@ def run_encoder_swa_replay(worker, batch):
     window = runner.token_to_kv_pool.request_window
     if window is None or not batch.forward_mode.is_extend_without_speculative():
         return
-    for i, reset in enumerate(batch.encoder_swa_reset):
-        if not reset:
-            continue
+    # A req_pool_idx only proves that the FULL-KV row exists. It does not prove
+    # that request-local SWA exists: radix hits and chunk-boundary rebinding can
+    # assign/reuse a row without carrying RequestWindow state. Rebuild the
+    # bounded 128-token history at every extend boundary from the token prefix,
+    # which is the authoritative source for encoder replay.
+    for i in range(len(batch.reqs)):
         slot = batch.req_pool_indices[i : i + 1]
         window.reset(slot)
         end = batch.prefix_lens[i]
