@@ -7,6 +7,7 @@ def run_encoder_swa_replay(worker, batch):
     from sglang.srt.model_executor.forward_batch_info import (
         CaptureHiddenMode,
         ForwardBatch,
+        ForwardMode,
     )
 
     runner = worker.model_runner
@@ -31,6 +32,7 @@ def run_encoder_swa_replay(worker, batch):
         start = max(0, end - 128)
         req = batch.reqs[i]
         replay = copy(batch)
+        replay.forward_mode = ForwardMode.EXTEND
         replay.reqs = [req]
         replay.input_ids = torch.tensor(
             list(req.full_untruncated_fill_ids[start:end]),

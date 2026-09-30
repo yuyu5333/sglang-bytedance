@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.model_executor.encoder_swa_replay import run_encoder_swa_replay
 from sglang.srt.multiplex.multiplexing_mixin import (
     merge_completed_split_prefill,
@@ -98,6 +99,34 @@ def test_encoder_swa_replay_resets_radix_hit_request():
 
     window.reset.assert_called_once()
     assert torch.equal(window.reset.call_args.args[0], torch.tensor([3]))
+
+
+@patch("sglang.srt.model_executor.forward_batch_info.ForwardBatch.init_new")
+def test_encoder_swa_replay_uses_full_extend_forward(init_forward_batch):
+    worker = Mock()
+    runner = worker.model_runner
+    runner.device = "cpu"
+    runner.req_to_token_pool.req_to_token = torch.tensor(
+        [[0, 0], [0, 0], [0, 0], [10, 11]]
+    )
+    runner.model.model.engram_hasher = None
+    req = SimpleNamespace(full_untruncated_fill_ids=[1, 2])
+    batch = SimpleNamespace(
+        forward_mode=ForwardMode.SPLIT_PREFILL,
+        reqs=[req],
+        encoder_swa_reset=[False],
+        req_pool_indices=torch.tensor([3]),
+        req_pool_indices_cpu=torch.tensor([3]),
+        prefix_lens=[2],
+    )
+    forward_batch = Mock()
+    init_forward_batch.return_value = forward_batch
+
+    run_encoder_swa_replay(worker, batch)
+
+    replay_batch = init_forward_batch.call_args.args[0]
+    assert replay_batch.forward_mode == ForwardMode.EXTEND
+    runner.forward.assert_called_once_with(forward_batch)
 
 
 def test_parked_chunk_without_new_kv_is_not_stashed():
