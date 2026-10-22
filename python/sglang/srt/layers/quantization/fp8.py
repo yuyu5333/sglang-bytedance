@@ -448,6 +448,13 @@ class Fp8Config(QuantizationConfig):
 
                 return Mxfp4MarlinMoEMethod(fp8_method, prefix=prefix)
 
+            if self.is_fp4_experts and get_moe_runner_backend().is_cutlass():
+                from sglang.srt.layers.quantization.mxfp4_cutlass_moe import (
+                    Mxfp4CutlassMoEMethod,
+                )
+
+                return Mxfp4CutlassMoEMethod(fp8_method, prefix=prefix)
+
             if self.is_fp4_experts and get_moe_runner_backend().is_humming():
                 from sglang.srt.layers.quantization.mxfp4_humming_moe import (
                     Mxfp4HummingMoEMethod,
@@ -3077,6 +3084,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         if get_moe_runner_backend().is_cutlass():
             from sglang.srt.layers.moe.cutlass_moe import cutlass_fused_experts_fp8
+
+            # FP4-expert configs skip these buffers during weight creation;
+            # mixed checkpoints can still route an FP8 layer to CUTLASS.
+            self._ensure_cutlass_buffers_initialized(layer)
 
             with use_symmetric_memory(
                 get_parallel().tp_group, disabled=not is_allocation_symmetric()
