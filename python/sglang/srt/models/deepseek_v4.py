@@ -5434,9 +5434,9 @@ class DeepseekV4ForCausalLM(nn.Module):
         )
 
     @torch.no_grad()
-    def _prewarm_cutlass_deepep_lm_head(self) -> None:
+    def _prewarm_cutlass_deepep_output(self) -> None:
         if (
-            getattr(self, "_cutlass_deepep_lm_head_prewarmed", False)
+            getattr(self, "_cutlass_deepep_output_prewarmed", False)
             or not _is_cuda
             or not get_platform().is_sm90
             or not self.pp_group.is_last_rank
@@ -5444,19 +5444,35 @@ class DeepseekV4ForCausalLM(nn.Module):
             or not get_moe_a2a_backend().is_deepep()
         ):
             return
-        # Loading a new cuBLAS kernel can synchronize the CUDA context. Do it
-        # before the backbone queues DeepEP/NCCL work, including small CP-local
-        # batches that use a different GEMM kernel from the largest graph.
+        # Triton module loading and cuBLAS kernel setup can synchronize the CUDA
+        # context. Warm the PP output path before the backbone queues DeepEP/NCCL
+        # work, including small CP-local batches with different specializations.
         graph_config = get_exec().graph.cuda_graph_config.decode
         max_rows = max(graph_config.bs or [graph_config.max_bs or 1])
         hidden_states = self.lm_head.weight.new_zeros(
             (max_rows, self.config.hidden_size)
         )
+        if self.model.hc_pre_from_prev_sublayer:
+            from sglang.kernels.ops.layernorm.mhc import hc_combine
+
+            streams = hidden_states.new_zeros(
+                (max_rows, self.model.hc_mult * self.config.hidden_size),
+                dtype=torch.float32,
+            )
+            pre = hidden_states.new_ones(
+                (max_rows, self.model.hc_mult), dtype=torch.float32
+            )
         for rows in range(1, max_rows + 1):
-            self.logits_processor._compute_lm_head(hidden_states[:rows], self.lm_head)
+            output = hidden_states[:rows]
+            if self.model.hc_pre_from_prev_sublayer:
+                output = hc_combine(
+                    streams[:rows], pre[:rows], self.model.hc_mult, output.dtype
+                )
+            output = self.model.norm(output)
+            self.logits_processor._compute_lm_head(output, self.lm_head)
         torch.cuda.synchronize()
-        self._cutlass_deepep_lm_head_prewarmed = True
-        logger.info("CUTLASS DeepEP LM head prewarm: rows 1..%d", max_rows)
+        self._cutlass_deepep_output_prewarmed = True
+        logger.info("CUTLASS DeepEP output prewarm: rows 1..%d", max_rows)
 
     def forward(
         self,
@@ -5466,7 +5482,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         input_embeds: Optional[torch.Tensor] = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
-        self._prewarm_cutlass_deepep_lm_head()
+        self._prewarm_cutlass_deepep_output()
         input_ids, input_embeds = self.prepare_model_inputs(
             input_ids=input_ids,
             forward_batch=forward_batch,
