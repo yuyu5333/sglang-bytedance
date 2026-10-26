@@ -179,6 +179,22 @@ class FullCudaGraphBackend(BaseCudaGraphBackend):
             self._reuse_output_buffer = self._output_buffer is not None
         del warmup_output
 
+        from sglang.srt.layers.moe import (
+            get_moe_a2a_backend,
+            get_moe_runner_backend,
+        )
+
+        if (
+            self._tp_group.world_size > 1
+            and get_moe_runner_backend().is_cutlass()
+            and get_moe_a2a_backend().is_deepep()
+        ):
+            # Queue every rank's last eager communication before any rank
+            # enters graph capture and synchronizes its CUDA context.
+            self._tp_group.barrier()
+            self._device_module.synchronize()
+            self._tp_group.barrier()
+
         graph = torch.cuda.CUDAGraph()
 
         graph_ctx: Callable[..., AbstractContextManager]

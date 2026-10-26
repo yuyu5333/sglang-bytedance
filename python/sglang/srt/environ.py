@@ -1078,6 +1078,9 @@ class Envs:
     SGLANG_HUMMING_ONLINE_QUANT_CONFIG = EnvJSON(None)
     SGLANG_HUMMING_INPUT_QUANT_CONFIG = EnvJSON(None)
     SGLANG_HUMMING_USE_F16_ACCUM = EnvBool(False)
+    # Fixed reduction order for packed FP8 linears, independent of the
+    # serving-wide deterministic mode and its attention backend restrictions.
+    SGLANG_HUMMING_FP8_BATCH_INVARIANT = EnvBool(False)
     SGLANG_HUMMING_MOE_GEMM_TYPE = EnvStr("")
 
     # ===================================================================
