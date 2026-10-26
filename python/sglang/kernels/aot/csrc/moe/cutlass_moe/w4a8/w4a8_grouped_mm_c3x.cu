@@ -839,9 +839,13 @@ void cutlass_mxfp4a8_gemm1_blockscale_sm90(
            &expert_offsets, &problem_sizes, &a_strides, &b_strides, &d_strides, &s_strides}) {
     TORCH_CHECK(tensor->device() == activation.device(), "All GEMM1 blockscale tensors must share a CUDA device");
   }
-  TORCH_CHECK(config == 100 || config == 101 || config == 320 || config == 322);
-  TORCH_CHECK((config != 320 && config != 322) || activation.size(1) % 512 == 0,
+  TORCH_CHECK(config == 100 || config == 101 || config == 320 || config == 322 ||
+              (config >= 370 && config <= 373));
+  TORCH_CHECK((config != 320 && config != 322 && config != 370 && config != 371) ||
+              activation.size(1) % 512 == 0,
               "K512 GEMM1 configs require K divisible by 512; use config 100/101 for K128 tails");
+  TORCH_CHECK((config != 372 && config != 373) || activation.size(1) % 256 == 0,
+              "K256 GEMM1 configs require K divisible by 256; use config 100/101 for K128 tails");
   if (activation.size(0) == 0) return;
   auto launch = [&](auto tag) {
     using Config = decltype(tag);
@@ -855,6 +859,10 @@ void cutlass_mxfp4a8_gemm1_blockscale_sm90(
     case 101: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<16, true>{}); return;
     case 320: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<32, false, 512, false>{}); return;
     case 322: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<32, false, 512, true>{}); return;
+    case 370: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 512, false>{}); return;
+    case 371: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 512, true>{}); return;
+    case 372: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 256, false>{}); return;
+    case 373: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<128, false, 256, false>{}); return;
     default: TORCH_CHECK(false, "Unsupported MXFP4 GEMM1 blockscale config=", config);
   }
 }

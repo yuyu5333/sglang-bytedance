@@ -65,7 +65,7 @@ def _sm90_deterministic_prefill_tuning(
         "use_tma_bs": False,
         "use_warp_spec": True,
         "use_mbarrier": True,
-        "raster_group_m": 1,
+        "raster_group_m": 9 if (n, k) == (25600, 6144) else 1,
     }
 
 

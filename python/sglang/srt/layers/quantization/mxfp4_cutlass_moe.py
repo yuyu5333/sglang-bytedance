@@ -264,6 +264,7 @@ class Mxfp4CutlassMoEMethod:
         if layer.moe_ep_size > 1:
             from sglang.srt.layers.moe.cutlass_mxfp4a8_ep_moe import (
                 preload_cutlass_mxfp4a8_normal_pack,
+                preload_cutlass_mxfp4a8_normal_swiglu,
             )
 
             preload_cutlass_mxfp4a8_normal_pack(
@@ -272,6 +273,23 @@ class Mxfp4CutlassMoEMethod:
                 num_experts=layer.w13_weight_fused.shape[0],
                 topk=self.moe_runner_config.top_k,
             )
+            if (
+                layer.moe_ep_size == 4
+                and (
+                    layer.w13_weight_fused.shape[0],
+                    self.hidden_size,
+                    layer.w2_weight_fused.shape[-1] * 2,
+                    self.moe_runner_config.top_k,
+                ) == (96, 5120, 2304, 6)
+                and torch.cuda.get_device_capability(layer.w13_weight_fused.device)
+                == (9, 0)
+            ):
+                preload_cutlass_mxfp4a8_normal_swiglu(
+                    device=layer.w13_weight_fused.device,
+                    intermediate_size=layer.w2_weight_fused.shape[-1] * 2,
+                    num_experts=layer.w13_weight_fused.shape[0],
+                    swiglu_limit=self.moe_runner_config.swiglu_limit,
+                )
 
     def apply(
         self,

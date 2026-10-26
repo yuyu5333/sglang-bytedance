@@ -243,6 +243,91 @@ def _swiglu_quant(
 
 
 @triton.jit
+def _normal_swiglu_quant(
+    c1,
+    q,
+    scales,
+    residual,
+    sorted_ids,
+    INTERMEDIATE: tl.constexpr,
+    E: tl.constexpr,
+    HAS_LIMIT: tl.constexpr,
+    LIMIT: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    expert = tl.load(sorted_ids + row)
+    valid = (expert >= 0) & (expert < E)
+    cols = tl.arange(0, BLOCK)
+    gate = tl.load(
+        c1 + row * (2 * INTERMEDIATE) + cols,
+        mask=valid & (cols < INTERMEDIATE),
+        other=0,
+    ).to(tl.float32)
+    up = tl.load(
+        c1 + row * (2 * INTERMEDIATE) + INTERMEDIATE + cols,
+        mask=valid & (cols < INTERMEDIATE),
+        other=0,
+    ).to(tl.float32)
+    if HAS_LIMIT:
+        gate = tl.minimum(gate, LIMIT).to(tl.bfloat16).to(tl.float32)
+        up = tl.clamp(up, -LIMIT, LIMIT).to(tl.bfloat16).to(tl.float32)
+    value = (gate * tl.sigmoid(gate) * up).to(tl.bfloat16).to(tl.float32)
+    s = tl.maximum(tl.max(tl.abs(value)), 1e-10) / 448.0
+    factor = tl.load(residual + expert, mask=valid, other=0)
+    tl.store(
+        q + row * INTERMEDIATE + cols,
+        tl.clamp(value / s, -448, 448),
+        mask=valid & (cols < INTERMEDIATE),
+    )
+    tl.store(scales + row, s * factor, mask=valid)
+
+
+_NORMAL_SWIGLU_PRELOADED = set()
+
+
+def preload_cutlass_mxfp4a8_normal_swiglu(
+    *,
+    device: torch.device,
+    intermediate_size: int,
+    num_experts: int,
+    swiglu_limit: float | None,
+) -> None:
+    device = torch.device(device)
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    key = (device, intermediate_size, num_experts, swiglu_limit)
+    if key in _NORMAL_SWIGLU_PRELOADED:
+        return
+    with torch.cuda.device(device):
+        c1 = torch.empty(
+            (1, 2 * intermediate_size), dtype=torch.bfloat16, device=device
+        )
+        q = torch.empty(
+            (1, intermediate_size), dtype=torch.float8_e4m3fn, device=device
+        )
+        scales = torch.empty(1, dtype=torch.float32, device=device)
+        residual = torch.empty(num_experts, dtype=torch.float32, device=device)
+        # Invalid rows skip all payload reads, including graph padding slots.
+        ids = torch.full((1,), num_experts, dtype=torch.int32, device=device)
+        _normal_swiglu_quant[(1,)](
+            c1,
+            q,
+            scales,
+            residual,
+            ids,
+            intermediate_size,
+            num_experts,
+            swiglu_limit is not None,
+            float(swiglu_limit or 0),
+            triton.next_power_of_2(intermediate_size),
+            num_warps=4,
+        )
+        torch.cuda.synchronize(device)
+    _NORMAL_SWIGLU_PRELOADED.add(key)
+
+
+@triton.jit
 def _normal_reduce(
     c2,
     inverse,
@@ -430,6 +515,8 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 received_tokens = x.shape[0]
                 if received_tokens <= 128:
                     gemm1_config = 100
+                elif received_tokens >= 16384:
+                    gemm1_config, gemm2_config = 370, 361
                 elif received_tokens >= 4096:
                     gemm1_config, gemm2_config = 320, 361
                 elif received_tokens >= 1024:
@@ -450,23 +537,45 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 config=gemm1_config,
             )
             limit = method.moe_runner_config.swiglu_limit
-            _swiglu_quant[(e, workers)](
-                c1,
-                intermediate_q,
-                factors2,
-                layer.w2_weight_residual_fused,
-                counts,
-                method.expert_offsets,
-                intermediate,
-                capacity,
-                e,
-                is_ll,
-                workers,
-                limit is not None,
-                float(limit or 0),
-                triton.next_power_of_2(intermediate),
-                num_warps=4,
-            )
+            if (
+                not is_ll
+                and layer.moe_ep_size == 4
+                and (e, h, intermediate, topk) == (96, 5120, 2304, 6)
+                and torch.cuda.get_device_capability(device) == (9, 0)
+            ):
+                # Packed valid rows are the sorted prefix. A row-parallel launch
+                # avoids long loops on experts with disproportionately many routes.
+                _normal_swiglu_quant[(rows,)](
+                    c1,
+                    intermediate_q,
+                    factors2,
+                    layer.w2_weight_residual_fused,
+                    sorted_ids,
+                    intermediate,
+                    e,
+                    limit is not None,
+                    float(limit or 0),
+                    triton.next_power_of_2(intermediate),
+                    num_warps=4,
+                )
+            else:
+                _swiglu_quant[(e, workers)](
+                    c1,
+                    intermediate_q,
+                    factors2,
+                    layer.w2_weight_residual_fused,
+                    counts,
+                    method.expert_offsets,
+                    intermediate,
+                    capacity,
+                    e,
+                    is_ll,
+                    workers,
+                    limit is not None,
+                    float(limit or 0),
+                    triton.next_power_of_2(intermediate),
+                    num_warps=4,
+                )
             # The K128 fallback also supports independently padded TP shards.
             torch.ops.sgl_kernel.cutlass_mxfp4a8_fused_moe_mm.default(
                 c2,
