@@ -261,6 +261,17 @@ class Mxfp4CutlassMoEMethod:
             layer.dispatcher.set_quant_config(
                 {"dispatcher_output_dtype": "fp8", "cutlass_mxfp4": True}
             )
+        if layer.moe_ep_size > 1:
+            from sglang.srt.layers.moe.cutlass_mxfp4a8_ep_moe import (
+                preload_cutlass_mxfp4a8_normal_pack,
+            )
+
+            preload_cutlass_mxfp4a8_normal_pack(
+                device=layer.w13_weight_fused.device,
+                hidden_size=self.hidden_size,
+                num_experts=layer.w13_weight_fused.shape[0],
+                topk=self.moe_runner_config.top_k,
+            )
 
     def apply(
         self,

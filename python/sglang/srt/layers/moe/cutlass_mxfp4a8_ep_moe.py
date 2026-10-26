@@ -20,7 +20,7 @@ from sglang.srt.layers.moe.token_dispatcher.deepep import (
 )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["scale_row_stride", "scale_group_stride"])
 def _pack_normal(
     x,
     scales,
@@ -40,7 +40,6 @@ def _pack_normal(
     GP_BLOCK: tl.constexpr,
     TOPK: tl.constexpr,
     E: tl.constexpr,
-    ROWS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -63,6 +62,59 @@ def _pack_normal(
             tl.store(packed_s + row * GP + groups, values_s, mask=groups < GP)
             expert = tl.load(sorted_ids + row)
             tl.store(factors + row, tl.load(residual + expert))
+
+
+_PACK_NORMAL_PRELOADED = set()
+
+
+def preload_cutlass_mxfp4a8_normal_pack(
+    *, device: torch.device, hidden_size: int, num_experts: int, topk: int
+) -> None:
+    """Load the normal pack cubin before KV pools consume device memory."""
+    device = torch.device(device)
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    key = (device, hidden_size, num_experts, topk)
+    if key in _PACK_NORMAL_PRELOADED:
+        return
+
+    groups = hidden_size // 128
+    padded_groups = triton.cdiv(groups, 4) * 4
+    with torch.cuda.device(device):
+        x = torch.empty((1, hidden_size), dtype=torch.float8_e4m3fn, device=device)
+        scales = torch.empty((1, groups), dtype=torch.float32, device=device)
+        packed_s = torch.empty((1, padded_groups), dtype=torch.float32, device=device)
+        order = torch.zeros(1, dtype=torch.int64, device=device)
+        sorted_ids = torch.zeros(1, dtype=torch.int32, device=device)
+        offsets = torch.zeros(num_experts + 1, dtype=torch.int32, device=device)
+        residual = torch.empty(1, dtype=torch.float32, device=device)
+        factors = torch.empty(1, dtype=torch.float32, device=device)
+        inverse = torch.empty(1, dtype=torch.int32, device=device)
+        # Zero valid routes skip all payload reads. Launch (rather than compile
+        # only) to initialize CUDA module handles using the serving signature.
+        # Batch size belongs only in the launch grid, never in the cache key.
+        _pack_normal[(1, triton.cdiv(hidden_size, 512))](
+            x,
+            scales,
+            order,
+            sorted_ids,
+            offsets,
+            residual,
+            x,
+            packed_s,
+            factors,
+            inverse,
+            *scales.stride(),
+            hidden_size,
+            groups,
+            padded_groups,
+            triton.next_power_of_2(padded_groups),
+            topk,
+            num_experts,
+            512,
+        )
+        torch.cuda.synchronize(device)
+    _PACK_NORMAL_PRELOADED.add(key)
 
 
 @triton.jit
@@ -342,7 +394,6 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                     triton.next_power_of_2(padded_groups),
                     topk,
                     e,
-                    rows,
                     512,
                 )
 
