@@ -111,7 +111,11 @@ from sglang.srt.layers.layer_boundary.ops import attn_cp_interleave_reduce_scatt
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
-from sglang.srt.layers.moe import get_moe_a2a_backend, should_use_dp_reduce_scatterv
+from sglang.srt.layers.moe import (
+    get_moe_a2a_backend,
+    get_moe_runner_backend,
+    should_use_dp_reduce_scatterv,
+)
 from sglang.srt.layers.moe.dsv41_token_parallel import (
     DSV41TokenParallel,
     can_use_dsv41_token_parallel,
@@ -5101,12 +5105,26 @@ class DeepseekV4ForCausalLM(nn.Module):
                 and get_parallel().moe_ep_size == self.tp_size
                 and self.tp_size <= 8
             )
+            # The replicated ViT runs before token CP/DeepEP dispatch. Its
+            # owner group is confined to PP0 and independent of MoE A2A.
+            sm90_cutlass_deepep = (
+                _is_cuda
+                and moe_a2a_backend.is_deepep()
+                and get_moe_runner_backend().is_cutlass()
+                and get_platform().is_sm90
+                and get_parallel().moe_ep_size == self.tp_size
+                and self.tp_size <= 8
+                and get_parallel().attn_dp_size == 1
+                and get_parallel().attn_cp_size in (1, self.tp_size)
+            )
             if not moe_a2a_backend.is_none() and not (
-                self.pp_group.world_size == 1 and sm90_mega_moe
+                sm90_cutlass_deepep or (self.pp_group.world_size == 1 and sm90_mega_moe)
             ):
                 raise ValueError(
                     "V4.1 vision with PP supports MoE A2A=none; PP=1 also "
-                    "supports SM90 MegaMoE with TP=EP<=8 and attention CP=DP=1"
+                    "supports SM90 MegaMoE with TP=EP<=8 and attention CP=DP=1. "
+                    "SM90 CUTLASS with DeepEP supports TP=EP<=8, attention DP=1 "
+                    "and CP in {1, TP}, including pipeline parallelism."
                 )
 
             args = SimpleNamespace(**vars(config), dim=config.hidden_size)
@@ -5415,6 +5433,31 @@ class DeepseekV4ForCausalLM(nn.Module):
             0 if is_shared_experts_fusion_disabled() else self.config.n_shared_experts
         )
 
+    @torch.no_grad()
+    def _prewarm_cutlass_deepep_lm_head(self) -> None:
+        if (
+            getattr(self, "_cutlass_deepep_lm_head_prewarmed", False)
+            or not _is_cuda
+            or not get_platform().is_sm90
+            or not self.pp_group.is_last_rank
+            or not get_moe_runner_backend().is_cutlass()
+            or not get_moe_a2a_backend().is_deepep()
+        ):
+            return
+        # Loading a new cuBLAS kernel can synchronize the CUDA context. Do it
+        # before the backbone queues DeepEP/NCCL work, including small CP-local
+        # batches that use a different GEMM kernel from the largest graph.
+        graph_config = get_exec().graph.cuda_graph_config.decode
+        max_rows = max(graph_config.bs or [graph_config.max_bs or 1])
+        hidden_states = self.lm_head.weight.new_zeros(
+            (max_rows, self.config.hidden_size)
+        )
+        for rows in range(1, max_rows + 1):
+            self.logits_processor._compute_lm_head(hidden_states[:rows], self.lm_head)
+        torch.cuda.synchronize()
+        self._cutlass_deepep_lm_head_prewarmed = True
+        logger.info("CUTLASS DeepEP LM head prewarm: rows 1..%d", max_rows)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -5423,6 +5466,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         input_embeds: Optional[torch.Tensor] = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
+        self._prewarm_cutlass_deepep_lm_head()
         input_ids, input_embeds = self.prepare_model_inputs(
             input_ids=input_ids,
             forward_batch=forward_batch,
@@ -5810,7 +5854,9 @@ class DeepseekV4ForCausalLM(nn.Module):
                         ("vision.", "aligner.", "image_")
                     ):
                         skip_group = "vision"
-                    elif self.vision is None and name.endswith(
+                    # Later PP stages still route image tokens, even though
+                    # only PP0 owns the encoder.
+                    elif not self.dsv41_multimodal_enabled and name.endswith(
                         ".gate.e_score_correction_bias_vl"
                     ):
                         skip_group = "gate.bias_vl"
