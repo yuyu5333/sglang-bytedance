@@ -6,6 +6,7 @@ checkpoint layout. Owners still retain their original parameters for loading
 and direct readers; releasing those parameters is deliberately out of scope.
 """
 
+from functools import lru_cache
 from typing import Any, NamedTuple
 
 import torch
@@ -30,6 +31,42 @@ def _requires_deterministic_gemm() -> bool:
         or is_batch_invariant_mode_enabled()
         or get_exec().deterministic.enable_deterministic_inference
     )
+
+
+@lru_cache(maxsize=64)
+def _sm90_deterministic_prefill_tuning(
+    n: int, k: int, device_index: int
+) -> dict | None:
+    """Reuse a validated tile without specializing on dynamic batch rows."""
+    if (n, k) not in {
+        (5120, 8192),
+        (32768, 1280),
+        (4608, 5120),
+        (5120, 2304),
+        (1792, 5120),
+        (25600, 6144),
+    }:
+        return None
+    properties = torch.cuda.get_device_properties(device_index)
+    if (properties.major, properties.minor) != (9, 0):
+        return None
+    if "H20" not in properties.name or "H200" in properties.name:
+        return None
+    return {
+        "block_shape": (64, 256, 128),
+        "warp_shape": (64, 32, 128),
+        "use_stream_k": False,
+        "use_f16_accum": False,
+        "num_sms": properties.multi_processor_count,
+        "num_stages": 3,
+        "num_ctas_per_sm": 1,
+        "use_tma": True,
+        "use_tma_as": False,
+        "use_tma_bs": False,
+        "use_warp_spec": True,
+        "use_mbarrier": True,
+        "raster_group_m": 1,
+    }
 
 
 @torch.no_grad()
@@ -224,6 +261,14 @@ def humming_w8a8_block_fp8_linear(
             q_padded[:, :k] = q_input
             s_padded[:, : k // 32] = input_scale
             q_input, input_scale = q_padded, s_padded
+    deterministic = _requires_deterministic_gemm()
+    tuning = None
+    if (
+        envs.SGLANG_HUMMING_FP8_SM90_PREFILL_TACTICS.get()
+        and deterministic
+        and input_2d.shape[0] >= 512
+    ):
+        tuning = _sm90_deterministic_prefill_tuning(n, padded_k, q_input.device.index)
     output = humming_forward(
         weight.config,
         inputs=q_input,
@@ -231,7 +276,8 @@ def humming_w8a8_block_fp8_linear(
         weight=weight.weight,
         weight_scale=weight.weight_scale,
         locks=weight.locks,
-        compute_config={"use_batch_invariant": _requires_deterministic_gemm()},
+        compute_config={"use_batch_invariant": deterministic},
+        tuning_config=tuning,
     )
     if bias is not None:
         # Match the block-linear contract even if bias is stored in FP32.

@@ -1081,6 +1081,8 @@ class Envs:
     # Fixed reduction order for packed FP8 linears, independent of the
     # serving-wide deterministic mode and its attention backend restrictions.
     SGLANG_HUMMING_FP8_BATCH_INVARIANT = EnvBool(False)
+    # Validated deterministic group32 dense tiles for DSV4 prefill on H20.
+    SGLANG_HUMMING_FP8_SM90_PREFILL_TACTICS = EnvBool(False)
     SGLANG_HUMMING_MOE_GEMM_TYPE = EnvStr("")
 
     # ===================================================================
