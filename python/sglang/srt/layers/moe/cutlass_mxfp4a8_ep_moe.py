@@ -37,6 +37,7 @@ def _pack_normal(
     H: tl.constexpr,
     G: tl.constexpr,
     GP: tl.constexpr,
+    GP_BLOCK: tl.constexpr,
     TOPK: tl.constexpr,
     E: tl.constexpr,
     ROWS: tl.constexpr,
@@ -53,7 +54,7 @@ def _pack_normal(
         values = tl.load(x + token * H + cols, mask=cols < H, other=0.0)
         tl.store(packed_x + row * H + cols, values, mask=cols < H)
         if tile == 0:
-            groups = tl.arange(0, triton.next_power_of_2(GP))
+            groups = tl.arange(0, GP_BLOCK)
             values_s = tl.load(
                 scales + token * scale_row_stride + groups * scale_group_stride,
                 mask=groups < G,
@@ -102,6 +103,7 @@ def _pack_ll(
     H: tl.constexpr,
     G: tl.constexpr,
     GP: tl.constexpr,
+    GP_BLOCK: tl.constexpr,
     CAP: tl.constexpr,
     WORKERS: tl.constexpr,
     IS_FP8: tl.constexpr,
@@ -110,7 +112,7 @@ def _pack_ll(
 ):
     expert = tl.program_id(0)
     worker = tl.program_id(1)
-    groups = tl.arange(0, triton.next_power_of_2(GP))
+    groups = tl.arange(0, GP_BLOCK)
     factor = tl.load(residual + expert)
     for row in tl.range(worker, tl.load(counts + expert), WORKERS):
         dst = expert.to(tl.int64) * CAP + row
@@ -274,6 +276,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 h,
                 groups,
                 padded_groups,
+                triton.next_power_of_2(padded_groups),
                 capacity,
                 workers,
                 x.dtype == torch.float8_e4m3fn,
@@ -336,6 +339,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                     h,
                     groups,
                     padded_groups,
+                    triton.next_power_of_2(padded_groups),
                     topk,
                     e,
                     rows,
