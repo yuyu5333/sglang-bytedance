@@ -5983,6 +5983,22 @@ def run_scheduler_process(
     try:
         scheduler = Scheduler(server_args, port_args)
 
+        from sglang.srt.layers.moe import (
+            get_moe_a2a_backend,
+            get_moe_runner_backend,
+        )
+
+        if (
+            scheduler.pp_group.world_size > 1
+            and get_moe_runner_backend().is_cutlass()
+            and get_moe_a2a_backend().is_deepep()
+        ):
+            # An early PP stage can queue NCCL receives while a later stage is
+            # still capturing graphs. Graph entry synchronizes the CUDA context,
+            # so those receives must wait until every PP stage finishes startup.
+            barrier(group=scheduler.pp_group.cpu_group)
+            logger.info("CUTLASS DeepEP PP startup synchronized")
+
         # Send initialization info back to the parent process
         pipe_writer.send(scheduler.get_init_info())
 
