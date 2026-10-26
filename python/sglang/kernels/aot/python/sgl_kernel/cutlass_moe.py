@@ -3,6 +3,45 @@ from typing import Optional
 import torch
 
 
+def cutlass_mxfp4a8_gemm1_blockscale(
+    output,
+    activation,
+    weight,
+    row_factors,
+    weight_offset,
+    expert_offsets,
+    problem_sizes,
+    a_strides,
+    b_strides,
+    d_strides,
+    s_strides,
+    activation_scales,
+    config=101,
+):
+    """Fused-layout MXFP4 weights x dispatched FP8 with FP32 group128 scales.
+
+    activation_scales is expert-major [R, padded_K_groups], contiguous, with
+    padded_K_groups divisible by four (16B). Payload bytes are passed unchanged.
+    row_factors is [R], normally the local expert's weight residual * 64.
+    Raw UE8M0 dispatch scales must first be decoded to FP32.
+    """
+    torch.ops.sgl_kernel.cutlass_mxfp4a8_gemm1_blockscale.default(
+        output,
+        activation,
+        weight,
+        row_factors,
+        weight_offset,
+        expert_offsets,
+        problem_sizes,
+        a_strides,
+        b_strides,
+        d_strides,
+        s_strides,
+        activation_scales,
+        config,
+    )
+
+
 def get_cutlass_w4a8_moe_mm_data(
     topk_ids: torch.Tensor,
     expert_offsets: torch.Tensor,

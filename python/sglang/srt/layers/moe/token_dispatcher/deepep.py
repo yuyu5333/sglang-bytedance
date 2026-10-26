@@ -560,7 +560,15 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
     ):
         topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
         topk_ids = topk_ids.to(torch.int64)
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and self.use_fp8:
+        if self.use_fp8 and self.quant_config.get("cutlass_mxfp4", False):
+            hidden_states = sglang_per_token_group_quant_fp8(
+                hidden_states,
+                128,
+                column_major_scales=False,
+                scale_tma_aligned=False,
+                scale_ue8m0=False,
+            )
+        elif deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and self.use_fp8:
             # TODO hard code 128 block quant,use fp8 communication
             hidden_states = sglang_per_token_group_quant_fp8(
                 hidden_states,
@@ -674,7 +682,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             previous_event=previous_event,
             async_finish=self.async_finish,
             allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+            expert_alignment=(
+                128
+                if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and not self.quant_config.get("cutlass_mxfp4", False)
+                else 1
+            ),
             config=DeepEPConfig.get_instance().normal_dispatch_config,
             **npu_quantization_opts,
         )
@@ -699,8 +712,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM or _use_aiter or _is_npu:
+        if (
+            deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            or _use_aiter
+            or _is_npu
+            or self.quant_config.get("cutlass_mxfp4", False)
+        ):
             output = hidden_states
         else:
             raise NotImplementedError()  # triton runner was supported but it's temporarily disabled
@@ -826,9 +843,11 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         fp8_deepgemm_scale_opts = (
             dict(
                 round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL
+                and not self.quant_config.get("cutlass_mxfp4", False),
                 use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL
+                and not self.quant_config.get("cutlass_mxfp4", False),
             )
             if self.use_fp8
             else dict()

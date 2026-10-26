@@ -85,6 +85,7 @@ struct SwgPrecomputedWorkMap {
   torch::Tensor storage;
   torch::Tensor prebuilt_tma_desc_a;
   torch::Tensor prebuilt_tma_desc_b;
+  torch::Tensor prebuilt_tma_desc_activation_scale;
   uint32_t worker_count = 0;
   uint32_t grid_x = 0;
   uint32_t grid_y = 0;
@@ -182,6 +183,29 @@ __device__ __forceinline__ void swg_build_prebuilt_tma_descriptors(
     cute::tma_descriptor_replace_dims_strides_in_shared_mem(smem_desc, shape_b, stride_b);
   }
   swg_publish_prebuilt_tma_descriptor(prebuilt_tma_desc_b + group, smem_desc, 1);
+  if constexpr (MainloopParams::HasActivationBlockScale) {
+    cute::TmaDescriptor& smem_as = smem_descs[2];
+    if (threadIdx.x == 64) {
+      constexpr int Rank = 5;
+      cute::array<uint32_t, Rank> shape_as = {1, 1, 1, 1, 1};
+      cute::array<uint64_t, Rank> stride_as = {0, 0, 0, 0, 0};
+      auto ds = mainloop_params.dActivationScale[group];
+      uint32_t const n = uint32_t(cute::get<1>(problem));
+      uint32_t const groups_k = uint32_t(cute::get<2>(problem)) / MainloopParams::ActivationGroupSize;
+      uint32_t const padded_groups =
+          (groups_k + MainloopParams::ActivationScaleWindow - 1) /
+          MainloopParams::ActivationScaleWindow * MainloopParams::ActivationScaleWindow;
+      auto tensor_as = cute::make_tensor(
+          static_cast<float const*>(nullptr), cute::make_layout(cute::make_shape(n, padded_groups, uint32_t(1)), ds));
+      smem_as = *mainloop_params.tma_load_activation_scale.get_tma_descriptor();
+      cute::tma_descriptor_replace_addr_in_shared_mem(smem_as, mainloop_params.ptr_ActivationScale[group]);
+      cute::detail::fill_tma_gmem_shape_stride(
+          mainloop_params.tma_load_activation_scale, tensor_as, shape_as, stride_as);
+      for (auto& stride : stride_as) stride *= sizeof(float);
+      cute::tma_descriptor_replace_dims_strides_in_shared_mem(smem_as, shape_as, stride_as);
+    }
+    swg_publish_prebuilt_tma_descriptor(mainloop_params.ptr_ActivationScale_prebuilt_tma_descs + group, smem_as, 2);
+  }
 }
 
 __device__ __forceinline__ uint64_t swg_make_work_tile(
@@ -280,7 +304,9 @@ __global__ void build_swg_precomputed_work_map_kernel(
 
   extern __shared__ __align__(64) unsigned char shared_storage[];
   auto* smem_descs = reinterpret_cast<cute::TmaDescriptor*>(shared_storage);
-  auto* prefix_partials = reinterpret_cast<unsigned long long*>(shared_storage + kSwgPrebuiltTmaDescriptorScratchBytes);
+  constexpr size_t descriptor_scratch =
+      kSwgPrebuiltTmaDescriptorScratchBytes + (MainloopParams::HasActivationBlockScale ? sizeof(cute::TmaDescriptor) : 0);
+  auto* prefix_partials = reinterpret_cast<unsigned long long*>(shared_storage + descriptor_scratch);
   auto* total_partials = prefix_partials + blockDim.x;
   auto* group_info_storage = total_partials + blockDim.x;
 
@@ -420,6 +446,10 @@ SwgPrecomputedWorkMap build_swg_precomputed_work_map(
   result.prebuilt_tma_desc_a =
       torch::empty(int64_t((weight_desc_per_group && groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
   result.prebuilt_tma_desc_b = torch::empty(int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
+  if constexpr (Gemm::HasActivationBlockScale) {
+    result.prebuilt_tma_desc_activation_scale =
+        torch::empty(int64_t((groups > 0 ? groups : 1) * sizeof(cute::TmaDescriptor)), options);
+  }
   result.worker_count = static_cast<uint32_t>(worker_count_u64);
   result.grid_x = grid_shape.x;
   result.grid_y = grid_shape.y;
@@ -450,7 +480,8 @@ void launch_swg_precomputed_work_map(
   constexpr int TileM = Gemm::SingleWarpgroupTileM;
   constexpr int TileN = Gemm::SingleWarpgroupTileN;
   size_t const scheduler_smem =
-      kSwgPrebuiltTmaDescriptorScratchBytes + size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
+      kSwgPrebuiltTmaDescriptorScratchBytes + (Gemm::HasActivationBlockScale ? sizeof(cute::TmaDescriptor) : 0) +
+      size_t(kSwgWorkMapBuilderThreads * 2 + 3) * sizeof(unsigned long long);
   dim3 const scheduler_grid(groups > 0 ? groups : 1);
   build_swg_precomputed_work_map_kernel<TileM, TileN, Gemm::UseChunkMajorWorkMap, Gemm::ExpertRows>
       <<<scheduler_grid, kSwgWorkMapBuilderThreads, scheduler_smem, stream>>>(

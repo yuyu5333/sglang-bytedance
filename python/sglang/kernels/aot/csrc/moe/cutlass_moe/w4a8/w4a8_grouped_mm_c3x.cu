@@ -4,6 +4,7 @@
 #include <torch/all.h>
 
 #include <cstdlib>
+#include <initializer_list>
 #include <string_view>
 #include <type_traits>
 
@@ -144,6 +145,15 @@ struct SM90_PRECOMPUTED_MXFP4_K256_PACKED_GEMM2 {
       false,
       true,
       false>;
+};
+
+template <int N, bool SingleWarpgroup, int TileK = 128, bool ChunkMajor = true>
+struct SM90_MXFP4_GEMM1_BLOCKSCALE {
+  using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
+      Shape<_128, Int<N>, Int<TileK>>, Shape<_1, _1, _1>,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
+      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
+      cutlass::float_e2m1_t, 32, SingleWarpgroup, true, ChunkMajor, 0, false, true>;
 };
 
 template <typename Config>
@@ -783,4 +793,49 @@ void cutlass_mxfp4a8_fused_moe_mm_sm90(
       topk,
       swg_config,
       expert_ids);
+}
+
+void cutlass_mxfp4a8_gemm1_blockscale_sm90(
+    torch::Tensor& output, torch::Tensor const& activation,
+    torch::Tensor const& weight, torch::Tensor const& row_factors,
+    torch::Tensor const& weight_offset, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides, torch::Tensor const& activation_scales,
+    int64_t config) {
+  TORCH_CHECK(activation.is_cuda(), "GEMM1 blockscale requires CUDA tensors");
+  const c10::cuda::CUDAGuard device_guard(activation.device());
+  TORCH_CHECK(activation.dim() == 2 && activation.is_contiguous() &&
+              activation.scalar_type() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(activation.size(1) > 0 && activation.size(1) % 128 == 0);
+  TORCH_CHECK(weight.scalar_type() == torch::kInt8 && weight.dim() == 3 && weight.is_contiguous());
+  TORCH_CHECK(weight.size(2) * 2 == activation.size(1) && weight.size(1) % 128 == 0);
+  TORCH_CHECK(weight_offset.scalar_type() == torch::kUInt8 && weight_offset.is_contiguous());
+  TORCH_CHECK(output.scalar_type() == torch::kBFloat16 && output.dim() == 2 && output.is_contiguous() &&
+              output.size(0) == activation.size(0) && output.size(1) == weight.size(1));
+  TORCH_CHECK(row_factors.scalar_type() == torch::kFloat32 && row_factors.dim() == 1 &&
+              row_factors.is_contiguous() && row_factors.numel() == activation.size(0));
+  for (auto const* tensor : std::initializer_list<torch::Tensor const*>{
+           &output, &weight, &weight_offset, &row_factors, &activation_scales,
+           &expert_offsets, &problem_sizes, &a_strides, &b_strides, &d_strides, &s_strides}) {
+    TORCH_CHECK(tensor->device() == activation.device(), "All GEMM1 blockscale tensors must share a CUDA device");
+  }
+  TORCH_CHECK(config == 100 || config == 101 || config == 320 || config == 322);
+  TORCH_CHECK((config != 320 && config != 322) || activation.size(1) % 512 == 0,
+              "K512 GEMM1 configs require K divisible by 512; use config 100/101 for K128 tails");
+  if (activation.size(0) == 0) return;
+  auto launch = [&](auto tag) {
+    using Config = decltype(tag);
+    invoke_gemm<Config>(output, activation, weight, row_factors, weight_offset,
+                        expert_offsets, problem_sizes, a_strides, b_strides,
+                        d_strides, s_strides, 32, activation_scales,
+                        std::nullopt, 128);
+  };
+  switch (config) {
+    case 100: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<8, true>{}); return;
+    case 101: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<16, true>{}); return;
+    case 320: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<32, false, 512, false>{}); return;
+    case 322: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<32, false, 512, true>{}); return;
+    default: TORCH_CHECK(false, "Unsupported MXFP4 GEMM1 blockscale config=", config);
+  }
 }

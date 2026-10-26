@@ -59,6 +59,7 @@ template <
     class ElementB,
     class ElementScale,
     class ElementZero,
+    class ElementActivationScale,
     class TileShapeMNK,
     int Alignment = 128,
     int CarveoutBytes>
@@ -77,12 +78,22 @@ constexpr int compute_stage_count_or_override_folded_weight_scale(StageCountAuto
   constexpr auto scale_bytes =
       cutlass::bits_to_bytes(s_bits * size<0>(TileShapeMNK{}) * size<2>(TileShapeMNK{}) / scale_group_size);
   constexpr auto zero_bytes = cutlass::bits_to_bytes(z_bits * size<0>(TileShapeMNK{}));
+  constexpr int activation_scale_bytes = [] {
+    if constexpr (cute::is_void_v<ElementActivationScale>) {
+      return 0;
+    } else {
+      static_assert(cute::is_same_v<ElementActivationScale, float>);
+      constexpr int groups = size<2>(TileShapeMNK{}) / 128;
+      constexpr int window = groups < 4 ? 4 : groups;
+      return int(size<1>(TileShapeMNK{})) * window * int(sizeof(float));
+    }
+  }();
   static_assert(scale_bytes % 16 == 0, "Folded weight-scale bulk copy must be at least 16B aligned.");
   static_assert(zero_bytes % 128 == 0, "Zero bytes must be a multiple of 128");
 
   constexpr int stage_bytes_ = cutlass::bits_to_bytes(a_bits * size<0>(TileShapeMNK{}) * size<2>(TileShapeMNK{})) +
                                cutlass::bits_to_bytes(b_bits * size<1>(TileShapeMNK{}) * size<2>(TileShapeMNK{})) +
-                               scale_bytes + zero_bytes;
+                               scale_bytes + zero_bytes + activation_scale_bytes;
   constexpr int stage_bytes = cutlass::round_up(stage_bytes_, Alignment) + static_cast<int>(mainloop_pipeline_bytes);
   constexpr int carveout_bytes = cutlass::round_up(CarveoutBytes, Alignment);
   constexpr int capacity_bytes = CapacityBytes / Alignment * Alignment;
@@ -150,9 +161,16 @@ struct CollectiveBuilderMixedInput<
  public:
   using ElementA = detail::deduce_mixed_width_dtype_t<0, ElementA_>;
   using ElementB = detail::deduce_mixed_width_dtype_t<0, ElementB_>;
+  static constexpr bool HasFusedActivationBlockScale =
+      ScaleMode == MixedInputScaleMode::kPreMmaE8M0 &&
+      cute::is_same_v<ElementA, cutlass::float_e2m1_t> &&
+      cute::is_same_v<ElementB, cutlass::float_e4m3_t> &&
+      cute::is_same_v<ScaleA, cutlass::float_ue8m0_t> &&
+      cute::is_same_v<ScaleB, float> && cute::is_void_v<ZeroA> && cute::is_void_v<ZeroB>;
 
   static_assert(
-      !IsMixedInput || (cute::is_tuple<ElementA_>::value ^ cute::is_tuple<ElementB_>::value ||
+      !IsMixedInput || HasFusedActivationBlockScale ||
+          (cute::is_tuple<ElementA_>::value ^ cute::is_tuple<ElementB_>::value ||
                         (NeitherIsTuple && (sizeof_bits<ElementA>::value != sizeof_bits<ElementB>::value))),
       "Either A OR B must be a tuple or the widths of A and B must be different.");
 
@@ -276,6 +294,7 @@ struct CollectiveBuilderMixedInput<
               RealElementB,
               ElementScale,
               ElementZero,
+              cute::conditional_t<HasFusedActivationBlockScale, ScaleB, void>,
               TileShape_MNK,
               SmemAlignment>(StageCountType{});
         } else {

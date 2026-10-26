@@ -468,6 +468,15 @@ void cutlass_mxfp4a8_fused_moe_mm(
     int64_t swg_config,
     std::optional<torch::Tensor> expert_ids);
 
+void cutlass_mxfp4a8_gemm1_blockscale_sm90(
+    torch::Tensor& output, torch::Tensor const& activation,
+    torch::Tensor const& weight, torch::Tensor const& row_factors,
+    torch::Tensor const& weight_offset, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& d_strides,
+    torch::Tensor const& s_strides, torch::Tensor const& activation_scales,
+    int64_t config);
+
 void cutlass_mxfp4a8_fused_moe_core(
     torch::Tensor& c1,
     torch::Tensor& c2,

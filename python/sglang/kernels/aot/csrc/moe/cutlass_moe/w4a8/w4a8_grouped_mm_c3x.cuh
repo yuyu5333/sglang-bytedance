@@ -49,6 +49,18 @@ using namespace cute;
 
 namespace sgl_kernel::w4a8_detail {
 
+using FusedActivationScaleStride = cute::Stride<int64_t, cute::Int<1>, int64_t>;
+
+static __global__ void make_fused_activation_scale_metadata(
+    int32_t const* offsets, float const* scales, int64_t row_stride,
+    uint64_t* pointers, FusedActivationScaleStride* output_strides, int groups) {
+  int const e = blockIdx.x * blockDim.x + threadIdx.x;
+  if (e < groups) {
+    pointers[e] = reinterpret_cast<uint64_t>(scales + int64_t(offsets[e]) * row_stride);
+    output_strides[e] = cute::make_stride(row_stride, cute::Int<1>{}, int64_t(0));
+  }
+}
+
 // Internal selector tag for config333's register-to-global GEMM2 epilogue.
 // The selected collective itself advertises CUTLASS's no-SMEM policy.
 struct WarpShuffleGemm2Epilogue {};
@@ -238,7 +250,8 @@ template <
     bool UsePreMmaE8M0 = false,
     bool ChunkMajorWorkMap = true,
     int ExpertRowPolicyValue = 0,
-    bool FuseSwiGLUQuant = false>
+    bool FuseSwiGLUQuant = false,
+    bool EnableActivationBlockScale = false>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
@@ -249,6 +262,8 @@ struct cutlass_3x_w4a8_group_gemm {
       std::is_same_v<EpilogueSchedule, WarpShufflePackedStoreMaxRegsGemm2Epilogue>;
   static constexpr auto ExpertRows = static_cast<sgl_kernel::swg_detail::ExpertRowPolicy>(ExpertRowPolicyValue);
   static constexpr bool FuseSwiGLUQuantEpilogue = FuseSwiGLUQuant;
+  static constexpr bool HasActivationBlockScale = EnableActivationBlockScale;
+  static_assert(!HasActivationBlockScale || UsePreMmaE8M0Scale);
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScale = std::conditional_t<UsePreMmaE8M0Scale, cutlass::float_ue8m0_t, DefaultElementScale>;
@@ -292,7 +307,7 @@ struct cutlass_3x_w4a8_group_gemm {
       cute::tuple<QuantTypeB, ElementScalePacked>,
       LayoutB_Transpose*,
       AlignmentQuantB,
-      MmaType,
+      std::conditional_t<HasActivationBlockScale, cute::tuple<MmaType, float>, MmaType>,
       LayoutA_Transpose*,
       AlignmentA,
       ElementAccumulator,
@@ -412,7 +427,10 @@ void cutlass_w4a8_group_gemm_caller(
   using Args = typename Gemm::GemmScaleOnly::Arguments;
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
-  bool per_act_token = a_scales.numel() != 1;
+  // A single fused row still carries its quantization/expert residual scale.
+  // The legacy INT4 scalar protocol continues to use the scalar epilogue.
+  bool per_act_token = Gemm::HasActivationBlockScale || a_scales.numel() != 1 ||
+                       (Gemm::UsePreMmaE8M0Scale && a_tensors.size(0) == 1);
   bool per_out_ch = b_scales.numel() != b_tensors.size(0);
 
   // Check inputs
@@ -469,9 +487,31 @@ void cutlass_w4a8_group_gemm_caller(
   // MXFP4A8: per-expert activation block-scale pointer array (only used when
   // act_block_scales is provided; int4a8 leaves this empty).
   torch::Tensor as_scales_ptrs;
+  torch::Tensor prescale_as_ptrs, prescale_as_strides;
   bool use_act_block_scale = !Gemm::UsePreMmaE8M0Scale && act_block_scales.has_value() && as_strides.has_value();
   if (use_act_block_scale) {
     as_scales_ptrs = torch::empty(num_experts, options_int);
+  }
+  if constexpr (Gemm::HasActivationBlockScale) {
+    TORCH_CHECK(act_block_scales.has_value() && act_scale_group == 128);
+    auto const& scale = *act_block_scales;
+    TORCH_CHECK(scale.scalar_type() == torch::kFloat32 && scale.dim() == 2 && scale.is_contiguous());
+    TORCH_CHECK(scale.device() == a_tensors.device() && scale.size(0) == a_tensors.size(0));
+    int64_t const logical_groups = a_tensors.size(1) / 128;
+    TORCH_CHECK(a_tensors.size(1) % 128 == 0 && scale.size(1) >= logical_groups && scale.size(1) % 4 == 0);
+    // Scale rows are padded to 16B. FP8 payload bytes are unchanged.
+    prescale_as_ptrs = torch::empty(num_experts, options_int);
+    using ActivationStride = typename Gemm::CollectiveMainloopScaleOnly::StrideActivationScale;
+    static_assert(std::is_same_v<ActivationStride, FusedActivationScaleStride>);
+    // CuTe's static unit stride has no storage; allocate and write actual
+    // stride objects rather than interpreting a dense INT64 [E,3] array.
+    prescale_as_strides =
+        torch::empty(int64_t(num_experts) * sizeof(ActivationStride), options_int.dtype(torch::kUInt8));
+    make_fused_activation_scale_metadata<<<(num_experts + 127) / 128, 128, 0, stream>>>(
+        expert_offsets.data_ptr<int32_t>(), scale.data_ptr<float>(),
+        scale.size(1), reinterpret_cast<uint64_t*>(prescale_as_ptrs.data_ptr()),
+        reinterpret_cast<ActivationStride*>(prescale_as_strides.data_ptr()), num_experts);
+    TORCH_CHECK(cudaPeekAtLastError() == cudaSuccess);
   }
 
   cutlass::KernelHardwareInfo hw_info;
@@ -608,6 +648,15 @@ void cutlass_w4a8_group_gemm_caller(
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_a.data_ptr());
     arguments.mainloop.ptr_B_prebuilt_tma_descs =
         static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_b.data_ptr());
+    if constexpr (Gemm::HasActivationBlockScale) {
+      arguments.mainloop.ptr_ActivationScale =
+          reinterpret_cast<float const**>(prescale_as_ptrs.data_ptr());
+      arguments.mainloop.dActivationScale =
+          static_cast<typename Gemm::CollectiveMainloopScaleOnly::StrideActivationScale*>(
+              prescale_as_strides.data_ptr());
+      arguments.mainloop.ptr_ActivationScale_prebuilt_tma_descs =
+          static_cast<cute::TmaDescriptor const*>(swg_work_map.prebuilt_tma_desc_activation_scale.data_ptr());
+    }
   }
 
   // MXFP4A8: feed the activation block-scale into the mainloop's optional path.

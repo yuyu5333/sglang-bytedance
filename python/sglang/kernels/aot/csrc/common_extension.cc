@@ -245,6 +245,21 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("cutlass_mxfp4a8_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_moe_mm);
 
   m.def(
+      "cutlass_mxfp4a8_fused_moe_mm(Tensor! d, Tensor a, Tensor b, "
+      "Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
+      "Tensor problem_sizes, Tensor a_strides, Tensor b_strides, "
+      "Tensor d_strides, Tensor s_strides, int topk, int swg_config, "
+      "Tensor? expert_ids=None) -> ()");
+  m.impl("cutlass_mxfp4a8_fused_moe_mm", torch::kCUDA, &cutlass_mxfp4a8_fused_moe_mm);
+
+  m.def(
+      "cutlass_mxfp4a8_gemm1_blockscale(Tensor! output, Tensor activation, "
+      "Tensor weight, Tensor row_factors, Tensor weight_offset, Tensor expert_offsets, "
+      "Tensor problem_sizes, Tensor a_strides, Tensor b_strides, Tensor d_strides, "
+      "Tensor s_strides, Tensor activation_scales, int config=101) -> ()");
+  m.impl("cutlass_mxfp4a8_gemm1_blockscale", torch::kCUDA, &cutlass_mxfp4a8_gemm1_blockscale_sm90);
+
+  m.def(
       "cutlass_mxfp4a8_fused_moe_core("
       "Tensor! c1, Tensor! c2, Tensor input, Tensor topk_ids, "
       "Tensor! a_map, Tensor! c_map, Tensor! gateup_input_bf16, Tensor! gateup_input, "

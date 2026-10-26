@@ -46,10 +46,9 @@ class Mxfp4CutlassMoEMethod:
     Wraps the FP8 fp4-expert method the same way ``Mxfp4MarlinMoEMethod`` does:
     it consumes the standard fp4-expert checkpoint layout (int8 packed E2M1
     weights ``[E, 2*I, K//2]`` / ``[E, K, I//2]`` in native ``[gate; up]`` order,
-    plus block=32 group scales), then at load time passes the packed nibbles
-    through unchanged (the HF-natural byte layout is exactly what the kernel's
-    per-nibble decode expects; see ``repack_hf_mxfp4_to_kernel``) and expands the
-    group scale to bf16, and finally dispatches to ``cutlass_mxfp4a8_moe``.
+    plus block=32 group scales), then at load time rewrites payloads into the
+    fused SM90 layout and folds weight exponents and expert residuals. EP1
+    quantizes activations per token; DeepEP consumes FP8 dispatch group scales.
 
     The int4a8 path is untouched; this is a parallel format.
     """
@@ -82,9 +81,6 @@ class Mxfp4CutlassMoEMethod:
             FusedMoeWeightScaleSupported,
         )
 
-        if layer.moe_ep_size != 1:
-            raise ValueError("CUTLASS MXFP4 fused MoE currently requires --ep-size 1.")
-
         fp4_block_k = 32
         # Load the native shard first; pad gate/up halves independently after
         # loading so TP slicing still uses the checkpoint's intermediate size.
@@ -94,7 +90,6 @@ class Mxfp4CutlassMoEMethod:
             )
         self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size_per_partition
-        self._use_legacy = layer.moe_ep_size > 1
 
         # Packed E2M1 weights: two 4-bit codes per int8 byte.
         w13_weight = torch.nn.Parameter(
@@ -121,7 +116,6 @@ class Mxfp4CutlassMoEMethod:
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # Keep checkpoint scales in native E8M0, as the FlashInfer loader does.
-        # The legacy path expands them to BF16 only after loading.
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
@@ -187,21 +181,7 @@ class Mxfp4CutlassMoEMethod:
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        """Convert the fp4-expert checkpoint weights into the sglang CUTLASS
-        w4a8 MXFP4A8 kernel layout (reusing the int4a8 DirectConvert mainloop).
-
-        1. E2M1 weights: pass the HF-packed nibbles through unchanged (viewed as
-           int8). The HF-natural byte layout is exactly what the kernel's
-           per-nibble decode expects; see ``repack_hf_mxfp4_to_kernel``. Applying
-           the int4a8 ``order_map`` reorder here was verified to produce garbage
-           (rel_mean ~= 1.2), so no reorder is done.
-        2. Group scales: normalize to the numerical 2**e value in bf16 (reusing
-           marlin's ``_normalize_scale_tensor`` to stay agnostic of the loader's
-           placeholder dtype), then 4-wide ``interleave_scales`` for the post-MMA
-           bf16 group-scale path.
-        The checkpoint's native ``[gate; up]`` order already matches the kernel,
-        so no de-interleave is needed.
-        """
+        """Pad native gate/up halves and prepare one fused layout for EP1/EP."""
         source_versions = (
             layer.w13_weight._version,
             layer.w2_weight._version,
@@ -211,14 +191,9 @@ class Mxfp4CutlassMoEMethod:
         if getattr(layer, "_cutlass_mxfp4_source_versions", None) == source_versions:
             return
 
-        from sglang.srt.layers.mxfp4a8_utils import repack_hf_mxfp4_to_kernel
-        from sglang.srt.layers.quantization.marlin_utils_fp4 import (
-            _normalize_scale_tensor,
-        )
         from sglang.srt.layers.quantization.mxfp4_padding import (
             pad_mxfp4_moe_intermediate,
         )
-        from sglang.srt.layers.quantization.w4afp8 import interleave_scales
 
         padded = pad_mxfp4_moe_intermediate(
             layer.w13_weight.data,
@@ -248,63 +223,33 @@ class Mxfp4CutlassMoEMethod:
                 return scale.view(torch.uint8).contiguous()
             return scale.to(torch.float8_e8m0fnu).view(torch.uint8).contiguous()
 
-        # EP1 stores only the fused layout. Keeping both full weight layouts
-        # exceeds H20 memory for V4.1 TP8 after intermediate padding.
-        if not self._use_legacy:
-            log_info_on_rank0(
-                logger,
-                f"Preparing DSv4 MXFP4 experts for CUTLASS SM90 W4A8 fused EP1 "
-                f"(intermediate={self.intermediate_size_per_partition}, "
-                f"padded={layer.w2_weight.shape[-1] * 2}, layer={self.prefix})...",
-            )
-            for stem in ("w13", "w2"):
-                weight, offset, residual = _preprocess_fused_weights(
-                    getattr(layer, f"{stem}_weight").data.view(torch.uint8),
-                    _raw_e8m0_bytes(getattr(layer, f"{stem}_weight_scale_inv").data),
-                )
-                fused_weight = Parameter(
-                    weight.view(torch.int8).contiguous(), requires_grad=False
-                )
-                fused_scale = Parameter(offset.contiguous(), requires_grad=False)
-                setattr(layer, f"{stem}_weight", fused_weight)
-                setattr(layer, f"{stem}_weight_fused", fused_weight)
-                setattr(layer, f"{stem}_weight_scale_inv", fused_scale)
-                setattr(layer, f"{stem}_weight_scale_fused", fused_scale)
-                setattr(
-                    layer,
-                    f"{stem}_weight_residual_fused",
-                    Parameter((residual * 64.0).contiguous(), requires_grad=False),
-                )
-            layer._dsv4_mxfp4_backend = "cutlass"
-            layer._cutlass_mxfp4_source_versions = (
-                layer.w13_weight._version,
-                layer.w2_weight._version,
-                layer.w13_weight_scale_inv._version,
-                layer.w2_weight_scale_inv._version,
-            )
-            return
-
-        # Preserve the legacy layout for EP fallback.
-        # --- weights: HF-natural nibble packing passed through as int8 ---
-        w13 = repack_hf_mxfp4_to_kernel(layer.w13_weight.data).contiguous()
-        w2 = repack_hf_mxfp4_to_kernel(layer.w2_weight.data).contiguous()
-        layer.w13_weight = Parameter(w13, requires_grad=False)
-        layer.w2_weight = Parameter(w2, requires_grad=False)
-
-        # --- scales: -> numerical 2**e in bf16, then 4-wide interleave ---
-        # 4-wide matches the mxfp4 kernel PackedScalesNum = TileK(128)/GroupSize(32).
-        w13_scale = _normalize_scale_tensor(
-            layer.w13_weight_scale_inv.data, torch.bfloat16
+        # Store only the fused layout for both EP1 and DeepEP. Two full layouts
+        # exceed H20 memory for V4.1 TP8 after intermediate padding.
+        log_info_on_rank0(
+            logger,
+            f"Preparing DSv4 MXFP4 experts for CUTLASS SM90 W4A8 fused "
+            f"EP{layer.moe_ep_size} "
+            f"(intermediate={self.intermediate_size_per_partition}, "
+            f"padded={layer.w2_weight.shape[-1] * 2}, layer={self.prefix})...",
         )
-        w13_scale = interleave_scales(w13_scale.contiguous(), group=4)
-        layer.w13_weight_scale = Parameter(w13_scale, requires_grad=False)
-
-        w2_scale = _normalize_scale_tensor(
-            layer.w2_weight_scale_inv.data, torch.bfloat16
-        )
-        w2_scale = interleave_scales(w2_scale.contiguous(), group=4)
-        layer.w2_weight_scale = Parameter(w2_scale, requires_grad=False)
-
+        for stem in ("w13", "w2"):
+            weight, offset, residual = _preprocess_fused_weights(
+                getattr(layer, f"{stem}_weight").data.view(torch.uint8),
+                _raw_e8m0_bytes(getattr(layer, f"{stem}_weight_scale_inv").data),
+            )
+            fused_weight = Parameter(
+                weight.view(torch.int8).contiguous(), requires_grad=False
+            )
+            fused_scale = Parameter(offset.contiguous(), requires_grad=False)
+            setattr(layer, f"{stem}_weight", fused_weight)
+            setattr(layer, f"{stem}_weight_fused", fused_weight)
+            setattr(layer, f"{stem}_weight_scale_inv", fused_scale)
+            setattr(layer, f"{stem}_weight_scale_fused", fused_scale)
+            setattr(
+                layer,
+                f"{stem}_weight_residual_fused",
+                Parameter((residual * 64.0).contiguous(), requires_grad=False),
+            )
         layer._dsv4_mxfp4_backend = "cutlass"
         layer._cutlass_mxfp4_source_versions = (
             layer.w13_weight._version,
@@ -312,12 +257,31 @@ class Mxfp4CutlassMoEMethod:
             layer.w13_weight_scale_inv._version,
             layer.w2_weight_scale_inv._version,
         )
+        if layer.moe_ep_size > 1 and hasattr(layer, "dispatcher"):
+            layer.dispatcher.set_quant_config(
+                {"dispatcher_output_dtype": "fp8", "cutlass_mxfp4": True}
+            )
 
     def apply(
         self,
         layer: Module,
         dispatch_output: DispatchOutput,
     ) -> CombineInput:
+        from sglang.srt.layers.moe.token_dispatcher.base import DispatchOutputFormat
+
+        if dispatch_output.format in (
+            DispatchOutputFormat.DEEPEP_NORMAL,
+            DispatchOutputFormat.DEEPEP_LL,
+        ):
+            from sglang.srt.layers.moe.cutlass_mxfp4a8_ep_moe import (
+                cutlass_mxfp4a8_ep_moe,
+            )
+
+            return cutlass_mxfp4a8_ep_moe(layer, dispatch_output, self)
+
+        if layer.moe_ep_size > 1:
+            raise ValueError("CUTLASS MXFP4 EP>1 requires --moe-a2a-backend deepep.")
+
         from sglang.srt.layers.moe.cutlass_mxfp4a8_fused_moe import (
             cutlass_mxfp4a8_fused_moe,
         )
@@ -330,10 +294,10 @@ class Mxfp4CutlassMoEMethod:
 
         output = cutlass_mxfp4a8_fused_moe(
             x,
-            layer.w13_weight if self._use_legacy else None,
-            layer.w2_weight if self._use_legacy else None,
-            layer.w13_weight_scale if self._use_legacy else None,
-            layer.w2_weight_scale if self._use_legacy else None,
+            None,
+            None,
+            None,
+            None,
             getattr(layer, "w13_weight_fused", None),
             getattr(layer, "w2_weight_fused", None),
             getattr(layer, "w13_weight_scale_fused", None),

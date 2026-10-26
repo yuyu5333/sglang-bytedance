@@ -26,6 +26,7 @@ else:
     from sgl_kernel.attention import merge_state_v2
     from sgl_kernel.cutlass_moe import (
         compact_cutlass_w4a8_moe_mm_data,
+        cutlass_mxfp4a8_gemm1_blockscale,
         cutlass_mxfp4a8_moe_mm,
         cutlass_w4a8_moe_mm,
         get_cutlass_w4a8_moe_mm_data,

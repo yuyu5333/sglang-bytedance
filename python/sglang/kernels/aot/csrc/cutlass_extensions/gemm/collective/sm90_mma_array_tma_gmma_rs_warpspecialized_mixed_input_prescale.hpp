@@ -216,7 +216,8 @@ struct CollectiveMmaArrayMixedInput<
 
   static constexpr int NumProducerThreadEvents = 1;
 
-  static constexpr int RawActScaleChunksPerTileK = size<2>(TileShape{}) / ScalingGroupSize;
+  static constexpr int ActivationScalingGroupSize = 128;
+  static constexpr int RawActScaleChunksPerTileK = size<2>(TileShape{}) / ActivationScalingGroupSize;
   // Keep the derived value nonzero so the modulo static_assert below remains
   // well-formed; RawActScaleChunksPerTileK carries the actual validity check.
   static constexpr int ActScaleChunksPerTileK =
@@ -370,6 +371,7 @@ struct CollectiveMmaArrayMixedInput<
 
   int current_group_idx_ = 0;
   cute::TmaDescriptor const* current_tma_desc_b_ = nullptr;
+  cute::TmaDescriptor const* current_tma_desc_activation_scale_ = nullptr;
 
  public:
   static constexpr ConversionMode KernelConversionMode = get_conversion_mode();
@@ -378,10 +380,8 @@ struct CollectiveMmaArrayMixedInput<
   static constexpr bool ModeHasScales = KernelConversionMode == ConversionMode::ConvertAndScale ||
                                         KernelConversionMode == ConversionMode::ConvertAndScaleWithZero;
   static constexpr bool FusedE8M0PreMmaScale = true;
-  static_assert(
-      !HasActivationScale,
-      "The prescale collective expects activation scale, if any, to be handled outside "
-      "the mainloop.");
+  static_assert(!HasActivationScale || cute::is_same_v<ScaleB, float>,
+                "FP8 dispatch activation block scales must be decoded FP32.");
   static constexpr bool UseScaleLookupTable = false;
   static constexpr bool UseFP4ToBF16LookupTable = KernelConversionMode == ConversionMode::ConvertAndScale &&
                                                   cute::is_same_v<ElementA, cutlass::float_e2m1_t> &&
@@ -405,16 +405,17 @@ struct CollectiveMmaArrayMixedInput<
   struct SharedStorage {
     static constexpr int scale_elements = cute::cosize_v<SmemLayoutWeightScaleRaw>;
     static constexpr int zero_elements = 0;
-    static constexpr int activation_scale_elements = 0;
+    static constexpr int activation_scale_elements =
+        HasActivationScale ? cute::cosize_v<SmemLayoutActivationScale> : 0;
     struct TensorStorage {
       CUTE_ALIGNAS(SmemAlignmentA)
       cute::ArrayEngine<RealSwappedElementA, cute::cosize_v<SmemLayoutA>> smem_A;
       CUTE_ALIGNAS(SmemAlignmentB)
       cute::ArrayEngine<typename TiledMma::ValTypeB, cute::cosize_v<SmemLayoutB>> smem_B;
-      // Keep the member layout aligned with mixed_input.hpp for online collective
-      // switching.  Prescale only stages weight e8m0 scale; zero and activation
-      // scale storage are intentionally empty.
+      // Folded weight E8M0 offsets and optional FP32 activation block scales
+      // use independent storage. Zero-point storage remains empty.
       cute::ArrayEngine<WeightScaleRawElement, scale_elements> smem_scale;
+      CUTE_ALIGNAS(16)
       cute::ArrayEngine<NonVoidElementActivationScale, activation_scale_elements> smem_activation_scale;
       cute::ArrayEngine<NonVoidElementZero, zero_elements> smem_zero;
     } tensors;
@@ -454,6 +455,9 @@ struct CollectiveMmaArrayMixedInput<
 
   // Device side kernel params
   struct Params {
+    static constexpr bool HasActivationBlockScale = HasActivationScale;
+    static constexpr int ActivationGroupSize = ActivationScalingGroupSize;
+    static constexpr int ActivationScaleWindow = ActScaleTmaChunks;
     // For grouped GEMM with non-layout stride: replace static-zero L stride (_0) with
     // a static non-zero value so the TMA descriptor includes the L dimension at creation.
     // Int<32> is the minimum static value that after subbyte upcast<2> (FP4→uint8_t)
@@ -616,6 +620,15 @@ struct CollectiveMmaArrayMixedInput<
         make_shape(shape<1>(TileShape{}), shape<2>(TileShape{})),
         size<0>(ClusterShape{}));  // mcast along M mode for this N load, if any
     typename Params::TMA_ActivationScale tma_load_activation_scale{};
+    if constexpr (HasActivationScale) {
+      auto tensor_as = make_tensor(
+          reinterpret_cast<NonVoidElementActivationScale const*>(args.ptr_ActivationScale),
+          make_layout(make_shape(1, ActScaleTmaChunks, 1),
+                      make_stride(int64_t(ActScaleTmaChunks), _1{}, int64_t(0))));
+      tma_load_activation_scale = make_tma_copy(
+          SM90_TMA_LOAD{}, tensor_as, SmemLayoutActivationScale{}(_, _, Int<0>{}),
+          make_shape(shape<1>(TileShape{}), Int<ActScaleTmaChunks>{}), Int<1>{});
+    }
 
     int num_groups_val = 1;
     if constexpr (IsGroupedGemmKernel) {
@@ -691,6 +704,11 @@ struct CollectiveMmaArrayMixedInput<
     constexpr int min_tma_aligned_elements_B = tma_alignment_bits / cutlass::sizeof_bits<ElementB>::value;
 
     bool implementable = true;
+    if constexpr (HasActivationScale) {
+      implementable = implementable && args.ptr_ActivationScale != nullptr &&
+                      args.dActivationScale != nullptr &&
+                      args.ptr_ActivationScale_prebuilt_tma_descs != nullptr;
+    }
     if constexpr (IsGroupedGemmKernel) {
       implementable = implementable && (args.ptr_A_prebuilt_tma_desc != nullptr);
       implementable = implementable && (args.ptr_B_prebuilt_tma_descs != nullptr);
@@ -718,7 +736,9 @@ struct CollectiveMmaArrayMixedInput<
         }
         implementable = implementable && (args.ptr_S != nullptr);
         implementable = implementable && (args.ptr_Z == nullptr);
-        implementable = implementable && (args.ptr_ActivationScale == nullptr);
+        if constexpr (!HasActivationScale) {
+          implementable = implementable && (args.ptr_ActivationScale == nullptr);
+        }
       }
     }
 
@@ -736,7 +756,8 @@ struct CollectiveMmaArrayMixedInput<
   static constexpr uint32_t TmaTransactionBytesNK = Utils::compute_tma_transaction_bytes_nk();
   static constexpr uint32_t TmaTransactionBytesExtra = Utils::compute_tma_transaction_bytes_extra();
   static constexpr uint32_t TmaTransactionBytes =
-      TmaTransactionBytesMK + TmaTransactionBytesNK + TmaTransactionBytesExtra;
+      TmaTransactionBytesMK + TmaTransactionBytesNK + TmaTransactionBytesExtra +
+      (HasActivationScale ? ScaleNRawElementsPerStage * sizeof(NonVoidElementActivationScale) : 0);
 
   // Set up the data needed by this collective for load and mma.
   // Returns a tuple of tensors. The collective and the kernel layer have the contract that the
@@ -767,7 +788,15 @@ struct CollectiveMmaArrayMixedInput<
     // Make tiled views, defer the slice
     Tensor gA_mkl = local_tile(mA_mkl, TileShape{}, make_coord(_, _, _), Step<_1, X, _1>{});  // (BLK_M,BLK_K,m,k,l)
     Tensor gB_nkl = local_tile(mB_nkl, TileShape{}, make_coord(_, _, _), Step<X, _1, _1>{});  // (BLK_N,BLK_K,n,k,l)
-    return cute::make_tuple(gA_mkl, gB_nkl, scale_total_k128_blocks);
+    if constexpr (HasActivationScale) {
+      int const padded_groups =
+          (int(K) / ActivationScalingGroupSize + ActScaleTmaChunks - 1) / ActScaleTmaChunks * ActScaleTmaChunks;
+      auto mAS = mainloop_params.tma_load_activation_scale.get_tma_tensor(make_shape(N, padded_groups, 1));
+      auto gAS = local_tile(mAS, make_shape(shape<1>(TileShape{}), Int<ActScaleTmaChunks>{}), make_coord(_, _, 0));
+      return cute::make_tuple(gA_mkl, gB_nkl, scale_total_k128_blocks, gAS);
+    } else {
+      return cute::make_tuple(gA_mkl, gB_nkl, scale_total_k128_blocks);
+    }
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -786,7 +815,7 @@ struct CollectiveMmaArrayMixedInput<
       int thread_idx,
       uint32_t block_rank_in_cluster,
       TensorStorage& shared_tensors) {
-    static_assert(sizeof...(Ts) == 3, "Fused pre-MMA scale needs three inputs (gA, gB, total_k128_blocks)");
+    static_assert(sizeof...(Ts) == (HasActivationScale ? 4 : 3));
     static_assert(sizeof...(TMs) == 2, "Only A and B tensormaps needed");
 
     Tensor sA_ = make_tensor(make_smem_ptr(shared_tensors.smem_A.begin()), SmemLayoutA{});  // (BLK_M,BLK_K,PIPE)
@@ -869,6 +898,19 @@ struct CollectiveMmaArrayMixedInput<
             mainloop_params.tma_load_b.with(current_tma_desc_b_, *tma_barrier, mcast_mask_b),
             tBgB(_, _, _, *k_tile_iter),
             tBsB(_, _, _, write_stage));
+        if constexpr (HasActivationScale) {
+          auto sAS = make_tensor(make_smem_ptr(shared_tensors.smem_activation_scale.begin()),
+                                 SmemLayoutActivationScale{});
+          auto gAS = get<3>(load_inputs)(_, _, n_coord, _);
+          auto copy_as = mainloop_params.tma_load_activation_scale.get_slice(Int<0>{});
+          auto tASg = copy_as.partition_S(gAS);
+          auto tASs = copy_as.partition_D(sAS);
+          constexpr int tiles_per_window = ActScaleTmaChunks / ActScaleChunksPerTileK;
+          int const window = int(*k_tile_iter) / tiles_per_window;
+          copy(mainloop_params.tma_load_activation_scale.with(
+                   mainloop_params.ptr_ActivationScale_prebuilt_tma_descs + current_group_idx_, *tma_barrier),
+               tASg(_, _, _, window), tASs(_, _, _, write_stage));
+        }
       }
 
       int const scale_k128_offset = int(*k_tile_iter) * WeightScaleKBlocksPerTile;
@@ -1122,6 +1164,58 @@ struct CollectiveMmaArrayMixedInput<
             tCrA_load_4b_packed, tCrA_mma_slot, k_block_c, Int<ScalePairCount>{}, lo_exp_offsets, hi_exp_offsets);
       }
     };
+    if constexpr (HasActivationScale) {
+      constexpr int MmaK = decltype(cute::size<2>(TileShape{}))::value / K_BLOCK_MAX;
+      static_assert(ActivationScalingGroupSize % MmaK == 0);
+      constexpr int MmasPerScale = ActivationScalingGroupSize / MmaK;
+      constexpr int GroupsPerTile = decltype(cute::size<2>(TileShape{}))::value / ActivationScalingGroupSize;
+      auto partial = make_fragment_like<ElementAccumulator>(accum);
+      auto coords = mma_thread_slice.partition_C(
+          make_identity_tensor(make_shape(shape<0>(TileShape{}), shape<1>(TileShape{}))));
+      auto sAS = make_tensor(make_smem_ptr(shared_tensors.smem_activation_scale.begin()),
+                             SmemLayoutActivationScale{});
+      clear(accum);
+      for (int tile = 0; tile < k_tile_count; ++tile) {
+        pipeline.consumer_wait(smem_pipe_read);
+        int const stage = smem_pipe_read.index();
+        constexpr int TilesPerWindow = ActScaleTmaChunks / ActScaleChunksPerTileK;
+        int const scale_base = (tile % TilesPerWindow) * GroupsPerTile;
+        cute::for_each(cute::make_seq<GroupsPerTile>{}, [&](auto group_c) {
+          constexpr int group = decltype(group_c)::value;
+          clear(partial);
+          warpgroup_fence_operand(partial);
+          tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
+          cute::for_each(cute::make_seq<MmasPerScale>{}, [&](auto i) {
+            constexpr int kb = group * MmasPerScale + decltype(i)::value;
+            Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, kb, stage);
+            copy_scale_for_mma(Int<kb>{}, stage);
+            convert_A_kblock_static(Int<kb>{}, stage);
+            warpgroup_arrive();
+            cute::gemm(tiled_mma, tCrA_mma(_, _, Int<kb>{}), tCrB(_, _, Int<kb>{}, stage), partial);
+            tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+          });
+          warpgroup_commit_batch();
+          // Scalar code cannot read a WGMMA accumulator until all its writes retire.
+          warpgroup_wait<0>();
+          warpgroup_fence_operand(partial);
+          CUTLASS_PRAGMA_UNROLL
+          for (int j = 0; j < cute::size(accum); ++j) {
+            int const token = int(get<1>(coords(j)));
+            accum(j) += partial(j) * float(sAS(token, scale_base + group, stage));
+          }
+          // Fence scalar accumulator accesses before the next WGMMA writes.
+          warpgroup_fence_operand(partial);
+        });
+        ++smem_pipe_read;
+        if (tile + 1 < k_tile_count) {
+          pipeline.consumer_release(smem_pipe_release);
+          ++smem_pipe_release;
+          released_stage_producer();
+        }
+      }
+      // mma_tail releases the final stage, matching the existing pipeline contract.
+      return;
+    }
     auto commit_mma_group = [&] {
       warpgroup_commit_batch();
       // A operand slots are reused by the next K tile.  Commit four adjacent K
@@ -1321,6 +1415,9 @@ struct CollectiveMmaArrayMixedInput<
   CUTLASS_DEVICE void tensormaps_fence_acquire(cute::tuple<TMs...> const& input_tensormaps) {
     cute::tma_descriptor_fence_acquire(get<0>(input_tensormaps));
     cute::tma_descriptor_fence_acquire(current_tma_desc_b_);
+    if constexpr (HasActivationScale) {
+      cute::tma_descriptor_fence_acquire(current_tma_desc_activation_scale_);
+    }
   }
 
   template <class InputTensors, class ProblemShape_MNKL>
@@ -1331,6 +1428,9 @@ struct CollectiveMmaArrayMixedInput<
       [[maybe_unused]] int32_t next_batch) {
     current_group_idx_ = next_batch;
     current_tma_desc_b_ = mainloop_params.ptr_B_prebuilt_tma_descs + next_batch;
+    if constexpr (HasActivationScale) {
+      current_tma_desc_activation_scale_ = mainloop_params.ptr_ActivationScale_prebuilt_tma_descs + next_batch;
+    }
     return input_tensors;
   }
 };
