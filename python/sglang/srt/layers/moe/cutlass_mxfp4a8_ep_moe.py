@@ -261,7 +261,7 @@ def _normal_reduce(
         route = token * TOPK + j
         expert = tl.load(ids + route)
         valid = (expert >= 0) & (expert < E)
-        row = tl.load(inverse + route).to(tl.int64)
+        row = tl.load(inverse + route, mask=valid, other=0).to(tl.int64)
         value = tl.load(c2 + row * H + cols, mask=valid & (cols < H), other=0).to(
             tl.float32
         )
@@ -350,7 +350,19 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 )
             assert s is not None and s.dtype == torch.float32
             assert tuple(s.shape) == (x.shape[0], groups)
-            rows = dispatch_output.topk_ids.numel()
+            route_slots = dispatch_output.topk_ids.numel()
+            rows = route_slots
+            expert_counts = dispatch_output.num_recv_tokens_per_expert
+            if (
+                len(expert_counts) == e
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                # Normal dispatch already returns these CPU counts. No device
+                # synchronization is needed to size the expert payload buffers.
+                # During graph capture reserve all slots so replay can change
+                # the route counts, including an initially all-invalid batch.
+                rows = sum(expert_counts)
+                assert 0 <= rows <= route_slots
             capacity = 0
             counts = method.expert_offsets  # unused in the normal specialization
             workers = 32
@@ -369,7 +381,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 h,
             )
             sorted_ids, order = torch.sort(ids.reshape(-1), stable=True)
-            inverse = self._empty("inverse", (rows,), torch.int32, device)
+            inverse = self._empty("inverse", (route_slots,), torch.int32, device)
             packed_x = self._empty("packed_x", (rows, h), torch.float8_e4m3fn, device)
             packed_s = self._empty(
                 "packed_s", (rows, padded_groups), torch.float32, device
@@ -404,6 +416,24 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
         )
         factors2 = self._empty("factors2", (rows,), torch.float32, device)
         if rows:
+            default_rows = rows if is_ll else route_slots
+            gemm1_config = gemm2_config = 100 if default_rows <= 64 else 101
+            if (
+                not is_ll
+                and layer.moe_ep_size == 4
+                and (e, h, intermediate, topk) == (96, 5120, 2304, 6)
+                and torch.cuda.get_device_capability(device) == (9, 0)
+            ):
+                # DeepEP routes are sparse: select by received tokens, not the
+                # TOPK-expanded allocation or a synchronizing GPU route count.
+                # K512 is exact for GEMM1 H5120; GEMM2 I2304 needs K256.
+                received_tokens = x.shape[0]
+                if received_tokens <= 128:
+                    gemm1_config = 100
+                elif received_tokens >= 4096:
+                    gemm1_config, gemm2_config = 320, 361
+                elif received_tokens >= 1024:
+                    gemm1_config, gemm2_config = 322, 360
             cutlass_mxfp4a8_gemm1_blockscale(
                 c1,
                 packed_x,
@@ -417,7 +447,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 method.c_strides1,
                 method.s_strides13,
                 packed_s,
-                config=100 if rows <= 64 else 101,
+                config=gemm1_config,
             )
             limit = method.moe_runner_config.swiglu_limit
             _swiglu_quant[(e, workers)](
@@ -437,7 +467,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 triton.next_power_of_2(intermediate),
                 num_warps=4,
             )
-            # K128 handles real DSv4 I2304 and independently padded TP shards.
+            # The K128 fallback also supports independently padded TP shards.
             torch.ops.sgl_kernel.cutlass_mxfp4a8_fused_moe_mm.default(
                 c2,
                 intermediate_q,
@@ -451,7 +481,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 method.c_strides2,
                 method.s_strides2,
                 topk,
-                100 if rows <= 64 else 101,
+                gemm2_config,
                 None,
             )
         if is_ll:

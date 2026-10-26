@@ -606,6 +606,18 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
         "K=256 fused MXFP4A8 candidate requires weight [E, N, 128], N divisible by 128");
   }
 
+  // Multi-tile K256 tactics cover EP experts such as DSv4 I=2304 without a
+  // partial K512 tile. Keep the original short-K experiment IDs unchanged.
+  if (swg_config >= 360 && swg_config <= 366) {
+    TORCH_CHECK(
+        a_tensors.dim() == 2 && a_tensors.size(1) > 0 && a_tensors.size(1) % 256 == 0,
+        "K256 EP tactic requires 2D activation with K divisible by 256");
+    TORCH_CHECK(
+        b_tensors.dim() == 3 && b_tensors.size(2) * 2 == a_tensors.size(1) &&
+            b_tensors.size(1) > 0 && b_tensors.size(1) % 128 == 0,
+        "K256 EP tactic requires matching packed weight [E, N, K/2], N divisible by 128");
+  }
+
   switch (swg_config) {
     case 100:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<8>));
@@ -633,27 +645,34 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
       return;
     // Template axes are [output channels, routed tokens, reduction K].
     // Cluster=1 avoids changing cluster work-map/multicast semantics.
+    case 360:
     case 350:  // Ntoken32, K256, global expert-major work map.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 32, 256, 1, 1, false>));
       return;
+    case 361:
     case 351:  // Ntoken64: primary M8192 candidate.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, false>));
       return;
+    case 362:
     case 352:  // Same tile as 351, change only work ownership/order.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 256, 1, 1, true>));
       return;
+    case 363:
     case 353:  // Same token/K tile as 351, halve output-channel tile.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 64, 256, 1, 1, false>));
       return;
+    case 364:
     case 354:  // FlashInfer-like tile, deliberately keep cluster=1.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<64, 128, 256, 1, 1, false>));
       return;
     case 355:  // Same output/token tile as 351, use two K128 iterations.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4<128, 64, 128, 1, 1, false>));
       return;
+    case 365:
     case 356:  // Existing SWG implementation, token tile 32 instead of 16.
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_SWG_MXFP4<32>));
       return;
+    case 366:
     case 358:
       INVOKE_GEMM_WITH_CONFIG_AS((SM90_PRECOMPUTED_MXFP4_K256_PACKED_GEMM2));
       return;
@@ -662,7 +681,7 @@ void dispatch_mxfp4a8_fused_moe_mm_sm90(
           false,
           "Unsupported fused MXFP4A8 config=",
           swg_config,
-          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 350-356, 358");
+          "; expected one of 100, 101, 204, 205, 313, 320, 322, 334, 350-356, 358, 360-366");
   }
 }
 
