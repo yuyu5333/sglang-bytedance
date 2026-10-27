@@ -41,6 +41,7 @@ template <
     int Stages,
     class ClusterShape,
     class KernelSchedule_,
+    bool PipelineActivationGroups,
     class TileShape_,
     class ElementAOptionalTuple,
     class StrideA_,
@@ -56,7 +57,8 @@ template <
     class SmemCopyAtomB_,
     class TransformB_>
 struct CollectiveMmaArrayMixedInput<
-    MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<Stages, ClusterShape, KernelSchedule_>,
+    MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+        Stages, ClusterShape, KernelSchedule_, PipelineActivationGroups>,
     TileShape_,
     ElementAOptionalTuple,
     StrideA_,
@@ -78,7 +80,8 @@ struct CollectiveMmaArrayMixedInput<
   // Type Aliases
   //
   using DispatchPolicy =
-      MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<Stages, ClusterShape, KernelSchedule_>;
+      MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+          Stages, ClusterShape, KernelSchedule_, PipelineActivationGroups>;
   using TileShape = TileShape_;
   using KernelSchedule = KernelSchedule_;
 
@@ -1180,7 +1183,57 @@ struct CollectiveMmaArrayMixedInput<
         int const stage = smem_pipe_read.index();
         constexpr int TilesPerWindow = ActScaleTmaChunks / ActScaleChunksPerTileK;
         int const scale_base = (tile % TilesPerWindow) * GroupsPerTile;
-        cute::for_each(cute::make_seq<GroupsPerTile>{}, [&](auto group_c) {
+        if constexpr (PipelineActivationGroups && GroupsPerTile > 1) {
+          auto partial_next = make_fragment_like<ElementAccumulator>(accum);
+          auto issue_group = [&](auto group_c, auto& target) {
+            constexpr int group = decltype(group_c)::value;
+            clear(target);
+            warpgroup_fence_operand(target);
+            tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
+            cute::for_each(cute::make_seq<MmasPerScale>{}, [&](auto i) {
+              constexpr int kb = group * MmasPerScale + decltype(i)::value;
+              Utils::copy_tensors_A(smem_tiled_copy_A_LDSM, tCsA_LDSM, tCrA_copy_view_LDSM, kb, stage);
+              copy_scale_for_mma(Int<kb>{}, stage);
+              convert_A_kblock_static(Int<kb>{}, stage);
+              warpgroup_arrive();
+              cute::gemm(tiled_mma, tCrA_mma(_, _, Int<kb>{}), tCrB(_, _, Int<kb>{}, stage), target);
+              tiled_mma.accumulate_ = GMMA::ScaleOut::One;
+            });
+            warpgroup_commit_batch();
+          };
+          auto apply_group_scale = [&](auto group_c, auto& target) {
+            constexpr int group = decltype(group_c)::value;
+            warpgroup_fence_operand(target);
+            CUTLASS_PRAGMA_UNROLL
+            for (int j = 0; j < cute::size(accum); ++j) {
+              int const token = int(get<1>(coords(j)));
+              accum(j) += target(j) * float(sAS(token, scale_base + group, stage));
+            }
+            warpgroup_fence_operand(target);
+          };
+          issue_group(Int<0>{}, partial);
+          cute::for_each(cute::make_seq<GroupsPerTile - 1>{}, [&](auto previous_c) {
+            constexpr int previous = decltype(previous_c)::value;
+            if constexpr (previous % 2 == 0) {
+              issue_group(Int<previous + 1>{}, partial_next);
+              // Two committed groups exist. Retire the older one before
+              // reading it; leave the newer independent fragment in flight.
+              warpgroup_wait<1>();
+              apply_group_scale(previous_c, partial);
+            } else {
+              issue_group(Int<previous + 1>{}, partial);
+              warpgroup_wait<1>();
+              apply_group_scale(previous_c, partial_next);
+            }
+          });
+          warpgroup_wait<0>();
+          if constexpr ((GroupsPerTile - 1) % 2 == 0) {
+            apply_group_scale(Int<GroupsPerTile - 1>{}, partial);
+          } else {
+            apply_group_scale(Int<GroupsPerTile - 1>{}, partial_next);
+          }
+        } else {
+          cute::for_each(cute::make_seq<GroupsPerTile>{}, [&](auto group_c) {
           constexpr int group = decltype(group_c)::value;
           clear(partial);
           warpgroup_fence_operand(partial);
@@ -1205,7 +1258,8 @@ struct CollectiveMmaArrayMixedInput<
           }
           // Fence scalar accumulator accesses before the next WGMMA writes.
           warpgroup_fence_operand(partial);
-        });
+          });
+        }
         ++smem_pipe_read;
         if (tile + 1 < k_tile_count) {
           pipeline.consumer_release(smem_pipe_release);

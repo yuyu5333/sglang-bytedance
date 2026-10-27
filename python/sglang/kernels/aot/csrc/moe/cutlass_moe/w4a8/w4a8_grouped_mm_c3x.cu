@@ -147,13 +147,15 @@ struct SM90_PRECOMPUTED_MXFP4_K256_PACKED_GEMM2 {
       false>;
 };
 
-template <int N, bool SingleWarpgroup, int TileK = 128, bool ChunkMajor = true>
+template <int N, bool SingleWarpgroup, int TileK = 128, bool ChunkMajor = true,
+          bool PipelineActivationGroups = false, int TileM = 128, int Stages = 0>
 struct SM90_MXFP4_GEMM1_BLOCKSCALE {
   using Cutlass3xW4A8Gemm = cutlass_3x_w4a8_group_gemm<
-      Shape<_128, Int<N>, Int<TileK>>, Shape<_1, _1, _1>,
+      Shape<Int<TileM>, Int<N>, Int<TileK>>, Shape<_1, _1, _1>,
       cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong,
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong,
-      cutlass::float_e2m1_t, 32, SingleWarpgroup, true, ChunkMajor, 0, false, true>;
+      cutlass::float_e2m1_t, 32, SingleWarpgroup, true, ChunkMajor, 0, false, true,
+      PipelineActivationGroups, Stages>;
 };
 
 template <typename Config>
@@ -840,11 +842,12 @@ void cutlass_mxfp4a8_gemm1_blockscale_sm90(
     TORCH_CHECK(tensor->device() == activation.device(), "All GEMM1 blockscale tensors must share a CUDA device");
   }
   TORCH_CHECK(config == 100 || config == 101 || config == 320 || config == 322 ||
-              (config >= 370 && config <= 373));
-  TORCH_CHECK((config != 320 && config != 322 && config != 370 && config != 371) ||
+              (config >= 370 && config <= 380));
+  TORCH_CHECK((config != 320 && config != 322 && config != 370 && config != 371 &&
+               !(config >= 374 && config <= 380 && config != 378)) ||
               activation.size(1) % 512 == 0,
               "K512 GEMM1 configs require K divisible by 512; use config 100/101 for K128 tails");
-  TORCH_CHECK((config != 372 && config != 373) || activation.size(1) % 256 == 0,
+  TORCH_CHECK((config != 372 && config != 373 && config != 378) || activation.size(1) % 256 == 0,
               "K256 GEMM1 configs require K divisible by 256; use config 100/101 for K128 tails");
   if (activation.size(0) == 0) return;
   auto launch = [&](auto tag) {
@@ -863,6 +866,13 @@ void cutlass_mxfp4a8_gemm1_blockscale_sm90(
     case 371: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 512, true>{}); return;
     case 372: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 256, false>{}); return;
     case 373: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<128, false, 256, false>{}); return;
+    case 374: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<32, false, 512, false, true>{}); return;
+    case 375: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 512, false, true>{}); return;
+    case 376: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 512, false, true, 64>{}); return;
+    case 377: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<128, false, 512, false, true, 64>{}); return;
+    case 378: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 256, false, true, 64>{}); return;
+    case 379: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<32, false, 512, false, true, 128, 2>{}); return;
+    case 380: launch(SM90_MXFP4_GEMM1_BLOCKSCALE<64, false, 512, false, false, 64>{}); return;
     default: TORCH_CHECK(false, "Unsupported MXFP4 GEMM1 blockscale config=", config);
   }
 }

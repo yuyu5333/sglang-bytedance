@@ -162,7 +162,8 @@ struct CollectiveBuilderMixedInput<
   using ElementA = detail::deduce_mixed_width_dtype_t<0, ElementA_>;
   using ElementB = detail::deduce_mixed_width_dtype_t<0, ElementB_>;
   static constexpr bool HasFusedActivationBlockScale =
-      ScaleMode == MixedInputScaleMode::kPreMmaE8M0 &&
+      (ScaleMode == MixedInputScaleMode::kPreMmaE8M0 ||
+       ScaleMode == MixedInputScaleMode::kPreMmaE8M0PipelinedActivation) &&
       cute::is_same_v<ElementA, cutlass::float_e2m1_t> &&
       cute::is_same_v<ElementB, cutlass::float_e4m3_t> &&
       cute::is_same_v<ScaleA, cutlass::float_ue8m0_t> &&
@@ -280,7 +281,9 @@ struct CollectiveBuilderMixedInput<
   static constexpr int KernelSmemCarveout = static_cast<int>(TensorMapStorage);
   static constexpr int Sm90ReducedSmemCapacityBytes = detail::sm90_smem_capacity_bytes - KernelSmemCarveout;
 
-  static constexpr bool UseFusedE8M0PreMmaScale = ScaleMode == MixedInputScaleMode::kPreMmaE8M0;
+  static constexpr bool UseFusedE8M0PreMmaScale =
+      ScaleMode == MixedInputScaleMode::kPreMmaE8M0 ||
+      ScaleMode == MixedInputScaleMode::kPreMmaE8M0PipelinedActivation;
 
   static constexpr int PipelineStages = [] {
     if constexpr (detail::stage_count_traits<StageCountType>::is_fixed) {
@@ -338,7 +341,9 @@ struct CollectiveBuilderMixedInput<
 
   using ArrayMixedInputDispatchPolicy = cute::conditional_t<
       UseFusedE8M0PreMmaScale,
-      MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+      MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale<
+          PipelineStages, ClusterShape_MNK, KernelScheduleType,
+          ScaleMode == MixedInputScaleMode::kPreMmaE8M0PipelinedActivation>,
       MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>>;
 
   using DispatchPolicy = cute::conditional_t<

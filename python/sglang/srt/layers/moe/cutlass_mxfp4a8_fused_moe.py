@@ -125,6 +125,12 @@ class CutlassMxfp4A8FusedMoeRunner:
         )
         tensor = workspace.get(key)
         if tensor is None or tensor.device != device or tensor.numel() < numel:
+            if workspace is self._workspace:
+                # Release the old eager scratch before growing it. Keeping it
+                # alive through torch.empty doubles the payload during growth.
+                # Graph workspaces retain their existing allocation behavior.
+                workspace.pop(key, None)
+                tensor = None
             tensor = torch.empty((numel,), dtype=dtype, device=device)
             workspace[key] = tensor
         return tensor[:numel].view(shape)

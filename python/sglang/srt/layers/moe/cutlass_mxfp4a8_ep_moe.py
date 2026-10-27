@@ -93,7 +93,7 @@ def preload_cutlass_mxfp4a8_normal_pack(
         # Zero valid routes skip all payload reads. Launch (rather than compile
         # only) to initialize CUDA module handles using the serving signature.
         # Batch size belongs only in the launch grid, never in the cache key.
-        _pack_normal[(1, triton.cdiv(hidden_size, 512))](
+        _pack_normal[(1, triton.cdiv(hidden_size, 2048))](
             x,
             scales,
             order,
@@ -111,7 +111,8 @@ def preload_cutlass_mxfp4a8_normal_pack(
             triton.next_power_of_2(padded_groups),
             topk,
             num_experts,
-            512,
+            2048,
+            num_warps=4,
         )
         torch.cuda.synchronize(device)
     _PACK_NORMAL_PRELOADED.add(key)
@@ -473,7 +474,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
             )
             factors = self._empty("factors1", (rows,), torch.float32, device)
             if rows:
-                _pack_normal[(rows, triton.cdiv(h, 512))](
+                _pack_normal[(rows, triton.cdiv(h, 2048))](
                     x,
                     s,
                     order,
@@ -491,11 +492,22 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                     triton.next_power_of_2(padded_groups),
                     topk,
                     e,
-                    512,
+                    2048,
+                    num_warps=4,
                 )
 
-        c1 = self._empty("ep_c1", (rows, 2 * intermediate), torch.bfloat16, device)
-        c2 = self._empty("ep_c2", (rows, h), torch.bfloat16, device)
+        if is_ll:
+            c1 = self._empty("ep_c1", (rows, 2 * intermediate), torch.bfloat16, device)
+            c2 = self._empty("ep_c2", (rows, h), torch.bfloat16, device)
+        else:
+            # SwiGLU stores the quantized activation separately before GEMM2.
+            # The same stream can then reuse GEMM1's output bytes for GEMM2.
+            gemm_scratch = self._empty(
+                "ep_gemm_scratch", (rows * max(2 * intermediate, h),),
+                torch.bfloat16, device,
+            )
+            c1 = gemm_scratch[: rows * 2 * intermediate].view(rows, 2 * intermediate)
+            c2 = gemm_scratch[: rows * h].view(rows, h)
         intermediate_q = self._empty(
             "ep_intermediate_q", (rows, intermediate), torch.float8_e4m3fn, device
         )
@@ -516,7 +528,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 if received_tokens <= 128:
                     gemm1_config = 100
                 elif received_tokens >= 16384:
-                    gemm1_config, gemm2_config = 370, 361
+                    gemm1_config, gemm2_config = 376, 361
                 elif received_tokens >= 4096:
                     gemm1_config, gemm2_config = 320, 361
                 elif received_tokens >= 1024:
@@ -601,7 +613,7 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
             )
         output = self._empty("ep_output", (x.shape[0], h), torch.bfloat16, device)
         if x.shape[0]:
-            _normal_reduce[(x.shape[0], triton.cdiv(h, 512))](
+            _normal_reduce[(x.shape[0], triton.cdiv(h, 1024))](
                 c2,
                 inverse,
                 ids,
@@ -610,7 +622,8 @@ class CutlassMxfp4A8EPMoeRunner(CutlassMxfp4A8FusedMoeRunner):
                 h,
                 topk,
                 e,
-                512,
+                1024,
+                num_warps=4,
             )
         return DeepEPNormalCombineInput(
             output,

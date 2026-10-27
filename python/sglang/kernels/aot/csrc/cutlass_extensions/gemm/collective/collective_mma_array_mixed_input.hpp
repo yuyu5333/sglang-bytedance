@@ -28,9 +28,11 @@ namespace cutlass::gemm {
 template <
     int Stages_,
     class ClusterShape_ = cute::Shape<cute::_1, cute::_1, cute::_1>,
-    class KernelSchedule = KernelPtrArrayTmaWarpSpecializedCooperative>
+    class KernelSchedule = KernelPtrArrayTmaWarpSpecializedCooperative,
+    bool PipelineActivationGroups_ = false>
 struct MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputPreScale {
   constexpr static int Stages = Stages_;
+  constexpr static bool PipelineActivationGroups = PipelineActivationGroups_;
   using ClusterShape = ClusterShape_;
   using ArchTag = arch::Sm90;
   using Schedule = KernelSchedule;
@@ -53,6 +55,7 @@ namespace cutlass::gemm::collective {
 enum class MixedInputScaleMode {
   kPostMma = 0,
   kPreMmaE8M0,
+  kPreMmaE8M0PipelinedActivation,
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

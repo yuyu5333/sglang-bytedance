@@ -251,7 +251,9 @@ template <
     bool ChunkMajorWorkMap = true,
     int ExpertRowPolicyValue = 0,
     bool FuseSwiGLUQuant = false,
-    bool EnableActivationBlockScale = false>
+    bool EnableActivationBlockScale = false,
+    bool PipelineActivationGroups = false,
+    int MainloopStages = 0>
 struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool UseSingleWarpgroupKernel = UseSingleWarpgroup;
   static constexpr bool UsePreMmaE8M0Scale = UsePreMmaE8M0;
@@ -264,6 +266,7 @@ struct cutlass_3x_w4a8_group_gemm {
   static constexpr bool FuseSwiGLUQuantEpilogue = FuseSwiGLUQuant;
   static constexpr bool HasActivationBlockScale = EnableActivationBlockScale;
   static_assert(!HasActivationBlockScale || UsePreMmaE8M0Scale);
+  static_assert(!PipelineActivationGroups || HasActivationBlockScale);
   static constexpr int GroupSize = GroupSizeK;
   static constexpr int PackedScalesNum = get<2>(TileShape{}) / GroupSize;
   using ElementScale = std::conditional_t<UsePreMmaE8M0Scale, cutlass::float_ue8m0_t, DefaultElementScale>;
@@ -314,13 +317,18 @@ struct cutlass_3x_w4a8_group_gemm {
       TileShape,
       ClusterShape,
       std::conditional_t<
-          UseSingleWarpgroupKernel,
-          cutlass::gemm::collective::StageCount<3>,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-              sizeof(typename CollectiveEpilogue::SharedStorage))>>,
+          (MainloopStages > 0),
+          cutlass::gemm::collective::StageCount<MainloopStages>,
+          std::conditional_t<
+              UseSingleWarpgroupKernel,
+              cutlass::gemm::collective::StageCount<3>,
+              cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+                  sizeof(typename CollectiveEpilogue::SharedStorage))>>>,
       KernelSchedule,
-      UsePreMmaE8M0Scale ? cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0
-                         : cutlass::gemm::collective::MixedInputScaleMode::kPostMma>::CollectiveOp;
+      PipelineActivationGroups
+          ? cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0PipelinedActivation
+          : (UsePreMmaE8M0Scale ? cutlass::gemm::collective::MixedInputScaleMode::kPreMmaE8M0
+                               : cutlass::gemm::collective::MixedInputScaleMode::kPostMma)>::CollectiveOp;
 
   // Expose the weight quant type so the caller can cast device pointers correctly.
   using ElementQuantB = QuantTypeB;
