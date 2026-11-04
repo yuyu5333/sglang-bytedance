@@ -3496,11 +3496,16 @@ class DeepseekV4AttnBackend(
         page_size = table.shape[1] // 68
         topk = indexer.index_topk
         publish = [] if indexer.is_candidate_source else None
-        consume = (
-            published_masks(self.forward_metadata.candidate_metadata).request_masks
-            if indexer.uses_candidates
-            else None
-        )
+        publish_widths = [] if publish is not None else None
+        candidate_block_size = indexer.candidate_block_size
+        candidates = self.forward_metadata.candidate_metadata
+        consume = None
+        if indexer.uses_candidates:
+            consume = (
+                candidates
+                if isinstance(candidates, CandidateMasks)
+                else published_masks(candidates)
+            )
         empty_mask = torch.zeros(0, 0, dtype=torch.bool, device=pos.device)
 
         row_base = 0
@@ -3509,6 +3514,7 @@ class DeepseekV4AttnBackend(
             if lc == 0 or q_len == 0:
                 if publish is not None:
                     publish.append(empty_mask)
+                    publish_widths.append(0)
                 row_base += q_len
                 continue
             compressed_positions = torch.arange(lc, device=pos.device) * ratio
@@ -3525,6 +3531,19 @@ class DeepseekV4AttnBackend(
             k = min(topk, lc)
             rows_per_chunk = max(1, _TORCH_INDEXER_SCORE_BUDGET_BYTES // (lc * 4))
             masks = [] if publish is not None else None
+            mask_width = ceil_align(lc, 4)
+            # Every position in a candidate block has the same mask value.
+            # Keep one byte per block and expand only a consumer's current rows.
+            num_candidate_blocks = (
+                mask_width + candidate_block_size - 1
+            ) // candidate_block_size
+            candidate_mask = (
+                torch.empty(
+                    (q_len, num_candidate_blocks), dtype=torch.bool, device=pos.device
+                )
+                if masks is not None
+                else None
+            )
             for start in range(0, q_len, rows_per_chunk):
                 stop = min(q_len, start + rows_per_chunk)
                 token_rows = slice(row_base + start, row_base + stop)
@@ -3537,16 +3556,19 @@ class DeepseekV4AttnBackend(
                     lens,
                 )
                 if masks is not None:
-                    masks.append(
+                    candidate_mask[local_rows].copy_(
                         select_candidate_blocks(
                             scores,
                             lens[:, None],
                             topk_blocks=indexer.candidate_topk_blocks,
                             block_size=indexer.candidate_block_size,
+                            return_blocks=True,
                         )
                     )
                 elif consume is not None:
-                    scores.masked_fill_(~consume[b][local_rows], -torch.inf)
+                    scores.masked_fill_(
+                        ~consume.request_mask(b, local_rows), -torch.inf
+                    )
                 selected = torch.empty(
                     (scores.shape[0], k), dtype=torch.int32, device=scores.device
                 )
@@ -3570,14 +3592,20 @@ class DeepseekV4AttnBackend(
                     raw_indices[token_rows, :k] = torch.where(reach, selected, -1).to(
                         torch.int32
                     )
+                # The next scoring call allocates its output before assigning
+                # it to scores; release this chunk to avoid two live score tiles.
+                del scores, selected, reach
             if masks is not None:
-                publish.append(torch.cat(masks) if len(masks) > 1 else masks[0])
+                publish.append(candidate_mask)
+                publish_widths.append(mask_width)
             row_base += q_len
 
         assert row_base == q.shape[0]
         if publish is not None:
             self.forward_metadata.candidate_metadata = CandidateMasks(
-                request_masks=publish
+                request_masks=publish,
+                request_block_size=candidate_block_size,
+                request_widths=publish_widths,
             )
 
     def _low_ratio_index_topk_sm90_decode(

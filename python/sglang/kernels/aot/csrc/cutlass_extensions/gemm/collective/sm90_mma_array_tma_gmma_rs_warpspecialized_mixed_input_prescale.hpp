@@ -1201,19 +1201,42 @@ struct CollectiveMmaArrayMixedInput<
             });
             warpgroup_commit_batch();
           };
+          // Overlap the next group's WGMMA issue with scalar scale loads.
+          // Only tactic 376 changes; target accumulators are still read after
+          // the existing wait, and group accumulation order is unchanged.
+          constexpr bool PrefetchActivationGroupScale =
+              size<0>(TileShape{}) == 64 && size<1>(TileShape{}) == 64 &&
+              size<2>(TileShape{}) == 512;
+          auto group_scale_rf = make_fragment_like<float>(accum);
+          auto prefetch_group_scale = [&](auto group_c) {
+            if constexpr (PrefetchActivationGroupScale) {
+              constexpr int group = decltype(group_c)::value;
+              CUTLASS_PRAGMA_UNROLL
+              for (int j = 0; j < cute::size(accum); ++j) {
+                int const token = int(get<1>(coords(j)));
+                group_scale_rf(j) = float(sAS(token, scale_base + group, stage));
+              }
+              warpgroup_fence_operand(group_scale_rf);
+            }
+          };
           auto apply_group_scale = [&](auto group_c, auto& target) {
             constexpr int group = decltype(group_c)::value;
             warpgroup_fence_operand(target);
             CUTLASS_PRAGMA_UNROLL
             for (int j = 0; j < cute::size(accum); ++j) {
               int const token = int(get<1>(coords(j)));
-              accum(j) += target(j) * float(sAS(token, scale_base + group, stage));
+              if constexpr (PrefetchActivationGroupScale) {
+                accum(j) += target(j) * group_scale_rf(j);
+              } else {
+                accum(j) += target(j) * float(sAS(token, scale_base + group, stage));
+              }
             }
             warpgroup_fence_operand(target);
           };
           issue_group(Int<0>{}, partial);
           cute::for_each(cute::make_seq<GroupsPerTile - 1>{}, [&](auto previous_c) {
             constexpr int previous = decltype(previous_c)::value;
+            prefetch_group_scale(previous_c);
             if constexpr (previous % 2 == 0) {
               issue_group(Int<previous + 1>{}, partial_next);
               // Two committed groups exist. Retire the older one before
@@ -1226,6 +1249,7 @@ struct CollectiveMmaArrayMixedInput<
               apply_group_scale(previous_c, partial_next);
             }
           });
+          prefetch_group_scale(Int<GroupsPerTile - 1>{});
           warpgroup_wait<0>();
           if constexpr ((GroupsPerTile - 1) % 2 == 0) {
             apply_group_scale(Int<GroupsPerTile - 1>{}, partial);

@@ -511,6 +511,27 @@ def _apply_wo_a_bf16_matmul(
         from sglang.kernels.ops.attention.dsv4.sm90_wo_a import wo_a_bf16_sm90
 
         return wo_a_bf16_sm90(o, wo_a)
+    if (
+        fast_path
+        and _is_cuda
+        and is_prefill
+        and get_platform().is_sm90
+        and 8192 <= o.shape[0] <= 32768
+        and o.shape[1:] == (8, 4096)
+        and wo_a.shape == (8, 1024, 4096)
+        and o.dtype == wo_a.dtype == torch.bfloat16
+        and o.is_contiguous()
+        and wo_a.is_contiguous()
+    ):
+        result = torch.empty(
+            (o.shape[0], wo_a.shape[0], wo_a.shape[1]), dtype=o.dtype, device=o.device
+        )
+        # Write the token-major layout consumed by wo_b without the einsum copy.
+        with torch.no_grad():
+            torch.bmm(
+                o.transpose(0, 1), wo_a.transpose(1, 2), out=result.transpose(0, 1)
+            )
+        return result
     # the gfx950 routes, like the CUDA ones, are V4.1's (fast_path); DSv4 keeps the
     # aiter batched GEMM / einsum below
     hip_fast_path = fast_path and _is_hip and _is_gfx95_supported

@@ -51,6 +51,8 @@ def export_candidate_metadata(tensors: dict, candidate, compress_ratio) -> None:
             tensors["pp_candidate_mask"] = candidate.mask
         if candidate.request_masks is not None:
             tensors["pp_candidate_count"] = len(candidate.request_masks)
+            tensors["pp_candidate_mask_block_size"] = candidate.request_block_size
+            tensors["pp_candidate_mask_widths"] = candidate.request_widths
             for index, mask in enumerate(candidate.request_masks):
                 tensors[f"pp_candidate_{index}"] = mask
     elif isinstance(candidate, CandidateBlocks):
@@ -99,6 +101,8 @@ def restore_candidate_metadata(tensors: dict, metadata, forward_batch):
                 if count is not None
                 else None
             ),
+            request_block_size=tensors.get("pp_candidate_mask_block_size", 1),
+            request_widths=tensors.get("pp_candidate_mask_widths"),
         )
     if kind == "sm90_blocks":
         return CandidateBlocks(
